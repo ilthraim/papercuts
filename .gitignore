@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.vscode
+.uv_cache
+
+#Jasper stuff
+jgproject
+traces
+*_jgproject
+
+# Output folders get really big
+outputs/

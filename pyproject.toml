@@ -1,0 +1,17 @@
+[project]
+name = "papercuts"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyslang",
+    "z3>=0.2.0",
+    "z3-solver>=4.15.4.0",
+]
+
+[tool.uv]
+cache-dir = "./.uv_cache"
+
+[tool.uv.sources]
+pyslang = { git = "https://github.com/MikePopoloski/slang.git" }
