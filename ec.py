@@ -249,15 +249,13 @@ def generate_tcl_script(wrapper_name: str) -> str:
     exit 1
 }"""
 
-    #autoprove -all -dump_trace -dump_trace_type vcd -dump_trace_dir ../traces -silent
-
     return tcl_script
 
 #MARK: Jasper Runner
 async def run_jasper(run: pc_core.Run, print_output: bool = True):
     name = run.wrapper_fname.split("_wrapper")[0]
     process = await asyncio.create_subprocess_shell(
-        f"csh -c 'jg -no_gui -tcl {run.wrapper_fname}.tcl -proj ./{name}_jgproject'",
+        f"csh -c 'jg -no_gui -tcl {run.wrapper_fname}.tcl -proj ./{name}_jgproject'", # Replace with command for your specific setup
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT)
 

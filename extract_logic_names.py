@@ -61,9 +61,6 @@ class LogicDeclarationExtractor:
             obj: The current AST node being visited. Can be a Token or SyntaxNode.
                  We're specifically interested in VariableSymbol nodes.
         """
-
-        print(obj)
-
         # Check if this is a variable symbol (includes logic declarations)
         if isinstance(obj, pyslang.VariableSymbol):
             # Get the type of the variable

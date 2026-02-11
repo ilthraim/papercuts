@@ -1,5 +1,5 @@
 from sys import argv
-import pyslang
+from pyslang import pyslang
 from typing import Union
 
 
@@ -180,53 +180,30 @@ def main():
     compilation = driver.createCompilation()
     driver.reportCompilation(compilation, False)
 
-    pyslang.Compilation.getParseDiagnostics(compilation)
-    #print(pyslang.SyntaxPrinter.printFile(compilation.getSyntaxTrees()[0]))
-    print(compilation.isElaborated)
-    root = compilation.getRoot()
+    pyslang.Compilation.getParseDiagnostics
 
-    # curSym = root.topInstances[0].body
-    # newSym = None
-
-    # #evcx = pyslang.EvalContext(root)
-
-    # for item in curSym:
-    #     if type(item) == pyslang.GenerateBlockArraySymbol:
-    #         iitem = item.entries[0]
-    #         for subitem in iitem:
-    #             if type(subitem) == pyslang.ContinuousAssignSymbol:
-    #                 di = dir(subitem.assignment.left.value)
-    #                 for entry in di:
-    #                     print(entry, getattr(subitem.assignment.left.value, entry), type(getattr(subitem.assignment.left.value, entry)))
-                        #print(subitem.assignment.eval
-
-        # for item in newSym:
-        #     print(type(item), item)
-
-    pyslang.NamedValueExpression
-
-    printtree = True
-
-    if printtree:
-        print("Hello from llm-rtl-opt!")
-        print("\n" + "="*80)
-        print("Loading and parsing Verilog file...")
-        print("="*80 + "\n")
-
-        # Load the syntax tree
-        sw = pyslang.SyntaxTree.fromFiles(argv[1:])
-
-        # Get the root node
-        root = sw.root
-        #root = compilation.getRoot()
+    
 
 
-        print("AST Tree Structure:")
-        print("-" * 80)
-        print_ast_tree(root)
-        print("\n" + "="*80)
-        print("AST traversal complete!")
-        print("="*80)
+    print("Hello from llm-rtl-opt!")
+    print("\n" + "="*80)
+    print("Loading and parsing Verilog file...")
+    print("="*80 + "\n")
+
+    # Load the syntax tree
+    sw = pyslang.SyntaxTree.fromFiles(argv[1:])
+
+    # Get the root node
+    root = sw.root
+    #root = compilation.getRoot()
+
+
+    print("AST Tree Structure:")
+    print("-" * 80)
+    print_ast_tree(root)
+    print("\n" + "="*80)
+    print("AST traversal complete!")
+    print("="*80)
 
     #print(pyslang.SyntaxPrinter.printFile(sw))
 
