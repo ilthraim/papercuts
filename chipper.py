@@ -6,10 +6,9 @@ import pyslang
 from dataclasses import dataclass
 
 import pc_core
-import concretizer
 
 
-
+#unused
 def analyze_modules(comp: pyslang.Compilation) -> list[pc_core.Module]:
 
     trees = comp.getSyntaxTrees()
@@ -56,10 +55,10 @@ def collect_modules_cst(comp: pyslang.Compilation):
             raise Exception("Multiple modules in a single file not supported")
         modules[name_list[0]] = tree
         name_list.clear()
-
     return modules
 
-def eval_modules(comp: pyslang.Compilation):
+def eval_modules(comp: pyslang.Compilation) -> list[tuple[pyslang.SyntaxTree, str]]:
+    """Evaluates all expressions in the given compilation and returns a list of concretized syntax trees for each module."""
 
     cx = pyslang.ASTContext(comp.getRoot(), pyslang.LookupLocation.max)
     ecx = pyslang.EvalContext(cx)
@@ -114,6 +113,7 @@ def eval_modules(comp: pyslang.Compilation):
     mod_dict = collect_modules_ast(comp)
     tree_dict = collect_modules_cst(comp)
     for mod_name, mod_path in mod_dict.items():
+        print(type(mod_name))
         print(f"Module: {mod_name}, Path: {mod_path}")
         conc_trees.append((pyslang.rewrite(tree_dict[mod_path.name], pc_core.rewrite_wrapper(_apply_all_replacements, local_replacement_syntax_pairs[mod_name] + global_replacement_syntax_pairs)), mod_name))
 
@@ -218,7 +218,7 @@ def main():
     print()
     print()
     print()
-    print(len(conc_trees), "concretized trees:")
+    print(len(conc_trees), "concretized trees")
 
 
 if __name__ == "__main__":

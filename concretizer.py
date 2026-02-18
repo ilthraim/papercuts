@@ -1,10 +1,11 @@
 from typing import TYPE_CHECKING, Callable, Union
 import pyslang
+from pyslang import parsing, syntax, driver
 import re
 
 import pc_core
 
-def extract_params(tree: pyslang.SyntaxTree) -> dict:
+def extract_params(tree: syntax.SyntaxTree) -> dict:
 
     param_dict = {}
 
@@ -12,9 +13,9 @@ def extract_params(tree: pyslang.SyntaxTree) -> dict:
         pattern = r'[a-zA-Z_$][a-zA-Z0-9_$]*'
         return re.findall(pattern, expr)
 
-    def _param_decl_handler(obj: Union[pyslang.Token, pyslang.SyntaxNode], param_dict) -> None:
-        if isinstance(obj, pyslang.ParameterDeclarationSyntax):
-            decl: pyslang.DeclaratorSyntax
+    def _param_decl_handler(obj: Union[parsing.Token, syntax.SyntaxNode], param_dict) -> None:
+        if isinstance(obj, syntax.ParameterDeclarationSyntax):
+            decl: syntax.DeclaratorSyntax
             for decl in obj.declarators:
                 param_name = decl.name.valueText
                 try:
@@ -36,24 +37,24 @@ def extract_params(tree: pyslang.SyntaxTree) -> dict:
 
     return param_dict
 
-def concretize_params(tree: pyslang.SyntaxTree, param_dict: dict) -> pyslang.SyntaxTree:
-    def _param_concretizer(node: pyslang.SyntaxNode, rewriter: pyslang.SyntaxRewriter, param_dict: dict) -> None:
-        if isinstance(node, pyslang.IdentifierNameSyntax):
+def concretize_params(tree: syntax.SyntaxTree, param_dict: dict) -> syntax.SyntaxTree:
+    def _param_concretizer(node: syntax.SyntaxNode, rewriter: syntax.SyntaxRewriter, param_dict: dict) -> None:
+        if isinstance(node, syntax.IdentifierNameSyntax):
             if node.identifier.valueText in param_dict:
                 value = param_dict[node.identifier.valueText]
                 print(f"Concretizing parameter {node.identifier.valueText} to value {value}")
                 old_trivia = "".join(t.getRawText() for t in node.getFirstToken().trivia)
-                new_node = pyslang.SyntaxTree.fromText(old_trivia + str(value)).root
+                new_node = syntax.SyntaxTree.fromText(old_trivia + str(value)).root
                 rewriter.replace(node, new_node)
             
 
-    return pyslang.rewrite(tree, pc_core.rewrite_wrapper(_param_concretizer, param_dict))
+    return syntax.rewrite(tree, pc_core.rewrite_wrapper(_param_concretizer, param_dict))
 
-def reduce_expressions(tree: pyslang.SyntaxTree) -> pyslang.SyntaxTree:
+def reduce_expressions(tree: syntax.SyntaxTree) -> syntax.SyntaxTree:
 
-    def _expr_reducer(node: pyslang.SyntaxNode, rewriter: pyslang.SyntaxRewriter) -> None:
+    def _expr_reducer(node: syntax.SyntaxNode, rewriter: syntax.SyntaxRewriter) -> None:
 
-        if isinstance(node, pyslang.BinaryExpressionSyntax):
+        if isinstance(node, syntax.BinaryExpressionSyntax):
             try:
                 result = eval(node.__str__()) #TODO: Safer eval
             except Exception:
@@ -61,10 +62,10 @@ def reduce_expressions(tree: pyslang.SyntaxTree) -> pyslang.SyntaxTree:
 
             print(f"Reducing expression {node} to value {result}")
             old_trivia = "".join(t.getRawText() for t in node.getFirstToken().trivia)
-            new_node = pyslang.SyntaxTree.fromText(old_trivia + str(result)).root
+            new_node = syntax.SyntaxTree.fromText(old_trivia + str(result)).root
             rewriter.replace(node, new_node)
     try:
-        new_tree = pyslang.rewrite(tree, _expr_reducer)
+        new_tree = syntax.rewrite(tree, _expr_reducer)
         return new_tree
     except Exception:
         return tree

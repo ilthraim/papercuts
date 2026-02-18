@@ -4,6 +4,7 @@
 from __future__ import annotations
 from typing import Callable, Union, List, Any
 import pyslang
+from pyslang import syntax, parsing, ast
 import argparse
 import os
 import shutil
@@ -19,7 +20,7 @@ import ec
 class Module:
     """A SystemVerilog module with its name and syntax tree."""
     name: str
-    tree: pyslang.SyntaxTree
+    tree: syntax.SyntaxTree
     submodules: list[ModuleInfo]
     is_top: bool = False
 
@@ -38,12 +39,12 @@ class Rewrite:
     replacement_text: str
     matcher: Callable[[Any], bool]
     mux_matcher: Callable[[Any], bool]
-    get_replacement: Callable[[pyslang.SyntaxNode, bool], Any]
-    get_mux_replacement: Callable[[pyslang.SyntaxNode, int], Any]
+    get_replacement: Callable[[syntax.SyntaxNode, bool], Any]
+    get_mux_replacement: Callable[[syntax.SyntaxNode, int], Any]
     num_selections: int
     start_index: int = 0
     
-    def apply(self, tree, index) -> pyslang.SyntaxTree:
+    def apply(self, tree, index) -> syntax.SyntaxTree:
         """Apply this single rewrite to source."""
         def handler(node, rewriter, r=self):
             if r.matcher(node):
@@ -55,16 +56,16 @@ class Rewrite:
                     replacement = r.get_replacement(node, True)
                 rewriter.replace(node, replacement)
 
-        return pyslang.rewrite(tree, handler)
+        return syntax.rewrite(tree, handler)
 
-    def apply_mux(self, tree) -> pyslang.SyntaxTree:
+    def apply_mux(self, tree) -> syntax.SyntaxTree:
         """Apply this rewrite to a tree  with a select input"""
         def handler(node, rewriter, r=self):
             if r.mux_matcher(node):
                 replacement = r.get_mux_replacement(node, r.start_index)
                 rewriter.replace(node, replacement)
 
-        return pyslang.rewrite(tree, handler)
+        return syntax.rewrite(tree, handler)
 
     
 @dataclass 
@@ -79,8 +80,8 @@ class RewriteSet:
         self.rewrites.append(rewrite)
         self.current_index += rewrite.num_selections
     
-    # def apply(self, tree) -> pyslang.SyntaxTree:
-    #     """Apply all rewrites to tree using pyslang.rewrite()."""
+    # def apply(self, tree) -> syntax.SyntaxTree:
+    #     """Apply all rewrites to tree using syntax.rewrite()."""
 
     #     #TODO: check for overlapping rewrites
 
@@ -105,8 +106,8 @@ class RewriteSet:
         
     #     return new_tree
 
-    def apply_muxes(self, tree) -> pyslang.SyntaxTree:
-        """Apply all mux rewrites to tree using pyslang.rewrite()."""
+    def apply_muxes(self, tree) -> syntax.SyntaxTree:
+        """Apply all mux rewrites to tree using pyslang.syntax.rewrite()."""
 
         current_tree = tree
         
@@ -130,7 +131,7 @@ class RewriteSet:
                 replacement = rw.get_mux_replacement(node, rw.start_index)
                 rewriter.replace(node, replacement)
             
-        new_tree = pyslang.rewrite(current_tree, handler)
+        new_tree = syntax.rewrite(current_tree, handler)
         
         return new_tree
     
@@ -143,8 +144,8 @@ class Run:
     """A single test run with input and expected output."""
     canonical_fname: str
     mod_fname: str
-    input_tree: pyslang.SyntaxTree
-    output_tree: pyslang.SyntaxTree
+    input_tree: syntax.SyntaxTree
+    output_tree: syntax.SyntaxTree
     rewrite: Rewrite
     index: int = 0
     wrapper_fname: str = ""
@@ -155,7 +156,7 @@ class Run:
         """Run JasperGold on the wrapper file and capture output."""
         pass  # Implementation would go here
 
-def consolidate_runs(tree: pyslang.SyntaxTree, runs: List[Run]) -> pyslang.SyntaxTree:
+def consolidate_runs(tree: syntax.SyntaxTree, runs: List[Run]) -> syntax.SyntaxTree:
     """Consolidate multiple runs into a single SyntaxTree with all rewrites applied."""
         
     def handler(node, rewriter):
@@ -172,24 +173,24 @@ def consolidate_runs(tree: pyslang.SyntaxTree, runs: List[Run]) -> pyslang.Synta
                 replacement = rw.rewrite.get_replacement(node, branch)
                 rewriter.replace(node, replacement)
             
-    new_tree = pyslang.rewrite(tree, handler)
+    new_tree = syntax.rewrite(tree, handler)
         
     return new_tree
 
     
 
 #MARK: Helpers and Papercuts
-def rewrite_wrapper(f, *args, **kwargs) -> Callable[[pyslang.SyntaxNode, pyslang.SyntaxRewriter], None]:
+def rewrite_wrapper(f, *args, **kwargs) -> Callable[[syntax.SyntaxNode, syntax.SyntaxRewriter], None]:
     return lambda node, rewriter: f(node, rewriter, *args, **kwargs)
 
-def visitor_wrapper(f, *args, **kwargs) -> Callable[[Union[pyslang.Token, pyslang.SyntaxNode]], None]:
+def visitor_wrapper(f, *args, **kwargs) -> Callable[[Union[parsing.Token, syntax.SyntaxNode]], None]:
     return lambda node: f(node, *args, **kwargs)
 
-def _is_parent(parent: pyslang.SyntaxNode, child: pyslang.SyntaxNode) -> bool:
+def _is_parent(parent: syntax.SyntaxNode, child: syntax.SyntaxNode) -> bool:
     """Check if parent is the parent of child."""
     return child in parent
 
-def _get_sibling_node(node: pyslang.SyntaxNode) -> pyslang.SyntaxNode:
+def _get_sibling_node(node: syntax.SyntaxNode) -> syntax.SyntaxNode:
     """Get the sibling node of a given SyntaxNode."""
     parent = node.parent
     siblings = list(parent)
@@ -199,17 +200,17 @@ def _get_sibling_node(node: pyslang.SyntaxNode) -> pyslang.SyntaxNode:
     else:
         for sibling in siblings:
             if _is_parent(sibling, node):
-                if isinstance(siblings[siblings.index(sibling) + 1], pyslang.SyntaxNode):
+                if isinstance(siblings[siblings.index(sibling) + 1], syntax.SyntaxNode):
                     return siblings[siblings.index(sibling) + 1]
                 else:
                     return parent
 
-    return pyslang.SyntaxNode()
+    return syntax.SyntaxNode()
 
-def _move_trivia_to_sibling(node: pyslang.SyntaxNode) -> None:
+def _move_trivia_to_sibling(node: syntax.SyntaxNode) -> None:
     """Move trivia from node to its sibling."""
     sibling = _get_sibling_node(node)
-    if isinstance(sibling, pyslang.SyntaxNode):
+    if isinstance(sibling, syntax.SyntaxNode):
         node_trivia = node.getFirstToken().trivia
         sibling.getFirstToken().trivia.append(node_trivia)
 
@@ -220,14 +221,32 @@ def _get_attr_name(parent_obj, child_obj) -> str:
             return attr_name
     return ""
 
-def _copy_tree(tree: pyslang.SyntaxTree) -> pyslang.SyntaxTree:
+def _copy_tree(tree: syntax.SyntaxTree) -> syntax.SyntaxTree:
     """Return a copy of the given SyntaxTree."""
-    return pyslang.SyntaxTree.fromText(pyslang.SyntaxPrinter.printFile(tree))
+    return syntax.SyntaxTree.fromText(syntax.SyntaxPrinter.printFile(tree))
+
+#TODO: add width 1, add multidimensions
+def change_int_dimensions(w: int, f: syntax.SyntaxFactory, r: syntax.SyntaxRewriter, n: syntax.IntegerTypeSyntax) -> syntax.IntegerTypeSyntax:
+    return f.integerType(
+        n.kind,
+        n.keyword,
+        n.signing,
+        r.makeList([f.variableDimension(
+            r.makeToken(parsing.TokenKind.OpenBracket),
+            f.rangeDimensionSpecifier(f.rangeSelect(
+                syntax.SyntaxKind.SimpleRangeSelect,
+                f.literalExpression(syntax.SyntaxKind.IntegerLiteralExpression, r.makeToken(parsing.TokenKind.IntegerLiteral, str(w - 1))),
+                r.makeToken(parsing.TokenKind.Colon),
+                f.literalExpression(syntax.SyntaxKind.IntegerLiteralExpression, r.makeToken(parsing.TokenKind.IntegerLiteral, "0"))
+            )),
+            r.makeToken(parsing.TokenKind.CloseBracket)
+       )])
+    )
 
 #MARK: Module Refactoring
-def find_module_decl(node) -> pyslang.ModuleDeclarationSyntax:
+def find_module_decl(node) -> syntax.ModuleDeclarationSyntax:
     """Recursively find ModuleDeclarationSyntax."""
-    if node.kind == pyslang.SyntaxKind.ModuleDeclaration:
+    if node.kind == syntax.SyntaxKind.ModuleDeclaration:
         return node
     for child in node:
         result = find_module_decl(child)
@@ -235,10 +254,10 @@ def find_module_decl(node) -> pyslang.ModuleDeclarationSyntax:
             return result
     raise ValueError("ModuleDeclarationSyntax not found")
 
-def rename_module(tree: pyslang.SyntaxTree, new_name: str) -> pyslang.SyntaxTree:
+def rename_module(tree: syntax.SyntaxTree, new_name: str) -> syntax.SyntaxTree:
     """Rename the module in a SystemVerilog source string."""
     root = tree.root
-    source = pyslang.SyntaxPrinter.printFile(tree)
+    source = syntax.SyntaxPrinter.printFile(tree)
 
     module_decl =  find_module_decl(root)
     
@@ -248,17 +267,17 @@ def rename_module(tree: pyslang.SyntaxTree, new_name: str) -> pyslang.SyntaxTree
     start = token_range.start.offset
     end = token_range.end.offset
     
-    return pyslang.SyntaxTree.fromText(source[:start] + new_name + source[end:])
+    return syntax.SyntaxTree.fromText(source[:start] + new_name + source[end:])
 
-def get_module_name(tree: pyslang.SyntaxTree) -> str:
+def get_module_name(tree: syntax.SyntaxTree) -> str:
     """Get the module name from a SystemVerilog source."""
     
-    module_decl: pyslang.ModuleDeclarationSyntax = find_module_decl(tree.root)
+    module_decl: syntax.ModuleDeclarationSyntax = find_module_decl(tree.root)
     return module_decl.header.name.valueText
 
-def add_select_inputs(tree: pyslang.SyntaxTree, num_inputs: int) -> pyslang.SyntaxTree:
+def add_select_inputs(tree: syntax.SyntaxTree, num_inputs: int) -> syntax.SyntaxTree:
     """Add select inputs to the module declaration."""
-    source = pyslang.SyntaxPrinter.printFile(tree)
+    source = syntax.SyntaxPrinter.printFile(tree)
     root = tree.root
 
     module_decl = find_module_decl(root)
@@ -269,15 +288,15 @@ def add_select_inputs(tree: pyslang.SyntaxTree, num_inputs: int) -> pyslang.Synt
     
     sel_str = "input logic " + ", ".join([f"pc_sel{i + 1}" for i in range(num_inputs)])
 
-    return pyslang.SyntaxTree.fromText(source[:port_node.sourceRange.start.offset + 1] + sel_str + (", " if port_str else "") + source[port_node.sourceRange.start.offset + 1:])
+    return syntax.SyntaxTree.fromText(source[:port_node.sourceRange.start.offset + 1] + sel_str + (", " if port_str else "") + source[port_node.sourceRange.start.offset + 1:])
 
 #MARK: Shrink Bits
-def shrink_bits(tree: pyslang.SyntaxTree) -> RewriteSet:
+def shrink_bits(tree: syntax.SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees with one less bit in each SimpleRangeSelect node."""
     nodes = []
 
-    def _count_range_handle(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if obj.kind == pyslang.SyntaxKind.SimpleRangeSelect and isinstance(obj, pyslang.RangeSelectSyntax):
+    def _count_range_handle(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
+        if obj.kind == syntax.SyntaxKind.SimpleRangeSelect and isinstance(obj, syntax.RangeSelectSyntax):
             nodes.append(obj[0])
 
     tree.root.visit(visitor_wrapper(_count_range_handle, nodes))
@@ -295,7 +314,7 @@ def shrink_bits(tree: pyslang.SyntaxTree) -> RewriteSet:
             dim = int(target.getFirstToken().rawText)
             if dim > 0:
                 new_dim = dim - 1
-                new_node = pyslang.SyntaxTree.fromText(f"{new_dim}").root
+                new_node = syntax.SyntaxTree.fromText(f"{new_dim}").root
                 return new_node
             else:
                 return target
@@ -314,13 +333,74 @@ def shrink_bits(tree: pyslang.SyntaxTree) -> RewriteSet:
 
     return RewriteSet(rewrites=rewrites)
 
+def shrink_bits_mux(tree: syntax.SyntaxTree) -> syntax.SyntaxTree:
+    def get_dimensions(node: syntax.DataDeclarationSyntax) -> int:
+        if isinstance(node.type, syntax.IntegerTypeSyntax) and node.type.dimensions:
+            return int(node.type.dimensions[0].specifier.getFirstToken().rawText) - int(node.type.dimensions[0].specifier.getLastToken().rawText) + 1
+        return 1
+    
+    def get_decls(node: syntax.DataDeclarationSyntax) -> list[str]:
+        decls = []
+        for decl in node.declarators:
+            if isinstance(decl, syntax.DeclaratorSyntax):
+                decls.append(decl.name.valueText)
+        return decls
+
+    decl_set = set()
+
+    def add_decl_handler(node, rewriter: syntax.SyntaxRewriter):
+        if isinstance(node, syntax.DataDeclarationSyntax):
+            width = get_dimensions(node)
+            if width > 1:
+                new_width = width - 1
+
+                new_decls = [f"{decl}_papercut" for decl in get_decls(node)]
+                decl_set.update(new_decls)
+                
+                f: syntax.SyntaxFactory = rewriter.factory
+
+                new_decl_list = []
+                for d in new_decls:
+                    new_decl_list.append(f.declarator(rewriter.makeToken(parsing.TokenKind.Identifier, d), rewriter.makeList([])))
+                    if d != new_decls[-1]:
+                        new_decl_list.append(rewriter.makeComma())
+
+                if isinstance(node.type, syntax.IntegerTypeSyntax):
+                    type = change_int_dimensions(new_width, f, rewriter, node.type)
+                else:
+                    raise NotImplementedError("Only IntegerTypeSyntax is supported for shrinking bits in this implementation.")
+
+                new_node = f.dataDeclaration(
+                    node.attributes,
+                    node.modifiers,
+                    type,
+                    rewriter.makeSeparatedList(new_decl_list),
+                    rewriter.makeToken(parsing.TokenKind.Semicolon)
+                )
+                rewriter.insertAfter(node, new_node)
+
+                f.continuousAssign(
+                    attributes=rewriter.makeList([]),
+                    assign=rewriter.makeToken(parsing.TokenKind.AssignKeyword),
+                    assignments=rewriter.makeSeparatedList([]),
+                    semi=rewriter.makeToken(parsing.TokenKind.Semicolon)
+                )
+
+    def add_mux_handler(node, rewriter: syntax.SyntaxRewriter):
+        if isinstance(node, syntax.IdentifierExpressionSyntax) and node.name.valueText in decl_set:
+            new_name = node.name.valueText.replace("_papercut", "")
+            new_node = syntax.SyntaxTree.fromText(new_name).root
+            rewriter.replace(node, new_node)
+
+    return syntax.rewrite(syntax.rewrite(tree, add_decl_handler), add_mux_handler)
+
 #MARK: Cases
-def case_branch_deletion(tree: pyslang.SyntaxTree, rewrites: RewriteSet) -> None:
+def case_branch_deletion(tree: syntax.SyntaxTree, rewrites: RewriteSet) -> None:
     """Generate new SyntaxTrees each with one StandardCaseItem node removed."""
     nodes = []
 
-    def _count_switch_branches(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if obj.kind == pyslang.SyntaxKind.StandardCaseItem:
+    def _count_switch_branches(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
+        if obj.kind == syntax.SyntaxKind.StandardCaseItem:
             nodes.append(obj)
 
     tree.root.visit(visitor_wrapper(_count_switch_branches, nodes))
@@ -348,12 +428,12 @@ def case_branch_deletion(tree: pyslang.SyntaxTree, rewrites: RewriteSet) -> None
 
 
 #MARK: Ifs
-def remove_if_conditionals(tree: pyslang.SyntaxTree, rewrites: RewriteSet) -> None:
+def remove_if_conditionals(tree: syntax.SyntaxTree, rewrites: RewriteSet) -> None:
     """Generate new SyntaxTrees each with one IfGenerate node removed."""
     nodes = []
 
-    def _count_conditionals_handle(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if isinstance(obj, pyslang.ConditionalStatementSyntax):
+    def _count_conditionals_handle(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
+        if isinstance(obj, syntax.ConditionalStatementSyntax):
             nodes.append(obj)
 
     tree.root.visit(visitor_wrapper(_count_conditionals_handle, nodes))
@@ -377,25 +457,25 @@ def remove_if_conditionals(tree: pyslang.SyntaxTree, rewrites: RewriteSet) -> No
                     for t in node.getFirstToken().trivia:
                         old_trivia += t.getRawText()
                     new_string = old_trivia + str(node.elseClause.clause)
-                    new_node = pyslang.SyntaxTree.fromText(new_string).root
+                    new_node = syntax.SyntaxTree.fromText(new_string).root
                     return new_node
                 else:
                     old_trivia = ""
                     for t in node.getFirstToken().trivia:
                         old_trivia += t.getRawText()
-                    new_node = pyslang.SyntaxTree.fromText(old_trivia).root
+                    new_node = syntax.SyntaxTree.fromText(old_trivia).root
                     return new_node
             else:
                 old_trivia = ""
                 for t in node.getFirstToken().trivia:
                     old_trivia += t.getRawText()
                 new_string = old_trivia + str(node.statement)
-                new_node = pyslang.SyntaxTree.fromText(new_string).root
+                new_node = syntax.SyntaxTree.fromText(new_string).root
                 return new_node
 
         def get_mux_replacement(node, sel_index):
             new_pred = f"(pc_sel{sel_index + 1} | (!pc_sel{sel_index} & (" + str(node) + ")))"
-            new_node = pyslang.SyntaxTree.fromText(new_pred).root
+            new_node = syntax.SyntaxTree.fromText(new_pred).root
             return new_node
         
         #TODO: add replacement text
@@ -411,12 +491,12 @@ def remove_if_conditionals(tree: pyslang.SyntaxTree, rewrites: RewriteSet) -> No
         ))
 
 #MARK: Ternary
-def remove_ternary_conditionals(tree: pyslang.SyntaxTree, rewrites: RewriteSet) -> None:
+def remove_ternary_conditionals(tree: syntax.SyntaxTree, rewrites: RewriteSet) -> None:
     """Generate new SyntaxTrees each with one TernaryExpression node removed."""
     nodes = []
 
-    def _count_ternary_conditionals(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if isinstance(obj, pyslang.ConditionalExpressionSyntax):
+    def _count_ternary_conditionals(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
+        if isinstance(obj, syntax.ConditionalExpressionSyntax):
             nodes.append(obj)
 
     tree.root.visit(visitor_wrapper(_count_ternary_conditionals, nodes))
@@ -438,7 +518,7 @@ def remove_ternary_conditionals(tree: pyslang.SyntaxTree, rewrites: RewriteSet) 
         
         def get_mux_replacement(node, sel_index):
             new_pred = f"(pc_sel{sel_index + 1} | (!pc_sel{sel_index} & (" + str(node.predicate) + ")))"
-            new_node = pyslang.SyntaxTree.fromText(new_pred).root
+            new_node = syntax.SyntaxTree.fromText(new_pred).root
             return new_node
         
         rewrites.add_rewrite(Rewrite(
@@ -466,14 +546,14 @@ async def main():
 
     args = parser.parse_args()
 
-    compilation = pyslang.Compilation()
+    compilation = ast.Compilation()
 
     # for input_file in args.input_files:
     #     print(f"Processing file: {input_file}")
 
     #     compilation.addSyntaxTree(pyslang.SyntaxTree.fromFile(input_file))
 
-    raw_tree = pyslang.SyntaxTree.fromFile(args.input_file)
+    raw_tree = syntax.SyntaxTree.fromFile(args.input_file)
 
     params = concretizer.extract_params(raw_tree)
     concretized_tree = concretizer.concretize_params(raw_tree, params)
@@ -505,7 +585,7 @@ async def main():
     muxed_tree = add_select_inputs(muxed_tree, sum(rw.num_selections for rw in rewrites.rewrites))
     
     with open(f"{fname}_muxed.sv", "w") as fout:
-        fout.write(pyslang.SyntaxPrinter.printFile(muxed_tree))
+        fout.write(syntax.SyntaxPrinter.printFile(muxed_tree))
     
     for rewrite in rewrites.rewrites:
         for i in range(rewrite.num_selections):
@@ -528,14 +608,14 @@ async def main():
 
     try:
         with open(f"{output_dir}/{fname}_concretized.sv", "w") as fout:
-            fout.write(pyslang.SyntaxPrinter.printFile(sw))
+            fout.write(syntax.SyntaxPrinter.printFile(sw))
     except Exception as e:
         print(f"Error writing original file: {e}")
 
     for run in runs:
         try:
             with open(f"{output_dir}/{run.mod_fname}.sv", "w") as fout:
-                fout.write(pyslang.SyntaxPrinter.printFile(run.output_tree))
+                fout.write(syntax.SyntaxPrinter.printFile(run.output_tree))
         except Exception as e:
             print(f"Error writing output files: {e}")
 
@@ -592,7 +672,7 @@ async def main():
             # )
 
             with open(f"{fname}_consolidated.sv", "w") as fout:
-                fout.write(pyslang.SyntaxPrinter.printFile(consolidate_runs(sw, runs)))
+                fout.write(syntax.SyntaxPrinter.printFile(consolidate_runs(sw, runs)))
 
             # ec.generate_ec_files(consolidated_run, output_dir=".")
 
