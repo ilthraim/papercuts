@@ -34,6 +34,7 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
     # if isinstance(node, pyslang.ModuleHeaderSyntax):
     #     print(type(node.parameters))
 
+
     if isinstance(node, pyslang.syntax.DataDeclarationSyntax):
         print(node.modifiers)
         print(node.attributes)
@@ -44,6 +45,9 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
         print(node.type.dimensions.kind)
         for decl in node.declarators:
             print(decl, type(decl))
+
+    # if isinstance(node, pyslang.parsing.Token):
+    #     print(node.trivia)
 
         
 
