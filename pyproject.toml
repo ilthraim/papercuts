@@ -14,5 +14,9 @@ dependencies = [
 [tool.uv]
 cache-dir = "./.uv_cache"
 
+[tool.ruff]
+# Allow lines to be as long as 100.
+line-length = 100
+
 [tool.uv.sources]
 pyslang = { git = "https://github.com/ilthraim/slang.git" }

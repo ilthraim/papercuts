@@ -267,9 +267,7 @@ def change_int_dimensions(
                             syntax.SyntaxKind.SimpleRangeSelect,
                             f.literalExpression(
                                 syntax.SyntaxKind.IntegerLiteralExpression,
-                                r.makeToken(
-                                    parsing.TokenKind.IntegerLiteral, str(w - 1)
-                                ),
+                                r.makeToken(parsing.TokenKind.IntegerLiteral, str(w - 1)),
                             ),
                             r.makeToken(parsing.TokenKind.Colon),
                             f.literalExpression(
@@ -292,9 +290,7 @@ def make_space(r: syntax.SyntaxRewriter) -> parsing.Trivia:
 def make_identifier(
     r: syntax.SyntaxRewriter, name: str, trivia: List[parsing.Trivia] = []
 ) -> syntax.IdentifierNameSyntax:
-    return r.factory.identifierName(
-        r.makeToken(parsing.TokenKind.Identifier, name, trivia=trivia)
-    )
+    return r.factory.identifierName(r.makeToken(parsing.TokenKind.Identifier, name, trivia=trivia))
 
 
 # MARK: Module Refactoring
@@ -358,9 +354,7 @@ def shrink_bits(tree: syntax.SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees with one less bit in each SimpleRangeSelect node."""
     nodes = []
 
-    def _count_range_handle(
-        obj: Union[parsing.Token, syntax.SyntaxNode], nodes
-    ) -> None:
+    def _count_range_handle(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
         if obj.kind == syntax.SyntaxKind.SimpleRangeSelect and isinstance(
             obj, syntax.RangeSelectSyntax
         ):
@@ -501,7 +495,8 @@ def shrink_bits_mux(tree: syntax.SyntaxTree) -> syntax.SyntaxTree:
             and node.parent.kind == syntax.SyntaxKind.AssignmentExpression
         ):
             assert isinstance(node.parent, syntax.BinaryExpressionSyntax)
-            if node == node.parent.left:
+            if node.isEquivalentTo(node.parent.left):
+                print(f"Node: {node}, Parent: {node.parent}")
                 return pyslang.ast.VisitAction.Skip
 
         # if we find an identifier that is in our list of cut declarations, insert a mux between it and the cut declaration
@@ -510,7 +505,7 @@ def shrink_bits_mux(tree: syntax.SyntaxTree) -> syntax.SyntaxTree:
             and node.identifier.valueText in old_decl_set
         ):
             f: syntax.SyntaxFactory = rewriter.factory
-            f.parenthesizedExpression(
+            new_node = f.parenthesizedExpression(
                 openParen=rewriter.makeToken(
                     parsing.TokenKind.OpenParenthesis,
                     [rewriter.makeTrivia(parsing.TriviaKind.Whitespace, " ")],
@@ -530,14 +525,14 @@ def shrink_bits_mux(tree: syntax.SyntaxTree) -> syntax.SyntaxTree:
                     ),
                     question=rewriter.makeToken(parsing.TokenKind.Question),
                     attributes=rewriter.makeList([]),
-                    left=make_identifier(
-                        rewriter, f"{node.identifier.valueText}_papercut"
-                    ),
+                    left=make_identifier(rewriter, f"{node.identifier.valueText}_papercut"),
                     colon=rewriter.makeToken(parsing.TokenKind.Colon),
                     right=make_identifier(rewriter, node.identifier.valueText),
                 ),
                 closeParen=rewriter.makeToken(parsing.TokenKind.CloseParenthesis),
             )
+
+            rewriter.replace(node, new_node)
 
     return syntax.rewrite(syntax.rewrite(tree, add_decl_handler), add_mux_handler)
 
@@ -547,9 +542,7 @@ def case_branch_deletion(tree: syntax.SyntaxTree, rewrites: RewriteSet) -> None:
     """Generate new SyntaxTrees each with one StandardCaseItem node removed."""
     nodes = []
 
-    def _count_switch_branches(
-        obj: Union[parsing.Token, syntax.SyntaxNode], nodes
-    ) -> None:
+    def _count_switch_branches(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
         if obj.kind == syntax.SyntaxKind.StandardCaseItem:
             nodes.append(obj)
 
@@ -584,9 +577,7 @@ def remove_if_conditionals(tree: syntax.SyntaxTree, rewrites: RewriteSet) -> Non
     """Generate new SyntaxTrees each with one IfGenerate node removed."""
     nodes = []
 
-    def _count_conditionals_handle(
-        obj: Union[parsing.Token, syntax.SyntaxNode], nodes
-    ) -> None:
+    def _count_conditionals_handle(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
         if isinstance(obj, syntax.ConditionalStatementSyntax):
             nodes.append(obj)
 
@@ -631,9 +622,7 @@ def remove_if_conditionals(tree: syntax.SyntaxTree, rewrites: RewriteSet) -> Non
                 return new_node
 
         def get_mux_replacement(node, sel_index):
-            new_pred = (
-                f"(pc_sel{sel_index + 1} | (!pc_sel{sel_index} & (" + str(node) + ")))"
-            )
+            new_pred = f"(pc_sel{sel_index + 1} | (!pc_sel{sel_index} & (" + str(node) + ")))"
             new_node = syntax.SyntaxTree.fromText(new_pred).root
             return new_node
 
@@ -657,9 +646,7 @@ def remove_ternary_conditionals(tree: syntax.SyntaxTree, rewrites: RewriteSet) -
     """Generate new SyntaxTrees each with one TernaryExpression node removed."""
     nodes = []
 
-    def _count_ternary_conditionals(
-        obj: Union[parsing.Token, syntax.SyntaxNode], nodes
-    ) -> None:
+    def _count_ternary_conditionals(obj: Union[parsing.Token, syntax.SyntaxNode], nodes) -> None:
         if isinstance(obj, syntax.ConditionalExpressionSyntax):
             nodes.append(obj)
 
@@ -685,9 +672,7 @@ def remove_ternary_conditionals(tree: syntax.SyntaxTree, rewrites: RewriteSet) -
 
         def get_mux_replacement(node, sel_index):
             new_pred = (
-                f"(pc_sel{sel_index + 1} | (!pc_sel{sel_index} & ("
-                + str(node.predicate)
-                + ")))"
+                f"(pc_sel{sel_index + 1} | (!pc_sel{sel_index} & (" + str(node.predicate) + ")))"
             )
             new_node = syntax.SyntaxTree.fromText(new_pred).root
             return new_node
@@ -756,9 +741,7 @@ async def main():
 
     muxed_tree = rewrites.apply_muxes(sw)
     muxed_tree = rename_module(muxed_tree, f"{fname}_muxed")
-    muxed_tree = add_select_inputs(
-        muxed_tree, sum(rw.num_selections for rw in rewrites.rewrites)
-    )
+    muxed_tree = add_select_inputs(muxed_tree, sum(rw.num_selections for rw in rewrites.rewrites))
 
     with open(f"{fname}_muxed.sv", "w") as fout:
         fout.write(syntax.SyntaxPrinter.printFile(muxed_tree))
