@@ -3,35 +3,20 @@ import shutil
 from typing import Union
 import sys
 import pyslang
-from dataclasses import dataclass
+from pyslang import syntax, ast
+from pyslang.syntax import SyntaxNode, SyntaxPrinter, SyntaxTree
+from pyslang.ast import Symbol, Compilation, Expression
+from pyslang.parsing import Token
+from pyslang.driver import Driver
 
 import pc_core
 
 
-#unused
-def analyze_modules(comp: pyslang.Compilation) -> list[pc_core.Module]:
-
-    trees = comp.getSyntaxTrees()
-
-    modules = []
-
-    for mod in modules:
-        comp.addSyntaxTree(mod.tree)
-
-    analysisManager = pyslang.AnalysisManager()
-    analysisManager.analyze(comp)
-    
-    analysisManager.getAnalyzedScope
-    print("Is done", comp.isElaborated)
-
-
-    return modules
-
-def collect_modules_ast(comp: pyslang.Compilation):
+def collect_modules_ast(comp: Compilation):
     modules = {}
 
-    def _module_collector(obj: Union[pyslang.Token, pyslang.SyntaxNode]) -> None:
-        if isinstance(obj, pyslang.InstanceSymbol):
+    def _module_collector(obj: Union[Token, SyntaxNode]) -> None:
+        if isinstance(obj, ast.InstanceSymbol):
             print("Found module instance: ", obj.name)
             modules[obj.hierarchicalPath] = obj.definition
 
@@ -39,12 +24,12 @@ def collect_modules_ast(comp: pyslang.Compilation):
 
     return modules
 
-def collect_modules_cst(comp: pyslang.Compilation):
+def collect_modules_cst(comp: Compilation):
     modules = {}
     name_list = []
 
-    def _module_collector(obj: Union[pyslang.Token, pyslang.SyntaxNode]) -> None:
-        if isinstance(obj, pyslang.ModuleDeclarationSyntax):
+    def _module_collector(obj: Union[Token, SyntaxNode]) -> None:
+        if isinstance(obj, syntax.ModuleDeclarationSyntax):
             print("Found module declaration: ", obj.header.name.valueText)
             name_list.append(obj.header.name.valueText)
 
@@ -57,19 +42,19 @@ def collect_modules_cst(comp: pyslang.Compilation):
         name_list.clear()
     return modules
 
-def eval_modules(comp: pyslang.Compilation) -> list[tuple[pyslang.SyntaxTree, str]]:
+def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
     """Evaluates all expressions in the given compilation and returns a list of concretized syntax trees for each module."""
 
-    cx = pyslang.ASTContext(comp.getRoot(), pyslang.LookupLocation.max)
-    ecx = pyslang.EvalContext(cx)
+    cx = ast.ASTContext(comp.getRoot(), ast.LookupLocation.max)
+    ecx = ast.EvalContext(cx)
     local_replacement_syntax_pairs = {}
     global_replacement_syntax_pairs = []
 
-    def _attempt_getSymbolReference(obj: pyslang.Expression) -> Union[pyslang.Symbol, None]:
+    def _attempt_getSymbolReference(obj: Expression) -> Union[Symbol, None]:
         g_ref = None
 
-        def _get_ref_from_children(obj: Union[pyslang.Token, pyslang.SyntaxNode]) -> None:
-            if isinstance(obj, pyslang.Expression):
+        def _get_ref_from_children(obj: Union[Token, SyntaxNode]) -> None:
+            if isinstance(obj, Expression):
                 ref = obj.getSymbolReference()
                 if ref is not None:
                     nonlocal g_ref #TODO Fix this
@@ -80,8 +65,8 @@ def eval_modules(comp: pyslang.Compilation) -> list[tuple[pyslang.SyntaxTree, st
         return g_ref
 
 
-    def _eval_visitor(obj: Union[pyslang.Token, pyslang.SyntaxNode]) -> None:
-        if isinstance(obj, pyslang.Expression):
+    def _eval_visitor(obj: Union[Token, SyntaxNode]) -> None:
+        if isinstance(obj, Expression):
             ev = obj.eval(ecx)
             if ev.value is not None:
                 print("Evaluating: ", obj.syntax)
@@ -95,17 +80,17 @@ def eval_modules(comp: pyslang.Compilation) -> list[tuple[pyslang.SyntaxTree, st
                     path = ref.hierarchicalPath.rsplit(".", 1)[0]
                     print("Path:", path)
                     if path in local_replacement_syntax_pairs:
-                        local_replacement_syntax_pairs[path].append((obj.syntax, pyslang.SyntaxTree.fromText(str(ev.value)).root))
+                        local_replacement_syntax_pairs[path].append((obj.syntax, SyntaxTree.fromText(str(ev.value)).root))
                     else:
-                        local_replacement_syntax_pairs[path] = [(obj.syntax, pyslang.SyntaxTree.fromText(str(ev.value)).root)]
+                        local_replacement_syntax_pairs[path] = [(obj.syntax, SyntaxTree.fromText(str(ev.value)).root)]
                 else:
-                    global_replacement_syntax_pairs.append((obj.syntax, pyslang.SyntaxTree.fromText(str(ev.value)).root))
+                    global_replacement_syntax_pairs.append((obj.syntax, SyntaxTree.fromText(str(ev.value)).root))
 
     comp.getRoot().visit(_eval_visitor)
 
     def _apply_all_replacements(node, rewriter, rewrite_list) -> None:
-        for syntax, replacement in rewrite_list:
-            if node == syntax:
+        for syntax_node, replacement in rewrite_list:
+            if node == syntax_node:
                 rewriter.replace(node, replacement)
                 return
 
@@ -115,14 +100,14 @@ def eval_modules(comp: pyslang.Compilation) -> list[tuple[pyslang.SyntaxTree, st
     for mod_name, mod_path in mod_dict.items():
         print(type(mod_name))
         print(f"Module: {mod_name}, Path: {mod_path}")
-        conc_trees.append((pyslang.rewrite(tree_dict[mod_path.name], pc_core.rewrite_wrapper(_apply_all_replacements, local_replacement_syntax_pairs[mod_name] + global_replacement_syntax_pairs)), mod_name))
+        conc_trees.append((syntax.rewrite(tree_dict[mod_path.name], pc_core.rewrite_wrapper(_apply_all_replacements, local_replacement_syntax_pairs[mod_name] + global_replacement_syntax_pairs)), mod_name))
 
     return conc_trees
 
     # DO REWRITES OVER DEFINITIONS FROM COMPILATION
             
 
-def get_submodules(tree: pyslang.SyntaxTree) -> list[pc_core.ModuleInfo]:
+def get_submodules(tree: SyntaxTree) -> list[pc_core.ModuleInfo]:
     """Extracts the names, types, and params of all submodules instantiated within the given syntax tree.
 
     Args:
@@ -133,13 +118,13 @@ def get_submodules(tree: pyslang.SyntaxTree) -> list[pc_core.ModuleInfo]:
     submodules = []
 
     #TODO: Non-named params
-    def _submodule_collector(obj: Union[pyslang.Token, pyslang.SyntaxNode], submodules: list[pc_core.ModuleInfo]) -> None:
-        if isinstance(obj, pyslang.HierarchyInstantiationSyntax):
+    def _submodule_collector(obj: Union[Token, SyntaxNode], submodules: list[pc_core.ModuleInfo]) -> None:
+        if isinstance(obj, syntax.HierarchyInstantiationSyntax):
             for inst in obj.instances:
-                if isinstance(inst, pyslang.HierarchicalInstanceSyntax):
+                if isinstance(inst, syntax.HierarchicalInstanceSyntax):
                     params = {}
                     for param in obj.parameters.parameters if obj.parameters else []:
-                        if isinstance(param, pyslang.OrderedParamAssignmentSyntax):
+                        if isinstance(param, syntax.OrderedParamAssignmentSyntax):
                             params[param.expr.left.identifier.valueText] = param.expr.right.literal.valueText #type: ignore
                     
                     print(type(inst))
@@ -150,20 +135,20 @@ def get_submodules(tree: pyslang.SyntaxTree) -> list[pc_core.ModuleInfo]:
 
     return submodules
 
-def split_tree (tree: pyslang.SyntaxTree) -> list[tuple[str, pyslang.SyntaxTree]]:
+def split_tree (tree: SyntaxTree) -> list[tuple[str, SyntaxTree]]:
 
     modules = []
     raw_modules = []
     info_trees = []
 
     for st in tree.root[0]:
-        if isinstance(st, pyslang.ModuleDeclarationSyntax):
+        if isinstance(st, syntax.ModuleDeclarationSyntax):
             raw_modules.append((st.header.name.valueText, st.__str__()))
         else:
             info_trees.append(st.__str__())
 
     for module in raw_modules:
-        modules.append((module[0], pyslang.SyntaxTree.fromText("\n".join(info_trees + [module[1]]))))
+        modules.append((module[0], SyntaxTree.fromText("\n".join(info_trees + [module[1]]))))
 
     return modules
 
@@ -179,7 +164,7 @@ def main():
 
     trees = []
     for file in sys.argv[1:]:
-        tree = pyslang.SyntaxTree.fromFile(file)
+        tree = SyntaxTree.fromFile(file)
         trees.append(tree)
     
     src_list = []
@@ -189,31 +174,31 @@ def main():
         for tree in split_trees:
             src_list.append(f"{output_dir}/{tree[0]}.sv")
             with open (f"{output_dir}/{tree[0]}.sv", "w") as f:
-                f.write(pyslang.SyntaxPrinter.printFile(tree[1]))
+                f.write(SyntaxPrinter.printFile(tree[1]))
 
-    driver = pyslang.Driver()
-    driver.addStandardArgs()
+    d = Driver()
+    d.addStandardArgs()
 
     # Parse command line arguments
     srcs = " ".join([sys.argv[0]] + src_list)
-    if not driver.parseCommandLine(srcs, pyslang.CommandLineOptions()):
+    if not d.parseCommandLine(srcs, pyslang.driver.CommandLineOptions()):
         return
 
     # Process options and parse all provided sources
-    if not driver.processOptions() or not driver.parseAllSources():
+    if not d.processOptions() or not d.parseAllSources():
         return
 
     # Perform elaboration and report all diagnostics
-    compilation = driver.createCompilation()
-    driver.reportCompilation(compilation, False)
+    compilation = d.createCompilation()
+    d.reportCompilation(compilation, False)
 
-    pyslang.Compilation.getParseDiagnostics(compilation)
+    Compilation.getParseDiagnostics(compilation)
 
     conc_trees = eval_modules(compilation)
 
     for tree, name in conc_trees:
         with open (f"{output_dir}/{name}_concretized.sv", "w") as f:
-            f.write(pyslang.SyntaxPrinter.printFile(tree))
+            f.write(SyntaxPrinter.printFile(tree))
 
     print()
     print()
