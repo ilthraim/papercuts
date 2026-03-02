@@ -175,45 +175,6 @@ def visitor_wrapper(
     return lambda node: f(node, *args, **kwargs)
 
 
-def _is_parent(parent: syntax.SyntaxNode, child: syntax.SyntaxNode) -> bool:
-    """Check if parent is the parent of child."""
-    return child in parent
-
-
-def _get_sibling_node(node: syntax.SyntaxNode) -> syntax.SyntaxNode:
-    """Get the sibling node of a given SyntaxNode."""
-    parent = node.parent
-    siblings = list(parent)
-    if node in siblings:
-        index = siblings.index(node)
-        return siblings[index + 1]
-    else:
-        for sibling in siblings:
-            if _is_parent(sibling, node):
-                if isinstance(siblings[siblings.index(sibling) + 1], syntax.SyntaxNode):
-                    return siblings[siblings.index(sibling) + 1]
-                else:
-                    return parent
-
-    return syntax.SyntaxNode()
-
-
-def _move_trivia_to_sibling(node: syntax.SyntaxNode) -> None:
-    """Move trivia from node to its sibling."""
-    sibling = _get_sibling_node(node)
-    if isinstance(sibling, syntax.SyntaxNode):
-        node_trivia = node.getFirstToken().trivia
-        sibling.getFirstToken().trivia.append(node_trivia)
-
-
-def _get_attr_name(parent_obj, child_obj) -> str:
-    """Get the attribute name of child_obj in parent_obj."""
-    for attr_name, attr_value in parent_obj.__dict__.items():
-        if attr_value is child_obj:  # Use 'is' for identity check
-            return attr_name
-    return ""
-
-
 def _copy_tree(tree: SyntaxTree) -> SyntaxTree:
     """Return a copy of the given SyntaxTree."""
     return SyntaxTree.fromText(SyntaxPrinter.printFile(tree))
@@ -288,46 +249,59 @@ def make_select(r: SyntaxRewriter, left: int, right: int) -> syntax.ElementSelec
 
 
 # MARK: Module Refactoring
-def find_module_decl(node) -> syntax.ModuleDeclarationSyntax:
-    """Recursively find ModuleDeclarationSyntax."""
-    if node.kind == SyntaxKind.ModuleDeclaration:
-        return node
-    for child in node:
-        result = find_module_decl(child)
-        if result:
-            return result
-    raise ValueError("ModuleDeclarationSyntax not found")
-
-
 def rename_module(tree: SyntaxTree, new_name: str) -> SyntaxTree:
     """Rename the module in a SystemVerilog source string."""
-    root = tree.root
-    source = SyntaxPrinter.printFile(tree)
 
-    module_decl = find_module_decl(root)
+    def handler(node, r: SyntaxRewriter):
+        if isinstance(node, syntax.ModuleHeaderSyntax):
+            new_token = r.makeToken(
+                kind=TokenKind.Identifier, text=new_name, trivia=node.name.trivia
+            )
+            new_node = r.factory.moduleHeader(
+                kind=node.kind,
+                moduleKeyword=node.moduleKeyword,
+                lifetime=node.lifetime,
+                name=new_token,
+                imports=node.imports,
+                parameters=node.parameters,
+                ports=node.ports,
+                semi=node.semi,
+            )
+            r.replace(node, new_node)
 
-    name_token = module_decl.header.name
-    token_range = name_token.range
+    return syntax.rewrite(tree, handler)
 
-    start = token_range.start.offset
-    end = token_range.end.offset
 
-    return SyntaxTree.fromText(source[:start] + new_name + source[end:])
+def find_module_decl(tree: SyntaxTree) -> syntax.ModuleDeclarationSyntax:
+    """Find the first ModuleDeclarationSyntax node in the tree."""
+
+    decl = []
+
+    def handler(obj: Union[parsing.Token, syntax.SyntaxNode]) -> None:
+        if isinstance(obj, syntax.ModuleDeclarationSyntax):
+            decl.append(obj)
+            return ast.VisitAction.Interrupt
+
+    tree.root.visit(visitor_wrapper(handler))
+
+    if not decl:
+        raise ValueError("No module declaration found in the syntax tree.")
+
+    return decl[0]
 
 
 def get_module_name(tree: SyntaxTree) -> str:
     """Get the module name from a SystemVerilog source."""
 
-    module_decl: syntax.ModuleDeclarationSyntax = find_module_decl(tree.root)
+    module_decl: syntax.ModuleDeclarationSyntax = find_module_decl(tree)
     return module_decl.header.name.valueText
 
 
 def add_select_inputs(tree: SyntaxTree, num_inputs: int) -> SyntaxTree:
     """Add select inputs to the module declaration."""
     source = SyntaxPrinter.printFile(tree)
-    root = tree.root
 
-    module_decl = find_module_decl(root)
+    module_decl = find_module_decl(tree)
 
     port_node = module_decl.header.ports
     ports = module_decl.header.ports[1]  # Exclude the parentheses
@@ -434,7 +408,9 @@ def shrink_bits(tree: SyntaxTree, rewrites: RewriteSet, start_index: int) -> tup
                                                 conditions=r.makeSeparatedList(
                                                     [
                                                         f.conditionalPattern(
-                                                            make_identifier(r, "pc_sel" + str(cur_index[0]))
+                                                            make_identifier(
+                                                                r, "pc_sel" + str(cur_index[0])
+                                                            )
                                                         )
                                                     ]
                                                 )
@@ -485,10 +461,16 @@ def shrink_bits(tree: SyntaxTree, rewrites: RewriteSet, start_index: int) -> tup
             if node.isEquivalentTo(node.parent.left):
                 return ast.VisitAction.Skip
 
-        if isinstance(node, syntax.IdentifierNameSyntax) and node.identifier.valueText in old_decl_set:
+        if (
+            isinstance(node, syntax.IdentifierNameSyntax)
+            and node.identifier.valueText in old_decl_set
+        ):
             new_node = make_identifier(r, node.identifier.valueText + "_papercut")
             r.replace(node, new_node)
-        elif isinstance(node, syntax.IdentifierSelectNameSyntax) and node.identifier.valueText in old_decl_set:
+        elif (
+            isinstance(node, syntax.IdentifierSelectNameSyntax)
+            and node.identifier.valueText in old_decl_set
+        ):
             f = r.factory
             new_node = f.identifierSelectName(
                 identifier=r.makeToken(

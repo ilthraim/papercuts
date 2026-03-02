@@ -20,5 +20,5 @@ line-length = 100
 
 [tool.uv.sources]
 #pyslang = { git = "https://github.com/ilthraim/slang.git" }
-pyslang = { path = "/usr/scratch/emiller76/slang" }
 #pyslang = { git = "https://github.com/MikePopoloski/slang.git" }
+pyslang = { path = "/usr/scratch/emiller76/slang" }

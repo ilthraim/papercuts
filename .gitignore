@@ -11,6 +11,8 @@ wheels/
 
 .vscode
 .uv_cache
+uv.toml
+
 
 #Jasper stuff
 jgproject

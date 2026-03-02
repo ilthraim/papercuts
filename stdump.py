@@ -1,5 +1,7 @@
 from sys import argv
 import pyslang
+from pyslang.parsing import Token
+from pyslang import ast
 from typing import Union
 
 
@@ -24,7 +26,7 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
     # Print the current node with its kind
     node_info = f"{node.kind, type(node)}"
 
-    if isinstance(node, pyslang.Token):
+    if isinstance(node, Token):
         node_info += f" (Token: {node.rawText})"
     else:
         if hasattr(node, 'getFirstToken'):
@@ -45,11 +47,11 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
 
     # Process children
     try:
-        if isinstance(node, pyslang.ParameterSymbol):
+        if isinstance(node, ast.ParameterSymbol):
             print(node.value.convertToInt())
             print(node.syntax)
 
-        if isinstance(node, pyslang.InstanceSymbol):
+        if isinstance(node, ast.InstanceSymbol):
             print_ast_tree(node.body, indent + 1, child_prefix, True)
         else:
             children = list(node)
@@ -61,23 +63,23 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
 
 def main():
 
-    driver = pyslang.Driver()
-    driver.addStandardArgs()
+    d = pyslang.driver.Driver()
+    d.addStandardArgs()
 
     # Parse command line arguments
     args = " ".join(argv)
-    if not driver.parseCommandLine(args, pyslang.CommandLineOptions()):
+    if not d.parseCommandLine(args, pyslang.driver.CommandLineOptions()):
         return
 
     # Process options and parse all provided sources
-    if not driver.processOptions() or not driver.parseAllSources():
+    if not d.processOptions() or not d.parseAllSources():
         return
 
     # Perform elaboration and report all diagnostics
-    compilation = driver.createCompilation()
-    driver.reportCompilation(compilation, False)
+    compilation = d.createCompilation()
+    d.reportCompilation(compilation, False)
 
-    pyslang.Compilation.getParseDiagnostics(compilation)
+    pyslang.ast.Compilation.getParseDiagnostics(compilation)
     #print(pyslang.SyntaxPrinter.printFile(compilation.getSyntaxTrees()[0]))
     print(compilation.isElaborated)
     print(compilation.isFinalized)
@@ -102,13 +104,13 @@ def main():
 
     defs = compilation.getDefinitions()
     for defi in defs:
-        if isinstance(defi, pyslang.DefinitionSymbol):
+        if isinstance(defi, pyslang.ast.DefinitionSymbol):
             print("Number of instances of definition", defi.name, ":", defi.instanceCount)
             print("Syntax tree at:", type(defi.syntax))
             print("Declaring definition:", defi.declaringDefinition)
 
 
-    if isinstance(root.topInstances[0].body, pyslang.InstanceBodySymbol):
+    if isinstance(root.topInstances[0].body, pyslang.ast.InstanceBodySymbol):
         print_ast_tree(root.topInstances[0].body)
         print(root.topInstances[0].body.syntax)
     print("\n" + "="*80)
