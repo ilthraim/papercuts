@@ -750,7 +750,7 @@ async def main():
 
     if args.check_equivalence:
         for run in runs:
-            ec.generate_ec_files(run, output_dir=output_dir)
+            ec.generate_jasper_files(run, output_dir=output_dir)
 
         directory = Path(output_dir)
 
@@ -805,7 +805,7 @@ async def main():
             with open(f"{fname}_consolidated.sv", "w") as fout:
                 fout.write(SyntaxPrinter.printFile(consolidate_runs(sw, runs)))
 
-            # ec.generate_ec_files(consolidated_run, output_dir=".")
+            # ec.generate_jasper_files(consolidated_run, output_dir=".")
 
             # result = await ec.run_jasper(consolidated_run, True)
 
