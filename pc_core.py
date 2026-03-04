@@ -1,15 +1,20 @@
 from __future__ import annotations
+import sys
 from typing import Callable, Union, List, Any
-import pyslang
 import argparse
 import os
 import shutil
 import asyncio
 from pathlib import Path
 from dataclasses import dataclass
-import math
 
-import concretizer
+from pyslang import syntax, driver, ast
+from pyslang.syntax import SyntaxTree, SyntaxNode, SyntaxKind, SyntaxPrinter, SyntaxRewriter
+from pyslang.parsing import Token
+from pyslang.driver import Driver
+
+from chipper import eval_modules, split_tree
+from pc_utils import rename_module, visitor_wrapper, get_module_name
 import ec
 
 #MARK: Rewrites and Runs
@@ -23,28 +28,28 @@ class Rewrite:
     get_replacement: Callable[[Any], Any]
     description: str = ""  # optional metadata
     
-    def apply(self, tree) -> pyslang.SyntaxTree:
+    def apply(self, tree) -> SyntaxTree:
         """Apply this single rewrite to source."""
         def handler(node, rewriter, r=self):
             if r.matcher(node):
                 replacement = r.get_replacement(node)
                 rewriter.replace(node, replacement)
 
-        return pyslang.rewrite(tree, handler)
+        return syntax.rewrite(tree, handler)
     
 @dataclass 
 class RewriteSet:
     """A collection of rewrites to be applied together."""
     rewrites: List[Rewrite]
     
-    def apply(self, tree) -> pyslang.SyntaxTree:
+    def apply(self, tree) -> SyntaxTree:
         """Apply all rewrites to tree using pyslang.rewrite()."""
 
         #TODO: check for overlapping rewrites
 
         current_tree = tree
         
-        def handler(node, rewriter, r=self):
+        def handler(node, rewriter: SyntaxRewriter, r=self):
             matching_rewrites = [rw for rw in r.rewrites if rw.matcher(node)]
 
             if len(matching_rewrites) > 1:
@@ -59,7 +64,7 @@ class RewriteSet:
                     replacement = rw.get_replacement(node)
                     rewriter.replace(node, replacement)
             
-        new_tree = pyslang.rewrite(current_tree, handler)
+        new_tree = syntax.rewrite(current_tree, handler)
         
         return new_tree
     
@@ -72,8 +77,8 @@ class Run:
     """A single test run with input and expected output."""
     canonical_fname: str
     mod_fname: str
-    input_tree: pyslang.SyntaxTree
-    output_tree: pyslang.SyntaxTree
+    input_tree: SyntaxTree
+    output_tree: SyntaxTree
     rewrite_set: RewriteSet
     wrapper_fname: str = ""
     valid: bool = False
@@ -82,96 +87,15 @@ class Run:
     def run(self):
         """Run JasperGold on the wrapper file and capture output."""
         pass  # Implementation would go here
-    
-
-#MARK: Helpers and Papercuts
-def rewrite_wrapper(f, *args, **kwargs) -> Callable[[pyslang.SyntaxNode, pyslang.SyntaxRewriter], None]:
-    return lambda node, rewriter: f(node, rewriter, *args, **kwargs)
-
-def visitor_wrapper(f, *args, **kwargs) -> Callable[[Union[pyslang.Token, pyslang.SyntaxNode]], None]:
-    return lambda node: f(node, *args, **kwargs)
-
-def _is_parent(parent: pyslang.SyntaxNode, child: pyslang.SyntaxNode) -> bool:
-    """Check if parent is the parent of child."""
-    return child in parent
-
-def _get_sibling_node(node: pyslang.SyntaxNode) -> pyslang.SyntaxNode:
-    """Get the sibling node of a given SyntaxNode."""
-    parent = node.parent
-    siblings = list(parent)
-    if node in siblings:
-        index = siblings.index(node)
-        return siblings[index + 1]
-    else:
-        for sibling in siblings:
-            if _is_parent(sibling, node):
-                if isinstance(siblings[siblings.index(sibling) + 1], pyslang.SyntaxNode):
-                    return siblings[siblings.index(sibling) + 1]
-                else:
-                    return parent
-
-    return pyslang.SyntaxNode()
-
-def _move_trivia_to_sibling(node: pyslang.SyntaxNode) -> None:
-    """Move trivia from node to its sibling."""
-    sibling = _get_sibling_node(node)
-    if isinstance(sibling, pyslang.SyntaxNode):
-        node_trivia = node.getFirstToken().trivia
-        sibling.getFirstToken().trivia.append(node_trivia)
-
-def _get_attr_name(parent_obj, child_obj) -> str:
-    """Get the attribute name of child_obj in parent_obj."""
-    for attr_name, attr_value in parent_obj.__dict__.items():
-        if attr_value is child_obj:  # Use 'is' for identity check
-            return attr_name
-    return ""
-
-def _do_nothing_handler(node: pyslang.SyntaxNode, rewriter: pyslang.SyntaxRewriter) -> None:
-        if node.kind == pyslang.SyntaxKind.CompilationUnit:
-            rewriter.replace(node, node)
-
-def _copy_tree(tree: pyslang.SyntaxTree) -> pyslang.SyntaxTree:
-    """Return a copy of the given SyntaxTree."""
-    return pyslang.SyntaxTree.fromText(pyslang.SyntaxPrinter.printFile(tree))
 
 #MARK: Module Refactoring
-def find_module_decl(node) -> pyslang.ModuleDeclarationSyntax:
-    """Recursively find ModuleDeclarationSyntax."""
-    if node.kind == pyslang.SyntaxKind.ModuleDeclaration:
-        return node
-    for child in node:
-        result = find_module_decl(child)
-        if result:
-            return result
-    raise ValueError("ModuleDeclarationSyntax not found")
 
-def rename_module(tree: pyslang.SyntaxTree, new_name: str) -> pyslang.SyntaxTree:
-    """Rename the module in a SystemVerilog source string."""
-    root = tree.root
-    source = pyslang.SyntaxPrinter.printFile(tree)
-
-    module_decl =  find_module_decl(root)
-    
-    name_token = module_decl.header.name
-    token_range = name_token.range
-    
-    start = token_range.start.offset
-    end = token_range.end.offset
-    
-    return pyslang.SyntaxTree.fromText(source[:start] + new_name + source[end:])
-
-def get_module_name(tree: pyslang.SyntaxTree) -> str:
-    """Get the module name from a SystemVerilog source."""
-    
-    module_decl: pyslang.ModuleDeclarationSyntax = find_module_decl(tree.root)
-    return module_decl.header.name.valueText
-
-def split_modules(tree: pyslang.SyntaxTree) -> List[pyslang.SyntaxTree]:
+def split_modules(tree: SyntaxTree) -> List[SyntaxTree]:
     """Split a SyntaxTree with multiple modules into a list of single-module SyntaxTrees."""
     modules = []
 
-    def _collect_modules(obj: Union[pyslang.Token, pyslang.SyntaxNode], modules) -> None:
-        if obj.kind == pyslang.SyntaxKind.ModuleDeclaration:
+    def _collect_modules(obj: Union[Token, SyntaxNode], modules) -> None:
+        if obj.kind == SyntaxKind.ModuleDeclaration:
             modules.append(obj)
 
     tree.root.visit(visitor_wrapper(_collect_modules, modules))
@@ -182,19 +106,19 @@ def split_modules(tree: pyslang.SyntaxTree) -> List[pyslang.SyntaxTree]:
     for module in modules:
         start_offset = module.sourceRange.start.offset
         end_offset = module.sourceRange.end.offset
-        module_text = pyslang.SyntaxPrinter.printFile(tree)[start_offset:end_offset]
-        module_tree = pyslang.SyntaxTree.fromText(module_text)
+        module_text = SyntaxPrinter.printFile(tree)[start_offset:end_offset]
+        module_tree = SyntaxTree.fromText(module_text)
         module_trees.append(module_tree)
 
     return module_trees
 
 #MARK: Shrink Bits
-def shrink_bits(tree: pyslang.SyntaxTree) -> RewriteSet:
+def shrink_bits(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees with one less bit in each SimpleRangeSelect node."""
     nodes = []
 
-    def _count_range_handle(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if obj.kind == pyslang.SyntaxKind.SimpleRangeSelect and isinstance(obj, pyslang.RangeSelectSyntax):
+    def _count_range_handle(obj: Union[Token, SyntaxNode], nodes) -> None:
+        if obj.kind == SyntaxKind.SimpleRangeSelect and isinstance(obj, syntax.RangeSelectSyntax):
             nodes.append(obj[0])
 
     tree.root.visit(visitor_wrapper(_count_range_handle, nodes))
@@ -212,7 +136,7 @@ def shrink_bits(tree: pyslang.SyntaxTree) -> RewriteSet:
             dim = int(target.getFirstToken().rawText)
             if dim > 0:
                 new_dim = dim - 1
-                new_node = pyslang.SyntaxTree.fromText(f"{new_dim}").root
+                new_node = SyntaxTree.fromText(f"{new_dim}").root
                 return new_node
             else:
                 return target
@@ -232,12 +156,12 @@ def shrink_bits(tree: pyslang.SyntaxTree) -> RewriteSet:
     return RewriteSet(rewrites=rewrites)
 
 #MARK: Cases
-def case_branch_deletion(tree: pyslang.SyntaxTree) -> RewriteSet:
+def case_branch_deletion(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees each with one StandardCaseItem node removed."""
     nodes = []
 
-    def _count_switch_branches(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if obj.kind == pyslang.SyntaxKind.StandardCaseItem:
+    def _count_switch_branches(obj: Union[Token, SyntaxNode], nodes) -> None:
+        if obj.kind == SyntaxKind.StandardCaseItem:
             nodes.append(obj)
 
     tree.root.visit(visitor_wrapper(_count_switch_branches, nodes))
@@ -260,7 +184,7 @@ def case_branch_deletion(tree: pyslang.SyntaxTree) -> RewriteSet:
             end_offset=nodes[index].sourceRange.end.offset,
             replacement_text="",
             matcher=make_matcher(nodes[index]),
-            get_replacement=lambda node: pyslang.SyntaxTree.fromText("").root,
+            get_replacement=lambda node: SyntaxTree.fromText("").root,
             description=f"Delete case branch at index {index}"
         ))
 
@@ -268,12 +192,12 @@ def case_branch_deletion(tree: pyslang.SyntaxTree) -> RewriteSet:
 
 
 #MARK: Ifs
-def remove_if_conditionals(tree: pyslang.SyntaxTree) -> RewriteSet:
+def remove_if_conditionals(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees each with one IfGenerate node removed."""
     nodes = []
 
-    def _count_conditionals_handle(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if isinstance(obj, pyslang.ConditionalStatementSyntax):
+    def _count_conditionals_handle(obj: Union[Token, SyntaxNode], nodes) -> None:
+        if isinstance(obj, syntax.ConditionalStatementSyntax):
             nodes.append(obj)
 
     tree.root.visit(visitor_wrapper(_count_conditionals_handle, nodes))
@@ -295,20 +219,20 @@ def remove_if_conditionals(tree: pyslang.SyntaxTree) -> RewriteSet:
                         for t in node.getFirstToken().trivia:
                             old_trivia += t.getRawText()
                         new_string = old_trivia + str(node.elseClause.clause)
-                        new_node = pyslang.SyntaxTree.fromText(new_string).root
+                        new_node = SyntaxTree.fromText(new_string).root
                         return new_node
                     else:
                         old_trivia = ""
                         for t in node.getFirstToken().trivia:
                             old_trivia += t.getRawText()
-                        new_node = pyslang.SyntaxTree.fromText(old_trivia).root
+                        new_node = SyntaxTree.fromText(old_trivia).root
                         return new_node
                 else:
                     old_trivia = ""
                     for t in node.getFirstToken().trivia:
                         old_trivia += t.getRawText()
                     new_string = old_trivia + str(node.statement)
-                    new_node = pyslang.SyntaxTree.fromText(new_string).root
+                    new_node = SyntaxTree.fromText(new_string).root
                     return new_node
             return get_replacement
         
@@ -334,12 +258,12 @@ def remove_if_conditionals(tree: pyslang.SyntaxTree) -> RewriteSet:
     return RewriteSet(rewrites=rewrites)
 
 #MARK: Ternary
-def remove_ternary_conditionals(tree: pyslang.SyntaxTree) -> RewriteSet:
+def remove_ternary_conditionals(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees each with one TernaryExpression node removed."""
     nodes = []
 
-    def _count_ternary_conditionals(obj: Union[pyslang.Token, pyslang.SyntaxNode], nodes) -> None:
-        if isinstance(obj, pyslang.ConditionalExpressionSyntax):
+    def _count_ternary_conditionals(obj: Union[Token, SyntaxNode], nodes) -> None:
+        if isinstance(obj, syntax.ConditionalExpressionSyntax):
             nodes.append(obj)
 
     tree.root.visit(visitor_wrapper(_count_ternary_conditionals, nodes))
@@ -386,7 +310,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description="Process a SystemVerilog file.")
 
-    parser.add_argument("input_file", help="The input SystemVerilog file")
+    parser.add_argument("input_files", help="The input SystemVerilog files to process", nargs="+")
     parser.add_argument("-s", "--shrink-bits", action="store_true")
     parser.add_argument("-c", "--delete-case-branch", action="store_true")
     parser.add_argument("-i", "--remove-if-conditionals", action="store_true")
@@ -396,13 +320,58 @@ async def main():
     parser.add_argument("--all-no-ec", action="store_true", help="Apply all papercuts without checking equivalence")
 
     args = parser.parse_args()
-    print(f"Processing file: {args.input_file}")
+    print(f"Processing files: {args.input_files}")
 
-    raw_tree = pyslang.SyntaxTree.fromFile(args.input_file)
+    raw_trees = [SyntaxTree.fromFile(f) for f in args.input_files]
 
-    params = concretizer.extract_params(raw_tree)
-    concretized_tree = concretizer.concretize_params(raw_tree, params)
-    sw = concretizer.reduce_expressions(concretized_tree)
+    print("Splitting modules...")
+
+    # Create output directory
+    output_dir = "./outputs"
+
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create a SyntaxTree for each module and write to output directory
+    src_list = []
+    for tree in raw_trees:
+        split_trees = split_tree(tree)
+        for tree in split_trees:
+            src_list.append(f"{output_dir}/{tree[0]}.sv")
+            with open(f"{output_dir}/{tree[0]}.sv", "w") as f:
+                f.write(SyntaxPrinter.printFile(tree[1]))
+
+    # Parse our newly split trees and compile with pyslang to get elaborated ASTs
+    d = Driver()
+    d.addStandardArgs()
+    srcs = " ".join([sys.argv[0]] + src_list)
+    if not d.parseCommandLine(srcs, driver.CommandLineOptions()):
+        print("Error parsing command line arguments.")
+        return
+    
+    if not d.processOptions() or not d.parseAllSources():
+        print("Error processing options or parsing sources.")
+        return
+    
+    # Perform elaboration and report all diagnostics
+    compilation = d.createCompilation()
+    d.reportCompilation(compilation, False)
+
+    comp_root: ast.RootSymbol = compilation.getRoot()
+    print(f"Compilation root has {len(comp_root.topInstances)} top-level instances.")
+    print("Top-level instances:", comp_root.topInstances)
+
+    # Attempt concretization
+    print("Extracting parameters and concretizing...")
+    conc_trees = eval_modules(compilation)
+
+    for tree, name in conc_trees:
+        with open(f"{output_dir}/{name}_concretized.sv", "w") as f:
+            f.write(SyntaxPrinter.printFile(tree))
+
+    sw = None
 
     print("Concretization complete.")
 
@@ -455,23 +424,18 @@ async def main():
                 rewrite_set=RewriteSet(rewrites=[rewrite])
             ))
             
-    output_dir = "./outputs"
-
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-
-    os.makedirs(output_dir, exist_ok=True)
+    
 
     try:
         with open(f"{output_dir}/{fname}_concretized.sv", "w") as fout:
-            fout.write(pyslang.SyntaxPrinter.printFile(sw))
+            fout.write(SyntaxPrinter.printFile(sw))
     except Exception as e:
         print(f"Error writing original file: {e}")
 
     for run in runs:
         try:
             with open(f"{output_dir}/{run.mod_fname}.sv", "w") as fout:
-                fout.write(pyslang.SyntaxPrinter.printFile(run.output_tree))
+                fout.write(SyntaxPrinter.printFile(run.output_tree))
         except Exception as e:
             print(f"Error writing output files: {e}")
 
@@ -529,7 +493,7 @@ async def main():
             )
 
             with open(f"{fname}_consolidated.sv", "w") as fout:
-                fout.write(pyslang.SyntaxPrinter.printFile(consolidated_run.output_tree))
+                fout.write(SyntaxPrinter.printFile(consolidated_run.output_tree))
 
             ec.generate_ec_files(consolidated_run, output_dir=".")
 
