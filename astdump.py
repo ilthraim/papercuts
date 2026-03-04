@@ -1,5 +1,11 @@
 from sys import argv
-from pyslang import pyslang
+# from pyslang import syntax, parsing, driver
+#import pyslang
+import pyslang
+from pyslang import parsing, syntax, driver
+from pyslang.parsing import Token
+
+
 from typing import Union
 
 
@@ -15,18 +21,41 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
         is_last: Whether this is the last child of its parent
     """
 
-    if isinstance(node, pyslang.ParameterPortListSyntax):
-        param: pyslang.ParameterDeclarationSyntax
-        for param in node.declarations:
-            print(param.declarators)
-            print(param.declarators.kind)
-            decl: pyslang.DeclaratorSyntax
-            for decl in param.declarators:
-                print(decl.name)
-                print(decl.getLastToken().valueText)
+    # if isinstance(node, pyslang.ParameterPortListSyntax):
+    #     param: pyslang.ParameterDeclarationSyntax
+    #     for param in node.declarations:
+    #         print(param.declarators)
+    #         print(param.declarators.kind)
+    #         decl: pyslang.DeclaratorSyntax
+    #         # for decl in param.declarators:
+    #         #     print(decl.name)
+    #         #     print(decl.getLastToken().valueText)
 
-    if isinstance(node, pyslang.ModuleHeaderSyntax):
-        print(type(node.parameters))
+    # if isinstance(node, pyslang.ModuleHeaderSyntax):
+    #     print(type(node.parameters))
+
+
+    # if isinstance(node, pyslang.syntax.DataDeclarationSyntax):
+    #     print(node.modifiers)
+    #     print(node.attributes)
+    #     print("--"*40)
+    #     print(node.declarators.kind)
+    #     #pyslang.IntegerTypeSyntax.
+    #     print("signing", node.type.signing)
+    #     print(node.type.dimensions.kind)
+    #     for decl in node.declarators:
+    #         print(decl, type(decl))
+
+    # if isinstance(node, pyslang.parsing.Token):
+    #     print(node.trivia)
+
+        
+
+    # if isinstance(node, pyslang.DeclaratorSyntax):
+    #     print(node.name)
+    #     print(len(node.dimensions))
+    #     for child in node.dimensions:
+    #         print(child)
 
     # Determine the connector characters
     if indent == 0:
@@ -36,6 +65,9 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
 
     # Print the current node with its kind
     node_info = f"{node.kind, type(node)}"
+
+    if isinstance(node, syntax.SyntaxNode) and node.parent and isinstance(node.parent, syntax.ModuleDeclarationSyntax) and node == node.parent.members:
+        print("True")
 
     # if type(node) == pyslang.ConditionalStatementSyntax:
     #     print(type(node.predicate))
@@ -58,7 +90,7 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
     #node_info = f"{node.kind}"
 
 
-    if isinstance(node, pyslang.Token):
+    if isinstance(node, parsing.Token):
         node_info += f" (Token: {node.rawText})"
     else:
         if hasattr(node, 'getFirstToken'):
@@ -79,7 +111,7 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
 
     # Process children
     try:
-        children = list(node)
+        children = list(node) # type: ignore
         for i, child in enumerate(children):
             is_last_child = (i == len(children) - 1)
             print_ast_tree(child, indent + 1, child_prefix, is_last_child)
@@ -126,7 +158,7 @@ def print_elaborated_ast_tree(node, indent=0, prefix="", is_last=True):
     #node_info = f"{node.kind}"
 
 
-    if isinstance(node, pyslang.Token):
+    if isinstance(node, parsing.Token):
         node_info += f" (Token: {node.rawText})"
     else:
         if hasattr(node, 'getFirstToken'):
@@ -145,11 +177,11 @@ def print_elaborated_ast_tree(node, indent=0, prefix="", is_last=True):
     else:
         child_prefix = prefix + ("    " if is_last else "│   ")
 
-    print("children: ", list(node))
+    print("children: ", list(node)) # type: ignore
 
 
     # Process children
-    children = list(node)
+    children = list(node) # type: ignore
     for i, child in enumerate(children):
         is_last_child = (i == len(children) - 1)
         print_elaborated_ast_tree(child, indent + 1, child_prefix, is_last_child)
@@ -158,52 +190,74 @@ class ElaboratedVisiter:
     def __init__(self):
         pass
 
-    def __call__(self, obj: Union[pyslang.Token, pyslang.SyntaxNode]) -> None:
+    def __call__(self, obj: Union[parsing.Token, syntax.SyntaxNode]) -> None:
         print("Visiting: ", obj)
         print("Type: ", type(obj))
 
 def main():
 
-    driver = pyslang.Driver()
-    driver.addStandardArgs()
+    d = driver.Driver()
+    d.addStandardArgs()
 
     # Parse command line arguments
     args = " ".join(argv)
-    if not driver.parseCommandLine(args, pyslang.CommandLineOptions()):
+    if not d.parseCommandLine(args, driver.CommandLineOptions()):
         return
 
     # Process options and parse all provided sources
-    if not driver.processOptions() or not driver.parseAllSources():
+    if not d.processOptions() or not d.parseAllSources():
         return
 
     # Perform elaboration and report all diagnostics
-    compilation = driver.createCompilation()
-    driver.reportCompilation(compilation, False)
+    compilation = d.createCompilation()
+    d.reportCompilation(compilation, False)
 
-    pyslang.Compilation.getParseDiagnostics
+    pyslang.ast.Compilation.getParseDiagnostics(compilation)
+    #print(pyslang.SyntaxPrinter.printFile(compilation.getSyntaxTrees()[0]))
+    print(compilation.isElaborated)
+    root = compilation.getRoot()
 
-    
+    # curSym = root.topInstances[0].body
+    # newSym = None
+
+    # #evcx = pyslang.EvalContext(root)
+
+    # for item in curSym:
+    #     if type(item) == pyslang.GenerateBlockArraySymbol:
+    #         iitem = item.entries[0]
+    #         for subitem in iitem:
+    #             if type(subitem) == pyslang.ContinuousAssignSymbol:
+    #                 di = dir(subitem.assignment.left.value)
+    #                 for entry in di:
+    #                     print(entry, getattr(subitem.assignment.left.value, entry), type(getattr(subitem.assignment.left.value, entry)))
+                        #print(subitem.assignment.eval
+
+        # for item in newSym:
+        #     print(type(item), item)
 
 
-    print("Hello from llm-rtl-opt!")
-    print("\n" + "="*80)
-    print("Loading and parsing Verilog file...")
-    print("="*80 + "\n")
+    printtree = True
 
-    # Load the syntax tree
-    sw = pyslang.SyntaxTree.fromFiles(argv[1:])
+    if printtree:
+        print("Hello from llm-rtl-opt!")
+        print("\n" + "="*80)
+        print("Loading and parsing Verilog file...")
+        print("="*80 + "\n")
 
-    # Get the root node
-    root = sw.root
-    #root = compilation.getRoot()
+        # Load the syntax tree
+        sw = syntax.SyntaxTree.fromFiles(argv[1:])
+
+        # Get the root node
+        root = sw.root
+        #root = compilation.getSyntaxTrees()[0].root
 
 
-    print("AST Tree Structure:")
-    print("-" * 80)
-    print_ast_tree(root)
-    print("\n" + "="*80)
-    print("AST traversal complete!")
-    print("="*80)
+        print("AST Tree Structure:")
+        print("-" * 80)
+        print_ast_tree(root)
+        print("\n" + "="*80)
+        print("AST traversal complete!")
+        print("="*80)
 
     #print(pyslang.SyntaxPrinter.printFile(sw))
 
