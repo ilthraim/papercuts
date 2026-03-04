@@ -13,6 +13,7 @@ from pyslang.driver import Driver
 
 from pc_utils import rename_module, rewrite_wrapper, get_module_name
 
+
 def collect_modules_ast(comp: Compilation) -> dict[str, ast.DefinitionSymbol]:
     """Collects all module instances from the given compilation and returns a dictionary mapping their hierarchical paths (string) to their definitions."""
     modules = {}
@@ -96,7 +97,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                             (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                         ]
                 else:
-                    #print(ev.value)
+                    # print(ev.value)
                     global_replacement_syntax_pairs.append(
                         (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                     )
@@ -125,7 +126,9 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                     tree_dict[mod_path.name],
                     rewrite_wrapper(
                         _apply_all_replacements,
-                        local_replacement_syntax_pairs[mod_name] if mod_name in local_replacement_syntax_pairs else [] + global_replacement_syntax_pairs,
+                        local_replacement_syntax_pairs[mod_name]
+                        if mod_name in local_replacement_syntax_pairs
+                        else [] + global_replacement_syntax_pairs,
                     ),
                 ),
                 mod_name,  # mod_name is path e.g. top.inst1.inst2 . Names are actual instance names
@@ -139,16 +142,19 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         new_name = tree_name.replace(".", "_")
         print(f"Renaming tree {tree_name} to {new_name}")
         # Rename all submodules in the tree to match the new names of the concretized trees
-        renamed_conc_trees.append((rewrite_submodules(rename_module(tree, new_name)), new_name))
+        renamed_conc_trees.append(
+            (rewrite_submodules(rename_module(tree, new_name)), new_name)
+        )
 
     return renamed_conc_trees
 
     # DO REWRITES OVER DEFINITIONS FROM COMPILATION
 
+
 def rewrite_submodules(tree: SyntaxTree) -> SyntaxTree:
     """Rewrites all submodule instances in the given syntax tree to match the new names of the concretized trees."""
 
-    # We can leverage to our advantage the fact that the supermodule name already contains the 
+    # We can leverage to our advantage the fact that the supermodule name already contains the
     # hierarchical path to the submodule instance, so we can just replace the dots with underscores
     # to get the new name of the submodule instance
 
@@ -163,14 +169,15 @@ def rewrite_submodules(tree: SyntaxTree) -> SyntaxTree:
                 name=r.makeToken(
                     kind=TokenKind.Identifier,
                     text=full_name,
-                    trivia=node.decl.name.trivia
+                    trivia=node.decl.name.trivia,
                 ),
-                dimensions=node.decl.dimensions
+                dimensions=node.decl.dimensions,
             )
 
             r.replace(node.decl, new_node)
-            
+
     return syntax.rewrite(tree, rewrite_wrapper(handler, name))
+
 
 def split_tree(tree: SyntaxTree) -> list[tuple[str, SyntaxTree]]:
 
@@ -185,7 +192,9 @@ def split_tree(tree: SyntaxTree) -> list[tuple[str, SyntaxTree]]:
             info_trees.append(st.__str__())
 
     for module in raw_modules:
-        modules.append((module[0], SyntaxTree.fromText("\n".join(info_trees + [module[1]]))))
+        modules.append(
+            (module[0], SyntaxTree.fromText("\n".join(info_trees + [module[1]])))
+        )
 
     return modules
 

@@ -9,7 +9,13 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from pyslang import syntax, driver, ast
-from pyslang.syntax import SyntaxTree, SyntaxNode, SyntaxKind, SyntaxPrinter, SyntaxRewriter
+from pyslang.syntax import (
+    SyntaxTree,
+    SyntaxNode,
+    SyntaxKind,
+    SyntaxPrinter,
+    SyntaxRewriter,
+)
 from pyslang.parsing import Token
 from pyslang.driver import Driver
 
@@ -17,43 +23,50 @@ from chipper import eval_modules, split_tree
 from pc_utils import rename_module, visitor_wrapper, get_module_name
 import ec
 
-#MARK: Rewrites and Runs
+
+# MARK: Rewrites and Runs
 @dataclass
 class Rewrite:
     """A single text replacement that can be applied to source."""
+
     start_offset: int
     end_offset: int
     replacement_text: str
     matcher: Callable[[Any], bool]
     get_replacement: Callable[[Any], Any]
     description: str = ""  # optional metadata
-    
+
     def apply(self, tree) -> SyntaxTree:
         """Apply this single rewrite to source."""
+
         def handler(node, rewriter, r=self):
             if r.matcher(node):
                 replacement = r.get_replacement(node)
                 rewriter.replace(node, replacement)
 
         return syntax.rewrite(tree, handler)
-    
-@dataclass 
+
+
+@dataclass
 class RewriteSet:
     """A collection of rewrites to be applied together."""
+
     rewrites: List[Rewrite]
-    
+
     def apply(self, tree) -> SyntaxTree:
         """Apply all rewrites to tree using pyslang.rewrite()."""
 
-        #TODO: check for overlapping rewrites
+        # TODO: check for overlapping rewrites
 
         current_tree = tree
-        
+
         def handler(node, rewriter: SyntaxRewriter, r=self):
             matching_rewrites = [rw for rw in r.rewrites if rw.matcher(node)]
 
             if len(matching_rewrites) > 1:
-                print(f"Warning: multiple rewrites match node at offsets {node.sourceRange.start.offset}-{node.sourceRange.end.offset}")
+                print(
+                    f"Warning: multiple rewrites match node at offsets {node.sourceRange.start.offset}-{node.sourceRange.end.offset}"
+                )
                 for rw in matching_rewrites:
                     print(f" - Rewrite: {rw.description}")
 
@@ -63,18 +76,20 @@ class RewriteSet:
                 for rw in matching_rewrites:
                     replacement = rw.get_replacement(node)
                     rewriter.replace(node, replacement)
-            
+
         new_tree = syntax.rewrite(current_tree, handler)
-        
+
         return new_tree
-    
-    def merge(self, other: 'RewriteSet') -> 'RewriteSet':
+
+    def merge(self, other: "RewriteSet") -> "RewriteSet":
         """Combine with another RewriteSet."""
         return RewriteSet(rewrites=self.rewrites + other.rewrites)
+
 
 @dataclass
 class Run:
     """A single test run with input and expected output."""
+
     canonical_fname: str
     mod_fname: str
     input_tree: SyntaxTree
@@ -88,7 +103,9 @@ class Run:
         """Run JasperGold on the wrapper file and capture output."""
         pass  # Implementation would go here
 
-#MARK: Module Refactoring
+
+# MARK: Module Refactoring
+
 
 def split_modules(tree: SyntaxTree) -> List[SyntaxTree]:
     """Split a SyntaxTree with multiple modules into a list of single-module SyntaxTrees."""
@@ -112,13 +129,16 @@ def split_modules(tree: SyntaxTree) -> List[SyntaxTree]:
 
     return module_trees
 
-#MARK: Shrink Bits
+
+# MARK: Shrink Bits
 def shrink_bits(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees with one less bit in each SimpleRangeSelect node."""
     nodes = []
 
     def _count_range_handle(obj: Union[Token, SyntaxNode], nodes) -> None:
-        if obj.kind == SyntaxKind.SimpleRangeSelect and isinstance(obj, syntax.RangeSelectSyntax):
+        if obj.kind == SyntaxKind.SimpleRangeSelect and isinstance(
+            obj, syntax.RangeSelectSyntax
+        ):
             nodes.append(obj[0])
 
     tree.root.visit(visitor_wrapper(_count_range_handle, nodes))
@@ -127,11 +147,13 @@ def shrink_bits(tree: SyntaxTree) -> RewriteSet:
     rewrites = []
 
     for index in range(len(nodes)):
+
         def make_matcher(target):
             def matcher(node):
                 return node == target
+
             return matcher
-        
+
         def get_replacement(target=nodes[index]):
             dim = int(target.getFirstToken().rawText)
             if dim > 0:
@@ -146,18 +168,21 @@ def shrink_bits(tree: SyntaxTree) -> RewriteSet:
 
         print(dim)
         if dim > -1:
-            rewrites.append(Rewrite(
-                start_offset=nodes[index].sourceRange.start.offset,
-                end_offset=nodes[index].sourceRange.end.offset,
-                replacement_text=f"{new_dim}",
-                matcher=make_matcher(nodes[index]),
-                get_replacement=get_replacement,
-                description=f"Shrink bit width from {dim + 1} to {new_dim}"
-            ))
+            rewrites.append(
+                Rewrite(
+                    start_offset=nodes[index].sourceRange.start.offset,
+                    end_offset=nodes[index].sourceRange.end.offset,
+                    replacement_text=f"{new_dim}",
+                    matcher=make_matcher(nodes[index]),
+                    get_replacement=get_replacement,
+                    description=f"Shrink bit width from {dim + 1} to {new_dim}",
+                )
+            )
 
     return RewriteSet(rewrites=rewrites)
 
-#MARK: Cases
+
+# MARK: Cases
 def case_branch_deletion(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees each with one StandardCaseItem node removed."""
     nodes = []
@@ -176,24 +201,28 @@ def case_branch_deletion(tree: SyntaxTree) -> RewriteSet:
     rewrites = []
 
     for index in range(len(nodes)):
+
         def make_matcher(target):
             def matcher(node):
                 return node == target
+
             return matcher
-        
-        rewrites.append(Rewrite(
-            start_offset=nodes[index].sourceRange.start.offset,
-            end_offset=nodes[index].sourceRange.end.offset,
-            replacement_text="",
-            matcher=make_matcher(nodes[index]),
-            get_replacement=lambda node: SyntaxTree.fromText("").root,
-            description=f"Delete case branch at index {index}"
-        ))
+
+        rewrites.append(
+            Rewrite(
+                start_offset=nodes[index].sourceRange.start.offset,
+                end_offset=nodes[index].sourceRange.end.offset,
+                replacement_text="",
+                matcher=make_matcher(nodes[index]),
+                get_replacement=lambda node: SyntaxTree.fromText("").root,
+                description=f"Delete case branch at index {index}",
+            )
+        )
 
     return RewriteSet(rewrites=rewrites)
 
 
-#MARK: Ifs
+# MARK: Ifs
 def remove_if_conditionals(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees each with one IfGenerate node removed."""
     nodes = []
@@ -208,11 +237,13 @@ def remove_if_conditionals(tree: SyntaxTree) -> RewriteSet:
     rewrites = []
 
     for index in range(len(nodes)):
+
         def make_matcher(target):
             def matcher(node):
                 return node == target
+
             return matcher
-        
+
         def make_replacement(use_else, target):
             def get_replacement(node):
                 if use_else:
@@ -236,30 +267,36 @@ def remove_if_conditionals(tree: SyntaxTree) -> RewriteSet:
                     new_string = old_trivia + str(node.statement)
                     new_node = SyntaxTree.fromText(new_string).root
                     return new_node
-            return get_replacement
-        
-        #TODO: add replacement text
-        rewrites.append(Rewrite(
-            start_offset=nodes[index].sourceRange.start.offset,
-            end_offset=nodes[index].sourceRange.end.offset,
-            replacement_text="",
-            matcher=make_matcher(nodes[index]),
-            get_replacement=make_replacement(False, nodes[index]),
-            description=f"Remove if conditional at index {index} using 'then' branch"
-        ))
 
-        rewrites.append(Rewrite(
-            start_offset=nodes[index].sourceRange.start.offset,
-            end_offset=nodes[index].sourceRange.end.offset,
-            replacement_text="",
-            matcher=make_matcher(nodes[index]),
-            get_replacement=make_replacement(True, nodes[index]),
-            description=f"Remove if conditional at index {index} using 'else' branch"
-        ))
+            return get_replacement
+
+        # TODO: add replacement text
+        rewrites.append(
+            Rewrite(
+                start_offset=nodes[index].sourceRange.start.offset,
+                end_offset=nodes[index].sourceRange.end.offset,
+                replacement_text="",
+                matcher=make_matcher(nodes[index]),
+                get_replacement=make_replacement(False, nodes[index]),
+                description=f"Remove if conditional at index {index} using 'then' branch",
+            )
+        )
+
+        rewrites.append(
+            Rewrite(
+                start_offset=nodes[index].sourceRange.start.offset,
+                end_offset=nodes[index].sourceRange.end.offset,
+                replacement_text="",
+                matcher=make_matcher(nodes[index]),
+                get_replacement=make_replacement(True, nodes[index]),
+                description=f"Remove if conditional at index {index} using 'else' branch",
+            )
+        )
 
     return RewriteSet(rewrites=rewrites)
 
-#MARK: Ternary
+
+# MARK: Ternary
 def remove_ternary_conditionals(tree: SyntaxTree) -> RewriteSet:
     """Generate new SyntaxTrees each with one TernaryExpression node removed."""
     nodes = []
@@ -277,49 +314,65 @@ def remove_ternary_conditionals(tree: SyntaxTree) -> RewriteSet:
     rewrites = []
 
     for index in range(len(nodes)):
+
         def make_matcher(target):
             def matcher(node):
                 return node == target
+
             return matcher
-        
+
         def make_replacement(use_left):
             def get_replacement(node):
                 return node.left if use_left else node.right
-            return get_replacement
-        
-        rewrites.append(Rewrite(
-            start_offset=nodes[index].sourceRange.start.offset,
-            end_offset=nodes[index].sourceRange.end.offset,
-            replacement_text=nodes[index].left.getFirstToken().rawText,
-            matcher=make_matcher(nodes[index]),
-            get_replacement=make_replacement(True),
-            description=f"Remove ternary conditional at index {index} using 'true' branch"
-        ))
 
-        rewrites.append(Rewrite(
-            start_offset=nodes[index].sourceRange.start.offset,
-            end_offset=nodes[index].sourceRange.end.offset,
-            replacement_text=nodes[index].right.getFirstToken().rawText,
-            matcher=make_matcher(nodes[index]),
-            get_replacement=make_replacement(False),
-            description=f"Remove ternary conditional at index {index} using 'false' branch"
-        ))
+            return get_replacement
+
+        rewrites.append(
+            Rewrite(
+                start_offset=nodes[index].sourceRange.start.offset,
+                end_offset=nodes[index].sourceRange.end.offset,
+                replacement_text=nodes[index].left.getFirstToken().rawText,
+                matcher=make_matcher(nodes[index]),
+                get_replacement=make_replacement(True),
+                description=f"Remove ternary conditional at index {index} using 'true' branch",
+            )
+        )
+
+        rewrites.append(
+            Rewrite(
+                start_offset=nodes[index].sourceRange.start.offset,
+                end_offset=nodes[index].sourceRange.end.offset,
+                replacement_text=nodes[index].right.getFirstToken().rawText,
+                matcher=make_matcher(nodes[index]),
+                get_replacement=make_replacement(False),
+                description=f"Remove ternary conditional at index {index} using 'false' branch",
+            )
+        )
 
     return RewriteSet(rewrites=rewrites)
-    
-#MARK: Main
+
+
+# MARK: Main
 async def main():
 
     parser = argparse.ArgumentParser(description="Process a SystemVerilog file.")
 
-    parser.add_argument("input_files", help="The input SystemVerilog files to process", nargs="+")
+    parser.add_argument(
+        "input_files", help="The input SystemVerilog files to process", nargs="+"
+    )
     parser.add_argument("-s", "--shrink-bits", action="store_true")
     parser.add_argument("-c", "--delete-case-branch", action="store_true")
     parser.add_argument("-i", "--remove-if-conditionals", action="store_true")
     parser.add_argument("-t", "--remove-ternary-conditionals", action="store_true")
     parser.add_argument("-e", "--check-equivalence", action="store_true")
-    parser.add_argument("--all", action="store_true", help="Apply all papercuts and check equivalence")
-    parser.add_argument("--all-no-ec", action="store_true", help="Apply all papercuts without checking equivalence")
+    parser.add_argument(
+        "--all", action="store_true", help="Apply all papercuts and check equivalence"
+    )
+    parser.add_argument(
+        "--all-no-ec",
+        action="store_true",
+        help="Apply all papercuts without checking equivalence",
+    )
 
     args = parser.parse_args()
     print(f"Processing files: {args.input_files}")
@@ -352,11 +405,11 @@ async def main():
     if not d.parseCommandLine(srcs, driver.CommandLineOptions()):
         print("Error parsing command line arguments.")
         return
-    
+
     if not d.processOptions() or not d.parseAllSources():
         print("Error processing options or parsing sources.")
         return
-    
+
     # Perform elaboration and report all diagnostics
     compilation = d.createCompilation()
     d.reportCompilation(compilation, False)
@@ -388,48 +441,54 @@ async def main():
             print("Applying shrink bits papercut...")
             sb_trees = shrink_bits(sw)
             for i, rewrite in enumerate(sb_trees.rewrites):
-                runs.append(Run(
-                    canonical_fname=fname,
-                    mod_fname=f"{fname}_sb{i}",
-                    input_tree=sw,
-                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_sb{i}"),
-                    rewrite_set=RewriteSet(rewrites=[rewrite])
-                ))
+                runs.append(
+                    Run(
+                        canonical_fname=fname,
+                        mod_fname=f"{fname}_sb{i}",
+                        input_tree=sw,
+                        output_tree=rename_module(rewrite.apply(sw), f"{fname}_sb{i}"),
+                        rewrite_set=RewriteSet(rewrites=[rewrite]),
+                    )
+                )
 
         if args.delete_case_branch or args.all or args.all_no_ec:
             cbd_trees = case_branch_deletion(sw)
             for i, rewrite in enumerate(cbd_trees.rewrites):
-                runs.append(Run(
-                    canonical_fname=fname,
-                    mod_fname=f"{fname}_cbd{i}",
-                    input_tree=sw,
-                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_cbd{i}"),
-                    rewrite_set=RewriteSet(rewrites=[rewrite])
-                ))
+                runs.append(
+                    Run(
+                        canonical_fname=fname,
+                        mod_fname=f"{fname}_cbd{i}",
+                        input_tree=sw,
+                        output_tree=rename_module(rewrite.apply(sw), f"{fname}_cbd{i}"),
+                        rewrite_set=RewriteSet(rewrites=[rewrite]),
+                    )
+                )
 
         if args.remove_if_conditionals or args.all or args.all_no_ec:
             ric_trees = remove_if_conditionals(sw)
             for i, rewrite in enumerate(ric_trees.rewrites):
-                runs.append(Run(
-                    canonical_fname=fname,
-                    mod_fname=f"{fname}_ric{i}",
-                    input_tree=sw,
-                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_ric{i}"),
-                    rewrite_set=RewriteSet(rewrites=[rewrite])
-                ))
+                runs.append(
+                    Run(
+                        canonical_fname=fname,
+                        mod_fname=f"{fname}_ric{i}",
+                        input_tree=sw,
+                        output_tree=rename_module(rewrite.apply(sw), f"{fname}_ric{i}"),
+                        rewrite_set=RewriteSet(rewrites=[rewrite]),
+                    )
+                )
 
         if args.remove_ternary_conditionals or args.all or args.all_no_ec:
             rtc_trees = remove_ternary_conditionals(sw)
             for i, rewrite in enumerate(rtc_trees.rewrites):
-                runs.append(Run(
-                    canonical_fname=fname,
-                    mod_fname=f"{fname}_rtc{i}",
-                    input_tree=sw,
-                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_rtc{i}"),
-                    rewrite_set=RewriteSet(rewrites=[rewrite])
-                ))
-                
-        
+                runs.append(
+                    Run(
+                        canonical_fname=fname,
+                        mod_fname=f"{fname}_rtc{i}",
+                        input_tree=sw,
+                        output_tree=rename_module(rewrite.apply(sw), f"{fname}_rtc{i}"),
+                        rewrite_set=RewriteSet(rewrites=[rewrite]),
+                    )
+                )
 
         try:
             with open(f"{output_dir}/{fname}_concretized.sv", "w") as fout:
@@ -453,7 +512,7 @@ async def main():
         for item in directory.glob("*_jgproject"):
             if item.is_dir():
                 shutil.rmtree(item)
-        
+
         if runs:
             shutil.copy(args.input_file, output_dir)
             os.chdir(output_dir)
@@ -461,7 +520,7 @@ async def main():
             async def run_with_limit(semaphore, run):
                 async with semaphore:
                     return await ec.run_jasper(run, True)
-                
+
             semaphore = asyncio.Semaphore(32)  # Limit to 32 concurrent tasks
 
             tasks = [run_with_limit(semaphore, run) for run in runs]
@@ -475,7 +534,9 @@ async def main():
                 with open(f"{run.wrapper_fname}_output.log", "w") as fout:
                     fout.write(run.output)
 
-                print(f"JasperGold run for {run.wrapper_fname} completed with return code {run.valid}")
+                print(
+                    f"JasperGold run for {run.wrapper_fname} completed with return code {run.valid}"
+                )
                 successes += f"{run.wrapper_fname}: {'PASS' if run.valid else 'FAIL'}\n"
 
             with open("../equivalence_results.txt", "w") as fout:
@@ -483,8 +544,12 @@ async def main():
 
             print("Initial equivalence checks complete. Attempting consolidation...")
 
-            consolidated_rewrites = [run.rewrite_set.rewrites for run in runs if run.valid]
-            consolidated_rewrites = [rw for sublist in consolidated_rewrites for rw in sublist]
+            consolidated_rewrites = [
+                run.rewrite_set.rewrites for run in runs if run.valid
+            ]
+            consolidated_rewrites = [
+                rw for sublist in consolidated_rewrites for rw in sublist
+            ]
 
             consolidated_set = RewriteSet(rewrites=consolidated_rewrites)
             consolidated_tree = consolidated_set.apply(sw)
@@ -494,7 +559,7 @@ async def main():
                 mod_fname=f"{fname}_consolidated",
                 input_tree=sw,
                 output_tree=rename_module(consolidated_tree, f"{fname}_consolidated"),
-                rewrite_set=consolidated_set
+                rewrite_set=consolidated_set,
             )
 
             with open(f"{fname}_consolidated.sv", "w") as fout:
@@ -504,7 +569,9 @@ async def main():
 
             result = await ec.run_jasper(consolidated_run, True)
 
-            print(f"JasperGold run for {consolidated_run.wrapper_fname} completed with return code {consolidated_run.valid}")
+            print(
+                f"JasperGold run for {consolidated_run.wrapper_fname} completed with return code {consolidated_run.valid}"
+            )
 
             os.chdir("..")
             directory = Path(output_dir)
