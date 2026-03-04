@@ -74,7 +74,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         return g_ref
 
     def _eval_visitor(obj: Union[Token, SyntaxNode]) -> None:
-        if isinstance(obj, Expression):
+        if isinstance(obj, Expression) and not isinstance(obj, ast.IntegerLiteral):
             ev = obj.eval(ecx)
             if ev.value is not None:
                 print("Evaluating: ", obj.syntax)
@@ -96,6 +96,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                             (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                         ]
                 else:
+                    #print(ev.value)
                     global_replacement_syntax_pairs.append(
                         (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                     )
@@ -124,7 +125,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                     tree_dict[mod_path.name],
                     rewrite_wrapper(
                         _apply_all_replacements,
-                        local_replacement_syntax_pairs[mod_name] + global_replacement_syntax_pairs,
+                        local_replacement_syntax_pairs[mod_name] if mod_name in local_replacement_syntax_pairs else [] + global_replacement_syntax_pairs,
                     ),
                 ),
                 mod_name,  # mod_name is path e.g. top.inst1.inst2 . Names are actual instance names
@@ -140,7 +141,6 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         # Rename all submodules in the tree to match the new names of the concretized trees
         renamed_conc_trees.append((rewrite_submodules(rename_module(tree, new_name)), new_name))
 
-    print("returned")
     return renamed_conc_trees
 
     # DO REWRITES OVER DEFINITIONS FROM COMPILATION

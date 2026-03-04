@@ -142,16 +142,18 @@ def shrink_bits(tree: SyntaxTree) -> RewriteSet:
                 return target
 
         dim = int(nodes[index].getFirstToken().rawText) - 1
-        new_dim = max(dim, 1)
+        new_dim = max(dim, 0)
 
-        rewrites.append(Rewrite(
-            start_offset=nodes[index].sourceRange.start.offset,
-            end_offset=nodes[index].sourceRange.end.offset,
-            replacement_text=f"{new_dim}",
-            matcher=make_matcher(nodes[index]),
-            get_replacement=get_replacement,
-            description=f"Shrink bit width from {dim + 1} to {new_dim}"
-        ))
+        print(dim)
+        if dim > -1:
+            rewrites.append(Rewrite(
+                start_offset=nodes[index].sourceRange.start.offset,
+                end_offset=nodes[index].sourceRange.end.offset,
+                replacement_text=f"{new_dim}",
+                matcher=make_matcher(nodes[index]),
+                get_replacement=get_replacement,
+                description=f"Shrink bit width from {dim + 1} to {new_dim}"
+            ))
 
     return RewriteSet(rewrites=rewrites)
 
@@ -361,7 +363,8 @@ async def main():
 
     comp_root: ast.RootSymbol = compilation.getRoot()
     print(f"Compilation root has {len(comp_root.topInstances)} top-level instances.")
-    print("Top-level instances:", comp_root.topInstances)
+    print("Top-level instances:", [top.name for top in comp_root.topInstances])
+    assert len(comp_root.topInstances) == 1, "Expected exactly one top-level instance."
 
     # Attempt concretization
     print("Extracting parameters and concretizing...")
@@ -377,60 +380,62 @@ async def main():
 
     runs = []
 
-    fname = get_module_name(sw)
+    for ctree, ctree_name in conc_trees:
+        fname = ctree_name
+        sw = ctree
 
-    if args.shrink_bits or args.all or args.all_no_ec:
-        print("Applying shrink bits papercut...")
-        sb_trees = shrink_bits(sw)
-        for i, rewrite in enumerate(sb_trees.rewrites):
-            runs.append(Run(
-                canonical_fname=fname,
-                mod_fname=f"{fname}_sb{i}",
-                input_tree=sw,
-                output_tree=rename_module(rewrite.apply(sw), f"{fname}_sb{i}"),
-                rewrite_set=RewriteSet(rewrites=[rewrite])
-            ))
+        if args.shrink_bits or args.all or args.all_no_ec:
+            print("Applying shrink bits papercut...")
+            sb_trees = shrink_bits(sw)
+            for i, rewrite in enumerate(sb_trees.rewrites):
+                runs.append(Run(
+                    canonical_fname=fname,
+                    mod_fname=f"{fname}_sb{i}",
+                    input_tree=sw,
+                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_sb{i}"),
+                    rewrite_set=RewriteSet(rewrites=[rewrite])
+                ))
 
-    if args.delete_case_branch or args.all or args.all_no_ec:
-        cbd_trees = case_branch_deletion(sw)
-        for i, rewrite in enumerate(cbd_trees.rewrites):
-            runs.append(Run(
-                canonical_fname=fname,
-                mod_fname=f"{fname}_cbd{i}",
-                input_tree=sw,
-                output_tree=rename_module(rewrite.apply(sw), f"{fname}_cbd{i}"),
-                rewrite_set=RewriteSet(rewrites=[rewrite])
-            ))
+        if args.delete_case_branch or args.all or args.all_no_ec:
+            cbd_trees = case_branch_deletion(sw)
+            for i, rewrite in enumerate(cbd_trees.rewrites):
+                runs.append(Run(
+                    canonical_fname=fname,
+                    mod_fname=f"{fname}_cbd{i}",
+                    input_tree=sw,
+                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_cbd{i}"),
+                    rewrite_set=RewriteSet(rewrites=[rewrite])
+                ))
 
-    if args.remove_if_conditionals or args.all or args.all_no_ec:
-        ric_trees = remove_if_conditionals(sw)
-        for i, rewrite in enumerate(ric_trees.rewrites):
-            runs.append(Run(
-                canonical_fname=fname,
-                mod_fname=f"{fname}_ric{i}",
-                input_tree=sw,
-                output_tree=rename_module(rewrite.apply(sw), f"{fname}_ric{i}"),
-                rewrite_set=RewriteSet(rewrites=[rewrite])
-            ))
+        if args.remove_if_conditionals or args.all or args.all_no_ec:
+            ric_trees = remove_if_conditionals(sw)
+            for i, rewrite in enumerate(ric_trees.rewrites):
+                runs.append(Run(
+                    canonical_fname=fname,
+                    mod_fname=f"{fname}_ric{i}",
+                    input_tree=sw,
+                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_ric{i}"),
+                    rewrite_set=RewriteSet(rewrites=[rewrite])
+                ))
 
-    if args.remove_ternary_conditionals or args.all or args.all_no_ec:
-        rtc_trees = remove_ternary_conditionals(sw)
-        for i, rewrite in enumerate(rtc_trees.rewrites):
-            runs.append(Run(
-                canonical_fname=fname,
-                mod_fname=f"{fname}_rtc{i}",
-                input_tree=sw,
-                output_tree=rename_module(rewrite.apply(sw), f"{fname}_rtc{i}"),
-                rewrite_set=RewriteSet(rewrites=[rewrite])
-            ))
-            
-    
+        if args.remove_ternary_conditionals or args.all or args.all_no_ec:
+            rtc_trees = remove_ternary_conditionals(sw)
+            for i, rewrite in enumerate(rtc_trees.rewrites):
+                runs.append(Run(
+                    canonical_fname=fname,
+                    mod_fname=f"{fname}_rtc{i}",
+                    input_tree=sw,
+                    output_tree=rename_module(rewrite.apply(sw), f"{fname}_rtc{i}"),
+                    rewrite_set=RewriteSet(rewrites=[rewrite])
+                ))
+                
+        
 
-    try:
-        with open(f"{output_dir}/{fname}_concretized.sv", "w") as fout:
-            fout.write(SyntaxPrinter.printFile(sw))
-    except Exception as e:
-        print(f"Error writing original file: {e}")
+        try:
+            with open(f"{output_dir}/{fname}_concretized.sv", "w") as fout:
+                fout.write(SyntaxPrinter.printFile(sw))
+        except Exception as e:
+            print(f"Error writing original file: {e}")
 
     for run in runs:
         try:
