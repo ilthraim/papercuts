@@ -1,0 +1,61 @@
+new_assign_node_old = f.continuousAssign(
+                        attributes=r.makeList([]),
+                        assign=r.makeToken(TokenKind.AssignKeyword, node.getFirstToken().trivia),
+                        assignments=r.makeSeparatedList(
+                            [
+                                f.binaryExpression(
+                                    kind=SyntaxKind.AssignmentExpression,
+                                    # new_decl =
+                                    left=make_identifier(r, new_decls[index], [make_space(r)]),
+                                    operatorToken=r.makeToken(
+                                        TokenKind.Equals,
+                                        [make_space(r)],
+                                    ),
+                                    attributes=r.makeList([]),
+                                    # (pc_selX ? {1'b0, old_decl[width-1:0]} : old_decl)
+                                    # (pc_selX+1 ? {(pc_selX ? 1'b0 : 1'b1), old_decl[width-1:0]} : old_decl)
+                                    right=f.parenthesizedExpression(
+                                        openParen=r.makeToken(TokenKind.OpenParenthesis),
+                                        expression=f.conditionalExpression(
+                                            predicate=f.conditionalPredicate(
+                                                conditions=r.makeSeparatedList(
+                                                    [
+                                                        f.conditionalPattern(
+                                                            make_identifier(
+                                                                r, "pc_sel" + str(cur_index[0])
+                                                            )
+                                                        )
+                                                    ]
+                                                )
+                                            ),
+                                            question=r.makeToken(TokenKind.Question),
+                                            attributes=r.makeList([]),
+                                            left=f.concatenationExpression(
+                                                openBrace=r.makeToken(TokenKind.OpenBrace),
+                                                expressions=r.makeSeparatedList(
+                                                    [
+                                                        make_int_vector(r, 1, "b", "0"),
+                                                        r.makeComma(),
+                                                        f.identifierSelectName(
+                                                            identifier=r.makeToken(
+                                                                TokenKind.Identifier,
+                                                                old_decls[index],
+                                                            ),
+                                                            selectors=r.makeList(
+                                                                [make_select(r, new_width - 1, 0)]
+                                                            ),
+                                                        ),
+                                                    ]
+                                                ),
+                                                closeBrace=r.makeToken(TokenKind.CloseBrace),
+                                            ),
+                                            colon=r.makeToken(TokenKind.Colon),
+                                            right=make_identifier(r, old_decls[index]),
+                                        ),
+                                        closeParen=r.makeToken(TokenKind.CloseParenthesis),
+                                    ),
+                                )
+                            ]
+                        ),
+                        semi=r.makeToken(TokenKind.Semicolon),
+                    )

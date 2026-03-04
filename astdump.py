@@ -35,16 +35,16 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
     #     print(type(node.parameters))
 
 
-    if isinstance(node, pyslang.syntax.DataDeclarationSyntax):
-        print(node.modifiers)
-        print(node.attributes)
-        print("--"*40)
-        print(node.declarators.kind)
-        #pyslang.IntegerTypeSyntax.
-        print("signing", node.type.signing)
-        print(node.type.dimensions.kind)
-        for decl in node.declarators:
-            print(decl, type(decl))
+    # if isinstance(node, pyslang.syntax.DataDeclarationSyntax):
+    #     print(node.modifiers)
+    #     print(node.attributes)
+    #     print("--"*40)
+    #     print(node.declarators.kind)
+    #     #pyslang.IntegerTypeSyntax.
+    #     print("signing", node.type.signing)
+    #     print(node.type.dimensions.kind)
+    #     for decl in node.declarators:
+    #         print(decl, type(decl))
 
     # if isinstance(node, pyslang.parsing.Token):
     #     print(node.trivia)
@@ -65,6 +65,9 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
 
     # Print the current node with its kind
     node_info = f"{node.kind, type(node)}"
+
+    if isinstance(node, syntax.SyntaxNode) and node.parent and isinstance(node.parent, syntax.ModuleDeclarationSyntax) and node == node.parent.members:
+        print("True")
 
     # if type(node) == pyslang.ConditionalStatementSyntax:
     #     print(type(node.predicate))
