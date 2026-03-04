@@ -17,6 +17,8 @@ def rename_module(tree: SyntaxTree, new_name: str) -> SyntaxTree:
     source = SyntaxPrinter.printFile(tree)
 
     module_decl = find_module_decl(root)
+    if module_decl is None:
+        raise ValueError("No module declaration found in the syntax tree.")
 
     name_token = module_decl.header.name
     token_range = name_token.range
@@ -35,15 +37,16 @@ def visitor_wrapper(f, *args, **kwargs) -> Callable[[Union[Token, SyntaxNode]], 
     return lambda node: f(node, *args, **kwargs)
 
 
-def find_module_decl(node) -> syntax.ModuleDeclarationSyntax:
+def find_module_decl(node) -> syntax.ModuleDeclarationSyntax | None:
     """Recursively find ModuleDeclarationSyntax."""
     if node.kind == SyntaxKind.ModuleDeclaration:
         return node
+    if isinstance(node, Token):
+        return
     for child in node:
         result = find_module_decl(child)
         if result:
             return result
-    raise ValueError("ModuleDeclarationSyntax not found")
 
 
 def get_module_name(tree: SyntaxTree) -> str:
