@@ -39,12 +39,17 @@ class Rewrite:
     def apply(self, tree) -> SyntaxTree:
         """Apply this single rewrite to source."""
 
-        def handler(node, rewriter, r=self):
-            if r.matcher(node):
-                replacement = r.get_replacement(node)
+        def handler(node, rewriter: SyntaxRewriter):
+            
+            if self.matcher(node):
+                replacement = self.get_replacement(node)
                 rewriter.replace(node, replacement)
-
-        return syntax.rewrite(tree, handler)
+        try:
+            temp_tree = syntax.rewrite(tree, handler)
+        except Exception as e:
+            print(f"Error applying rewrite: {e}")
+            return tree
+        return temp_tree
 
 
 @dataclass
@@ -154,7 +159,7 @@ def shrink_bits(tree: SyntaxTree) -> RewriteSet:
 
             return matcher
 
-        def get_replacement(target=nodes[index]):
+        def get_replacement(target):
             dim = int(target.getFirstToken().rawText)
             if dim > 0:
                 new_dim = dim - 1
@@ -166,7 +171,6 @@ def shrink_bits(tree: SyntaxTree) -> RewriteSet:
         dim = int(nodes[index].getFirstToken().rawText) - 1
         new_dim = max(dim, 0)
 
-        print(dim)
         if dim > -1:
             rewrites.append(
                 Rewrite(
@@ -440,13 +444,14 @@ async def main():
         if args.shrink_bits or args.all or args.all_no_ec:
             print("Applying shrink bits papercut...")
             sb_trees = shrink_bits(sw)
+            print("Generated", len(sb_trees.rewrites), "rewrites for shrink bits.")
             for i, rewrite in enumerate(sb_trees.rewrites):
                 runs.append(
                     Run(
                         canonical_fname=fname,
                         mod_fname=f"{fname}_sb{i}",
                         input_tree=sw,
-                        output_tree=rename_module(rewrite.apply(sw), f"{fname}_sb{i}"),
+                        output_tree=rewrite.apply(sw),# rename_module(rewrite.apply(sw), f"{fname}_sb{i}"),
                         rewrite_set=RewriteSet(rewrites=[rewrite]),
                     )
                 )
