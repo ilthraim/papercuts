@@ -23,6 +23,7 @@ FetchContent_MakeAvailable(slang)
 add_executable(papercuts
     src/main.cpp
     src/papercuts.cpp
+    src/utils.cpp
 )
 
 target_include_directories(papercuts

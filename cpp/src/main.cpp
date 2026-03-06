@@ -22,9 +22,11 @@ int main() {
     std::cout << "Papercuts C++ build successful!" << std::endl;
     
     papercuts::BitShrinkRewriter rewriter;
-    std::shared_ptr newTree = rewriter.transform(tree);
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees = rewriter.shrinkBits(tree);
 
-    std::cout << SyntaxPrinter::printFile(*newTree);
+    for (const auto& newTree : newTrees) {
+        std::cout << SyntaxPrinter::printFile(*newTree);
+    }
 
     return 0;
 }
