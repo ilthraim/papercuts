@@ -13,6 +13,8 @@ wheels/
 .uv_cache
 uv.toml
 
+# C++ build files
+.cache/
 
 #Jasper stuff
 jgproject
