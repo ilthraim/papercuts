@@ -1,0 +1,21 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "clang-sanitize-no-dep-error",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-DSLANG_ASSERT_ENABLED -fsanitize=undefined,address -fno-sanitize-recover=undefined -fno-omit-frame-pointer -fno-common -Wno-deprecated-declarations -Wno-error=deprecated-declarations",
+        "SLANG_CLANG_TIDY": "true",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+    "buildPresets": [
+    {
+      "name": "clang-sanitize-parallel",
+      "configurePreset": "clang-sanitize-no-dep-error",
+      "jobs": 96
+    }
+  ]
+}

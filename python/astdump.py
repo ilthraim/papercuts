@@ -1,9 +1,6 @@
 from sys import argv
-# from pyslang import syntax, parsing, driver
-#import pyslang
 import pyslang
 from pyslang import parsing, syntax, driver
-from pyslang.parsing import Token
 
 
 from typing import Union
@@ -68,6 +65,9 @@ def print_ast_tree(node, indent=0, prefix="", is_last=True):
 
     if isinstance(node, syntax.SyntaxNode) and node.parent and isinstance(node.parent, syntax.ModuleDeclarationSyntax) and node == node.parent.members:
         print("True")
+
+    # if node.kind == parsing.TokenKind.RegKeyword and isinstance(node, parsing.Token):
+    #     print(node.trivia.)
 
     # if type(node) == pyslang.ConditionalStatementSyntax:
     #     print(type(node.predicate))
