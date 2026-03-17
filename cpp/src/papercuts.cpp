@@ -4,6 +4,7 @@
 #include <charconv>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -12,6 +13,7 @@
 #include "slang/syntax/SyntaxKind.h"
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/syntax/SyntaxTree.h"
+#include "slang/util/SmallVector.h"
 #include "slang/util/Util.h"
 
 using namespace slang::syntax;
@@ -19,63 +21,85 @@ using namespace slang::parsing;
 
 namespace papercuts {
 void ModuleNameRewriter::handle(const ModuleHeaderSyntax& node) {
-    std::cout << "Found module header: " << node.name.valueText() << std::endl;
-    // Example of how to replace a node - this just appends "_new" to the name of the module
-    auto oldName = node.name.valueText();
-    std::string newNameStr = std::string(oldName) + "_new";
-    auto pstring = persistString(this->alloc, newNameStr);
+    auto pstring = persistString(this->alloc, this->newName);
     auto newToken = this->makeToken(TokenKind::Identifier, pstring);
 
-    std::cout << node.getChild(2).token().valueText() << std::endl; // Print the old name token (which is the 4th token in the ModuleHeaderSyntax node)
-    this->replaceToken(node, 2, newToken);
+    this->replaceToken(node, 2, newToken, true);
+}
+
+std::shared_ptr<SyntaxTree> ModuleNameRewriter::renameModule(const std::shared_ptr<SyntaxTree> tree,
+                                                             std::string newName) {
+    this->newName = newName;
+    return this->transform(tree);
 }
 
 // MARK: BitShrink
+std::vector<std::shared_ptr<SyntaxTree>> BitShrinkRewriter::shrinkBits(const std::shared_ptr<SyntaxTree> tree) {
+    widthMap.clear();
+
+    BitShrinkCollector collector;
+    widthMap = collector.getFoundNodes(tree);
+
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    while (!widthMap.empty()) {
+        currentNode = widthMap.begin()->first; // Get the first node in the map to shrink
+        nodeToShrink = currentNode->name.valueText();
+        newName = std::string(nodeToShrink) + "_papercuts";
+        newWidth = widthMap.begin()->second -
+                   1; // Get the width of the node and calculate the new width after shrinking
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+        widthMap.erase(currentNode); // Remove the current node from the map after shrinking
+    }
+
+    return newTrees;
+}
+
 void BitShrinkRewriter::handle(const DeclaratorSyntax& node) {
-    if ((this->widthMap.find(&node) != widthMap.end()) && !this->done) {
-        std::cout << "Found node to shrink: " << node.kind << std::endl;
-        this->remove(node);
-        this->widthMap.erase(&node); // Remove the node from the map after shrinking
-        this->done = true;           // Set the flag to indicate we've shrunk a node in this tree
+    if (node.name.valueText() == nodeToShrink) {
+        std::cout << "Found node to declare: " << node.kind << std::endl;
+        auto& parentDecl = node.parent->as<DataDeclarationSyntax>();
+        auto& type = parentDecl.type;
+
+        auto& newDecl = factory.declarator(makeId(persistString(alloc, newName), SingleSpace),
+                                           std::span<VariableDimensionSyntax*>{}, nullptr);
+
+        auto declElem = std::span(alloc.emplace<TokenOrSyntax>(&newDecl), size_t{1});
+        SeparatedSyntaxList<DeclaratorSyntax> declList(declElem);
+
+        auto& newDataDecl = factory.dataDeclaration(std::span<AttributeInstanceSyntax*>{},
+                                                    *deepClone(parentDecl.modifiers, alloc), *deepClone(*type, alloc),
+                                                    declList, makeSemicolon());
+        insertAfter(parentDecl, newDataDecl);
+
+        std::string oldTriviaText;
+        for (const auto& t : parentDecl.getFirstToken().trivia())
+            oldTriviaText += t.getRawText();
+
+        std::string assignText = oldTriviaText + "assign " + newName + " = {1'b0, " + std::string(nodeToShrink) + "[" + std::to_string(newWidth - 1) + ":0]}";
+        auto& newAssign = parse(assignText);
+
+        insertAfter(parentDecl, newAssign);
     }
 }
 
 void BitShrinkRewriter::handle(const IdentifierNameSyntax& node) {
     // Check to see if this is the left side of a declaration
-    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression && &node == node.parent->as<BinaryExpressionSyntax>().left) {
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
         return; // If it is, we don't want to replace it
     }
-    
+
     if (this->nodeToShrink == node.identifier.valueText()) {
         std::cout << "Found node to update: " << node.kind << std::endl;
+        replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
     }
 }
 
 void BitShrinkRewriter::handle(const IdentifierSelectNameSyntax& node) {
     return;
 }
-
-// std::vector<std::shared_ptr<SyntaxTree>> BitShrinkRewriter::shrinkBits(
-//     const std::shared_ptr<SyntaxTree> tree) {
-//     BitShrinkCollector visitor;
-//     auto foundNodes = visitor.getFoundNodes(tree);
-//     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
-
-//     this->widthMap.clear();
-//     this->nodesToShrink.clear();
-//     for (const auto& node : foundNodes) {
-//         this->widthMap.insert(node);
-//         // Insert the name of the node into the set of nodes to shrink
-//         this->nodesToShrink.emplace(node.first->name.valueText());
-//     }
-
-//     while (!this->widthMap.empty()) {
-//         this->done = false; // Reset the flag for each call to shrinkBits
-//         newTrees.push_back(this->transform(tree));
-//     }
-
-//     return newTrees;
-// }
 
 void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
     // I'm not sure if/when we will ever have a DeclaratorSyntax node that isn't a child of a
@@ -85,19 +109,16 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
     if (type->kind == SyntaxKind::LogicType) {
         auto& intType = type->as<IntegerTypeSyntax>();
         if (intType.signing && intType.signing.kind != TokenKind::UnsignedKeyword) {
-            std::cout << "Skipping signed logic declaration: " << node.name.valueText()
-                      << std::endl;
+            std::cout << "Skipping signed logic declaration: " << node.name.valueText() << std::endl;
             return; // Skip this node if it's a signed logic declaration
         }
         auto& dims = intType.dimensions;
         if (dims.size() == 0) {
-            std::cout << "Skipping single-bit logic declaration: " << node.name.valueText()
-                      << std::endl;
+            std::cout << "Skipping single-bit logic declaration: " << node.name.valueText() << std::endl;
             return; // Skip this node if it's a single-bit logic declaration
         }
         if (dims.size() > 1) {
-            std::cout << "Skipping multi-dimensional logic declaration: " << node.name.valueText()
-                      << std::endl;
+            std::cout << "Skipping multi-dimensional logic declaration: " << node.name.valueText() << std::endl;
             return; // Skip this node if it's a multi-dimensional logic declaration
         }
         // We only want to look at one-dimensional logic decls, and no wildcard or queue dimensions
@@ -117,8 +138,7 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
         int width = std::abs(leftVal - rightVal) + 1;
 
         if (width <= 1) {
-            std::cout << "Skipping single-bit logic declaration: " << node.name.valueText()
-                      << std::endl;
+            std::cout << "Skipping single-bit logic declaration: " << node.name.valueText() << std::endl;
             return; // Skip this node if it's a single-bit logic declaration
         }
 
@@ -140,16 +160,14 @@ void TernaryRemover::handle(const ConditionalExpressionSyntax& node) {
         auto replacement = this->LR ? node.left : node.right;
         this->replace(node, *replacement);
         if (this->LR)
-            this->nodesToChange.erase(
-                &node);       // Remove the node from the set after promoting both sides
-        this->LR = !this->LR; // Alternate between replacing with the left and right side of the
-                              // ternary operator
-        this->done = true;    // Set the flag to indicate we've hit this node already
+            this->nodesToChange.erase(&node); // Remove the node from the set after promoting both sides
+        this->LR = !this->LR;                 // Alternate between replacing with the left and right side of the
+                                              // ternary operator
+        this->done = true;                    // Set the flag to indicate we've hit this node already
     }
 }
 
-std::vector<std::shared_ptr<SyntaxTree>> TernaryRemover::removeTernaries(
-    const std::shared_ptr<SyntaxTree> tree) {
+std::vector<std::shared_ptr<SyntaxTree>> TernaryRemover::removeTernaries(const std::shared_ptr<SyntaxTree> tree) {
     TernaryCollector visitor;
     auto foundNodes = visitor.getFoundNodes(tree);
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
@@ -186,8 +204,7 @@ void IfRemover::handle(const ConditionalStatementSyntax& node) {
 
         if (this->TF) {
             if (node.elseClause == nullptr) {
-                std::cout << "If statement has no else clause, replacing with empty statement"
-                          << std::endl;
+                std::cout << "If statement has no else clause, replacing with empty statement" << std::endl;
                 this->remove(node);
             }
             else {
@@ -200,16 +217,14 @@ void IfRemover::handle(const ConditionalStatementSyntax& node) {
             this->replace(node, *replacement);
         }
         if (this->TF)
-            this->nodesToChange.erase(
-                &node);       // Remove the node from the set after promoting both branches
-        this->TF = !this->TF; // Alternate between replacing with the true and false branch of the
-                              // if statement
-        this->done = true;    // Set the flag to indicate we've hit this node already
+            this->nodesToChange.erase(&node); // Remove the node from the set after promoting both branches
+        this->TF = !this->TF;                 // Alternate between replacing with the true and false branch of the
+                                              // if statement
+        this->done = true;                    // Set the flag to indicate we've hit this node already
     }
 }
 
-std::vector<std::shared_ptr<SyntaxTree>> IfRemover::removeIfs(
-    const std::shared_ptr<SyntaxTree> tree) {
+std::vector<std::shared_ptr<SyntaxTree>> IfRemover::removeIfs(const std::shared_ptr<SyntaxTree> tree) {
     IfCollector visitor;
     auto foundNodes = visitor.getFoundNodes(tree);
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;

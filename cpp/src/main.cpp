@@ -13,7 +13,7 @@ int main() {
     auto tree = slang::syntax::SyntaxTree::fromText(R"(
         module top;
             logic [7:0] a, b, c;
-            logic signed x;
+            static const logic signed x;
             logic unsigned q;
             assign c = x ? a : b;
 
@@ -37,16 +37,13 @@ int main() {
     papercuts::TernaryRemover TR;
     papercuts::IfRemover IR;
     papercuts::ModuleNameRewriter MNR;
-    //std::vector<std::shared_ptr<SyntaxTree>> newTrees = BSR.shrinkBits(tree);
-    std::vector<std::shared_ptr<SyntaxTree>> newTrees = IR.removeIfs(tree);
-
-    std::shared_ptr<SyntaxTree> newTree = MNR.transform(tree);
+    papercuts::TestRewriter TRW;
+    papercuts::ASTPrinter AP;
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees = BSR.shrinkBits(tree);
 
     for (const auto& newTree : newTrees) {
         std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
     }
-
-    std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
 
     return 0;
 }
