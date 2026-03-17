@@ -13,16 +13,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # Useful for IDE support / clangd
 # ---- Fetch slang ----
 include(FetchContent)
 
-# FetchContent_Declare(
-#     slang
-#     GIT_REPOSITORY https://github.com/MikePopoloski/slang.git
-#     GIT_TAG        ddae1965df2fd6d94cc1730d823b96f495307782      # March 4 2026
-# )
 FetchContent_Declare(
     slang
-    GIT_REPOSITORY https://github.com/ilthraim/slang.git
-    GIT_TAG        TokenRewriter      # March 4 2026
+    GIT_REPOSITORY https://github.com/MikePopoloski/slang.git
 )
+# FetchContent_Declare(
+#     slang
+#     GIT_REPOSITORY https://github.com/ilthraim/slang.git
+#     GIT_TAG        TokenRewriter      # March 4 2026
+# )
 
 FetchContent_MakeAvailable(slang)
 

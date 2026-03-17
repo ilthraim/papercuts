@@ -3,9 +3,20 @@
   "configurePresets": [
     {
       "name": "clang-sanitize-no-dep-error",
+      "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-DSLANG_ASSERT_ENABLED -fsanitize=undefined,address -fno-sanitize-recover=undefined -fno-omit-frame-pointer -fno-common -Wno-deprecated-declarations -Wno-error=deprecated-declarations",
+        "SLANG_CLANG_TIDY": "true",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+    "name": "clang-sanitize-no-assert",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-fsanitize=undefined,address -fno-sanitize-recover=undefined -fno-omit-frame-pointer -fno-common -Wno-deprecated-declarations -Wno-error=deprecated-declarations",
         "SLANG_CLANG_TIDY": "true",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
@@ -15,6 +26,11 @@
     {
       "name": "clang-sanitize-parallel",
       "configurePreset": "clang-sanitize-no-dep-error",
+      "jobs": 96
+    },
+    {
+      "name": "clang-sanitize-parallel-no-assert",
+      "configurePreset": "clang-sanitize-no-assert",
       "jobs": 96
     }
   ]
