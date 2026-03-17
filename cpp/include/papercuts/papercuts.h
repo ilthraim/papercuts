@@ -8,6 +8,7 @@
 #include <unordered_set>
 
 #include "slang/syntax/AllSyntax.h"
+#include "slang/syntax/SyntaxKind.h"
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/syntax/SyntaxVisitor.h"
 #include "slang/parsing/TokenKind.h"
@@ -52,6 +53,7 @@ template<typename TDerived>
 class PapercutsRewriter : public SyntaxRewriter<TDerived> {
 protected:
     using SyntaxRewriter<TDerived>::makeToken;
+    using SyntaxRewriter<TDerived>::factory;
 
     Token makeSemicolon(std::span<const Trivia> trivia = {}) { return makeToken(TokenKind::Semicolon, ";", trivia); }
     Token makeOpenBrace(std::span<const Trivia> trivia = {}) { return makeToken(TokenKind::OpenBrace, "{", trivia); }
@@ -60,6 +62,10 @@ protected:
     Token makeOpenBracket(std::span<const Trivia> trivia = {}) { return makeToken(TokenKind::OpenBracket, "[", trivia); }
     Token makeCloseBracket(std::span<const Trivia> trivia = {}) { return makeToken(TokenKind::CloseBracket, "]", trivia); }
     Token makeColon(std::span<const Trivia> trivia = {}) { return makeToken(TokenKind::Colon, ":", trivia); }
+
+    ExpressionSyntax& makeIntLiteral(const std::string_view value, std::span<const Trivia> trivia = {}) {
+        return factory.literalExpression(SyntaxKind::IntegerLiteralExpression, makeToken(TokenKind::IntegerLiteral, value, trivia));
+    }
 
     template<typename TNode>
     SeparatedSyntaxList<TNode> makeSeparatedList(std::span<TNode* const> nodes,
@@ -92,8 +98,13 @@ protected:
 
         return SyntaxList<TNode>(buffer.copy(this->alloc));
     }
+
+    static const Trivia NewLine;
 private:
 };
+
+template<typename TDerived>
+const Trivia PapercutsRewriter<TDerived>::NewLine{TriviaKind::EndOfLine, "\n"sv};
 
 // MARK: BitShrink
 class BitShrinkRewriter : public PapercutsRewriter<BitShrinkRewriter> {
@@ -101,6 +112,7 @@ private:
     std::string_view nodeToShrink; // Store the name of the current node we want to shrink
     const DeclaratorSyntax* currentNode; // Store the current DeclaratorSyntax node we want to shrink
     std::string newName; // Store the new name we want to give to the node we're shrinking
+    int newWidth; // Store the new width we want to give to the node we're shrinking
     std::unordered_map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
     bool done = false; // Flag to indicate if we've already shrunk bits in the current tree
 public:

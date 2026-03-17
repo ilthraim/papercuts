@@ -18,4 +18,5 @@ namespace papercuts {
         }
         return value;
     }
+
 }
