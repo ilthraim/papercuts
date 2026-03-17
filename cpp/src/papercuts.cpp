@@ -2,10 +2,12 @@
 
 #include "papercuts/utils.h"
 #include <charconv>
+#include <concepts>
 #include <iostream>
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "slang/parsing/TokenKind.h"
@@ -33,8 +35,56 @@ std::shared_ptr<SyntaxTree> ModuleNameRewriter::renameModule(const std::shared_p
     return this->transform(tree);
 }
 
-// MARK: BitShrink
-std::vector<std::shared_ptr<SyntaxTree>> BitShrinkRewriter::shrinkBits(const std::shared_ptr<SyntaxTree> tree) {
+std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree> tree, bool bitShrink, bool ternaryRemove,
+                                             bool ifRemove) {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    if (bitShrink) {
+        BitShrinker BSR;
+        auto bitShrinkTrees = BSR.shrinkBits(tree);
+        newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
+    }
+    if (ternaryRemove) {
+        TernaryRemover TR;
+        auto ternaryRemoveTrees = TR.removeTernaries(tree);
+        newTrees.insert(newTrees.end(), ternaryRemoveTrees.begin(), ternaryRemoveTrees.end());
+    }
+    if (ifRemove) {
+        IfRemover IR;
+        auto ifRemoveTrees = IR.removeIfs(tree);
+        newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
+    }
+    return newTrees;
+}
+
+std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
+                                        bool ifMux) {
+    std::shared_ptr<SyntaxTree> newTree = tree;
+
+    MuxContext context;
+
+    // if (bitMux) {
+    //     BitMuxer BM(context);
+    //     newTree = BM.insertBitShrinkMuxes(newTree);
+    // }
+    if (ternaryMux) {
+        TernaryMuxer TM(context);
+        newTree = TM.insertTernaryMuxes(newTree);
+    }
+    if (ifMux) {
+        IfMuxer IM(context);
+        newTree = IM.insertIfMuxes(newTree);
+    }
+    return newTree;
+}
+
+// MARK: BitMuxer
+std::shared_ptr<SyntaxTree> BitMuxer::insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree> tree) {
+    return this->transform(tree);
+}
+
+// MARK: BitShrinker
+std::vector<std::shared_ptr<SyntaxTree>> BitShrinker::shrinkBits(const std::shared_ptr<SyntaxTree> tree) {
     widthMap.clear();
 
     BitShrinkCollector collector;
@@ -56,7 +106,7 @@ std::vector<std::shared_ptr<SyntaxTree>> BitShrinkRewriter::shrinkBits(const std
     return newTrees;
 }
 
-void BitShrinkRewriter::handle(const DeclaratorSyntax& node) {
+void BitShrinker::handle(const DeclaratorSyntax& node) {
     if (node.name.valueText() == nodeToShrink) {
         std::cout << "Found node to declare: " << node.kind << std::endl;
         auto& parentDecl = node.parent->as<DataDeclarationSyntax>();
@@ -77,14 +127,15 @@ void BitShrinkRewriter::handle(const DeclaratorSyntax& node) {
         for (const auto& t : parentDecl.getFirstToken().trivia())
             oldTriviaText += t.getRawText();
 
-        std::string assignText = oldTriviaText + "assign " + newName + " = {1'b0, " + std::string(nodeToShrink) + "[" + std::to_string(newWidth - 1) + ":0]}";
+        std::string assignText = oldTriviaText + "assign " + newName + " = {1'b0, " + std::string(nodeToShrink) + "[" +
+                                 std::to_string(newWidth - 1) + ":0]}";
         auto& newAssign = parse(assignText);
 
         insertAfter(parentDecl, newAssign);
     }
 }
 
-void BitShrinkRewriter::handle(const IdentifierNameSyntax& node) {
+void BitShrinker::handle(const IdentifierNameSyntax& node) {
     // Check to see if this is the left side of a declaration
     if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
         &node == node.parent->as<BinaryExpressionSyntax>().left) {
@@ -97,7 +148,7 @@ void BitShrinkRewriter::handle(const IdentifierNameSyntax& node) {
     }
 }
 
-void BitShrinkRewriter::handle(const IdentifierSelectNameSyntax& node) {
+void BitShrinker::handle(const IdentifierSelectNameSyntax& node) {
     return;
 }
 
@@ -153,17 +204,33 @@ std::unordered_map<const DeclaratorSyntax*, int> BitShrinkCollector::getFoundNod
     return this->widthMap;
 }
 
+// MARK: TernaryMuxer
+std::shared_ptr<SyntaxTree> TernaryMuxer::insertTernaryMuxes(const std::shared_ptr<SyntaxTree> tree) {
+    return transform(tree);
+}
+
+void TernaryMuxer::handle(const ConditionalExpressionSyntax& node) {
+    std::string sel0 = "pc_sel" + std::to_string(context.muxCount++);
+    std::string sel1 = "pc_sel" + std::to_string(context.muxCount++);
+    std::string newNodeStr = "(" + sel1 + " | " + "(!" + sel0 + " & (" + node.predicate->toString() + ")))";
+    auto& newNode = parse(newNodeStr);
+
+    auto& newPred = makeConditionalPredicate(newNode.as<ExpressionSyntax>());
+
+    replace(*node.predicate, newPred);
+}
+
 // MARK: TernaryRemover
 void TernaryRemover::handle(const ConditionalExpressionSyntax& node) {
-    if ((this->nodesToChange.find(&node) != nodesToChange.end()) && !this->done) {
+    if ((nodesToChange.find(&node) != nodesToChange.end()) && !done) {
         std::cout << "Found ternary operator to remove: " << node.kind << std::endl;
-        auto replacement = this->LR ? node.left : node.right;
+        auto replacement = LR ? node.left : node.right;
         this->replace(node, *replacement);
-        if (this->LR)
-            this->nodesToChange.erase(&node); // Remove the node from the set after promoting both sides
-        this->LR = !this->LR;                 // Alternate between replacing with the left and right side of the
-                                              // ternary operator
-        this->done = true;                    // Set the flag to indicate we've hit this node already
+        if (LR)
+            nodesToChange.erase(&node); // Remove the node from the set after promoting both sides
+        LR = !LR;                       // Alternate between replacing with the left and right side of the
+                                        // ternary operator
+        done = true;                    // Set the flag to indicate we've hit this node already
     }
 }
 
@@ -195,6 +262,21 @@ std::unordered_set<const ConditionalExpressionSyntax*> TernaryCollector::getFoun
     tree->root().visit(*this);
 
     return this->foundNodes;
+}
+
+// MARK: IfMuxer
+std::shared_ptr<SyntaxTree> IfMuxer::insertIfMuxes(const std::shared_ptr<SyntaxTree> tree) {
+    return transform(tree);
+}
+
+void IfMuxer::handle(const ConditionalStatementSyntax& node) {
+    std::string sel0 = "pc_sel" + std::to_string(context.muxCount++);
+    std::string sel1 = "pc_sel" + std::to_string(context.muxCount++);
+    std::string newNodeStr = "(" + sel1 + " | " + "(!" + sel0 + " & (" + node.predicate->toString() + ")))";
+    auto& newNode = parse(newNodeStr);
+
+    auto& newPred = makeConditionalPredicate(newNode.as<ExpressionSyntax>());
+    replace(*node.predicate, newPred);
 }
 
 // MARK: IfRemover

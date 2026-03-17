@@ -1,10 +1,10 @@
+#include "papercuts/papercuts.h"
 #include <iostream>
+#include <memory>
+
+#include "slang/ast/Compilation.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/syntax/SyntaxTree.h"
-#include "slang/ast/Compilation.h"
-
-#include "papercuts/papercuts.h"
-#include <memory>
 
 using namespace slang::syntax;
 
@@ -32,18 +32,22 @@ int main() {
     compilation.addSyntaxTree(tree);
 
     std::cout << "Papercuts C++ build successful!" << std::endl;
-    
-    papercuts::BitShrinkRewriter BSR;
+
+    papercuts::BitShrinker BSR;
     papercuts::TernaryRemover TR;
     papercuts::IfRemover IR;
     papercuts::ModuleNameRewriter MNR;
     papercuts::TestRewriter TRW;
     papercuts::ASTPrinter AP;
-    std::vector<std::shared_ptr<SyntaxTree>> newTrees = BSR.shrinkBits(tree);
 
-    for (const auto& newTree : newTrees) {
-        std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
-    }
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees = papercuts::cut(tree, true, true, true);
+
+    // for (const auto& newTree : newTrees) {
+    //     std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    // }
+
+    auto newTree = papercuts::insertMuxes(tree, true, true, true);
+    std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
 
     return 0;
 }
