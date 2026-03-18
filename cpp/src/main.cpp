@@ -32,14 +32,17 @@ int main() {
     auto tree = slang::syntax::SyntaxTree::fromText(R"(
         module top;
             logic [7:0] a, b;
+            logic [3:0] c, d;
 
             assign b = a[7] ? a : 8'h00;
 
             always_comb begin
                 if (a[7]) begin
                     a = 8'hFF;
+                    {c, d} = a;
                 end else begin
                     a = 8'h00;
+                    {c, d} = a;
                 end
             end
 

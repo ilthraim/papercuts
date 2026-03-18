@@ -67,17 +67,20 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
     BitMuxer BM(context);
     TernaryMuxer TM(context);
     IfMuxer IM(context);
+    ParentSetter PS;
+    
 
     if (bitMux) {
         BM.initialize(tree);
     }
-    
     if (ternaryMux) {
         newTree = TM.insertTernaryMuxes(newTree);
     }
+    //PS.visit(newTree->root());  
     if (ifMux) {
         newTree = IM.insertIfMuxes(newTree);
     }
+    PS.visit(newTree->root()); 
     if (bitMux) {
         newTree = BM.insertBitShrinkMuxes(newTree);
     }
@@ -133,34 +136,41 @@ void BitMuxer::handle(const DataDeclarationSyntax& node) {
 }
 
 void BitMuxer::handle(const IdentifierNameSyntax& node) {
-    // if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
-    //     &node == node.parent->as<BinaryExpressionSyntax>().left) {
-    //     return; // Don't replace the left side of an assignment expression
-    // }
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
+        return; // Don't replace the left side of an assignment expression
+    }
 
-    // auto it = nodesToShrink.find(std::string(node.identifier.valueText()));
-    // if (it != nodesToShrink.end()) {
-    //     std::string nodeName{node.identifier.valueText()};
-    //     std::string newName = nodeName + "_papercuts";
-    //     std::cout << newName << std::endl;
-    //     replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
-    //     //replaceToken(node, 0, makeId("test"), true);
-    // }
+    auto it = widthMap.find(std::string(node.identifier.valueText()));
+    if (it != widthMap.end()) {
+        std::string nodeName{node.identifier.valueText()};
+        std::string newName = nodeName + "_papercuts";
+        replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
+    }
 }
 
 void BitMuxer::handle(const IdentifierSelectNameSyntax& node) {
-    // if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
-    //     &node == node.parent->as<BinaryExpressionSyntax>().left) {
-    //     return; // Don't replace the left side of an assignment expression
-    // }
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
+        return; // Don't replace the left side of an assignment expression
+    }
 
-    // std::string oldName{node.identifier.valueText()};
+    std::string oldName{node.identifier.valueText()};
 
-    // auto it = widthMap.find(oldName);
-    // if (it != widthMap.end()) {
-    //     std::string newName = oldName + "_papercuts";
-    //     replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
-    // }
+    auto it = widthMap.find(oldName);
+    if (it != widthMap.end()) {
+        std::string newName = oldName + "_papercuts";
+        replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
+    }
+}
+
+void BitMuxer::handle(const SyntaxNode& node) {
+     // Check to see if this is the left side of a declaration
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
+        return; // If it is, we don't want to replace it
+    }
+    visitDefault(node);
 }
 
 // MARK: BitShrinker
@@ -236,6 +246,15 @@ void BitShrinker::handle(const IdentifierSelectNameSyntax& node) {
     if (this->nodeToShrink == node.identifier.valueText()) {
         replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
     }
+}
+
+void BitShrinker::handle(const SyntaxNode& node) {
+     // Check to see if this is the left side of a declaration
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
+        return; // If it is, we don't want to replace it
+    }
+    visitDefault(node);
 }
 
 void BitShrinkCollector::handle(const DeclaratorSyntax& node) {

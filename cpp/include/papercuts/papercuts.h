@@ -31,18 +31,61 @@ public:
 };
 
 class TestRewriter : public SyntaxRewriter<TestRewriter> {
+private:
 public:
-    void handle(const DataDeclarationSyntax& node) {
-        const auto& modifiers = node.modifiers;
-        std::cout << "Found a data declaration with " << modifiers.size() << " modifiers!" << std::endl;
+    void handle(const SyntaxNode& node) {
+    }
+};
 
-        for (size_t i = 0; i < modifiers.size(); i++) {
-            std::cout << "  Modifier[" << i << "]: " << modifiers[i].valueText() << std::endl;
+class TestVisitor : public SyntaxVisitor<TestVisitor> {
+private:
+    std::unordered_set<SyntaxNode*> visitedNodes;
+public:
+    void handle(const SyntaxNode& node) {
+        if (visitedNodes.find(node.parent) != visitedNodes.end()) {
+            std::cout << "Already visited parent node: " << node.kind << " of type " << node.parent->kind << std::endl;
+        } else {
+            std::cout << "not found parent node for " << node.kind << std::endl;
+        }
+        visitedNodes.insert(const_cast<SyntaxNode*>(&node));
 
-            this->removeToken(modifiers, i);
+        this->visitDefault(node);
+    }
+};
+
+class ParentSetter{
+public:
+    void visit(SyntaxNode& node) {
+        bool isList = node.kind == SyntaxKind::SeparatedList || node.kind == SyntaxKind::SyntaxList || node.kind == SyntaxKind::TokenList;
+        if (!isList) {
+            for (size_t i = 0; i < node.getChildCount(); i++) {
+                auto child = node.childNode(i);
+                if (child) { // If not a token
+                    if (child->kind == SyntaxKind::SeparatedList || child->kind == SyntaxKind::SyntaxList || child->kind == SyntaxKind::TokenList) { // If child is a list we need to set the parents of all the elements
+                        for (size_t j = 0; j < child->getChildCount(); j++) {
+                            auto grandChild = child->childNode(j);
+                            if (grandChild) { // If not a token
+                                grandChild->parent = &node;
+                            }
+                        }
+                    }
+                    child->parent = &node;
+
+                    visit(*child);
+                }
+            }
+        } else { // If this is a list, just visit all the children
+            for (size_t i = 0; i < node.getChildCount(); i++) {
+                auto child = node.childNode(i);
+                if (child) {
+                    visit(*child);
+                }
+            }
+
         }
     }
 };
+
 
 class ModuleNameRewriter : public SyntaxRewriter<ModuleNameRewriter> {
 private:
@@ -143,8 +186,9 @@ public:
     std::shared_ptr<SyntaxTree> insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree>);
     void initialize(const std::shared_ptr<SyntaxTree>);
     void handle(const DataDeclarationSyntax& node);
-    void handle(const IdentifierNameSyntax&);
-    void handle(const IdentifierSelectNameSyntax&);
+    void handle(const IdentifierNameSyntax& node);
+    void handle(const IdentifierSelectNameSyntax& node);
+    void handle(const SyntaxNode& node);
 };
 
 class BitShrinker : public PapercutsRewriter<BitShrinker> {
@@ -156,9 +200,10 @@ private:
     std::unordered_map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
     bool done = false; // Flag to indicate if we've already shrunk bits in the current tree
 public:
-    void handle(const DeclaratorSyntax&);
-    void handle(const IdentifierNameSyntax&);
-    void handle(const IdentifierSelectNameSyntax&);
+    void handle(const DeclaratorSyntax& node);
+    void handle(const IdentifierNameSyntax& node);
+    void handle(const IdentifierSelectNameSyntax& node);
+    void handle(const SyntaxNode& node);
     std::vector<std::shared_ptr<SyntaxTree>> shrinkBits(const std::shared_ptr<SyntaxTree>);
 };
 
