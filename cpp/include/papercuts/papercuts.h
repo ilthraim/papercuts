@@ -17,14 +17,17 @@
 using namespace slang::syntax;
 using namespace slang::parsing;
 
-namespace papercuts { 
-struct MuxContext{
+namespace papercuts {
+struct MuxContext {
     int muxCount = 0;
 };
 
 class ASTPrinter : public SyntaxVisitor<ASTPrinter> {
 public:
-    void handle(const DataDeclarationSyntax& node) { this->visitDefault(node); }
+    void handle(const SyntaxNode& node) { 
+        std::cout << node.kind << std::endl;
+        this->visitDefault(node); 
+        }
 };
 
 class TestRewriter : public SyntaxRewriter<TestRewriter> {
@@ -53,7 +56,8 @@ public:
 
 std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree>, bool, bool, bool);
 
-std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree>, bool, bool, bool);
+std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
+                                        bool ifMux);
 
 // MARK: Base Rewriter
 template<typename TDerived>
@@ -129,12 +133,18 @@ template<typename TDerived>
 const Trivia PapercutsRewriter<TDerived>::NewLine{TriviaKind::EndOfLine, "\n"sv};
 
 // MARK: BitShrink
-class BitMuxer: public PapercutsRewriter<BitMuxer> {
+class BitMuxer : public PapercutsRewriter<BitMuxer> {
 private:
+    bool initialized = false;
     MuxContext& context;
+    std::unordered_map<std::string, int> widthMap;
 public:
     BitMuxer(MuxContext& context) : context(context) {}
     std::shared_ptr<SyntaxTree> insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree>);
+    void initialize(const std::shared_ptr<SyntaxTree>);
+    void handle(const DataDeclarationSyntax& node);
+    void handle(const IdentifierNameSyntax&);
+    void handle(const IdentifierSelectNameSyntax&);
 };
 
 class BitShrinker : public PapercutsRewriter<BitShrinker> {
@@ -161,9 +171,10 @@ public:
 };
 
 // MARK: Ternary
-class TernaryMuxer: public PapercutsRewriter<TernaryMuxer> {
+class TernaryMuxer : public PapercutsRewriter<TernaryMuxer> {
 private:
     MuxContext& context;
+
 public:
     TernaryMuxer(MuxContext& context) : context(context) {}
     std::shared_ptr<SyntaxTree> insertTernaryMuxes(const std::shared_ptr<SyntaxTree>);
@@ -190,9 +201,10 @@ public:
 };
 
 // MARK: If
-class IfMuxer: public PapercutsRewriter<IfMuxer> {
+class IfMuxer : public PapercutsRewriter<IfMuxer> {
 private:
     MuxContext& context;
+
 public:
     IfMuxer(MuxContext& context) : context(context) {}
     std::shared_ptr<SyntaxTree> insertIfMuxes(const std::shared_ptr<SyntaxTree>);
