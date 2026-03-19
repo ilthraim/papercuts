@@ -490,33 +490,213 @@ std::vector<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(const 
     return this->foundNodes;
 }
 
-Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree) : tree(tree), BSR(tree), TR(tree), IR(tree) {
+// MARK: Papercutter
 
-    cutCount = BSR.getCutCount() + TR.getCutCount() + IR.getCutCount();
+Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+    BitShrinkCollector BSC;
+    shrinkNodes = BSC.getFoundNodes(tree);
+    cutCount += shrinkNodes.size();
+    BSRCount = shrinkNodes.size();
+
+    TernaryCollector TC;
+    ternaryNodes = TC.getFoundNodes(tree);
+    cutCount += ternaryNodes.size() * 2;
+    TRCount = ternaryNodes.size() * 2;
+
+    IfCollector IC;
+    ifNodes = IC.getFoundNodes(tree);
+    cutCount += ifNodes.size() * 2;
+    IRCount = ifNodes.size() * 2;
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
 
-    auto bitShrinkTrees = BSR.shrinkAllBits();
+    auto bitShrinkTrees = shrinkAllBits();
     newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
 
-    auto ternaryRemoveTrees = TR.removeAllTernaries();
+    auto ternaryRemoveTrees = removeAllTernaries();
     newTrees.insert(newTrees.end(), ternaryRemoveTrees.begin(), ternaryRemoveTrees.end());
 
-    auto ifRemoveTrees = IR.removeAllIfs();
+    auto ifRemoveTrees = removeAllIfs();
     newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
 
     return newTrees;
 }
 
-std::shared_ptr<SyntaxTree> Papercutter::cutIndex(size_t index) {
-    if (index >= cutCount) {
-        throw std::out_of_range("Index out of range for cutIndex");
+std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
+
+    clearState();
+
+    for (size_t i: indicesToCut) {
+        if (i >= cutCount) {
+            throw std::out_of_range("Index out of range for cutIndex");
+        }
+
+        if (i < BSRCount) {
+            size_t nodeIndex = i;
+            nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
+            runMap.emplace(shrinkNodes[nodeIndex]);
+        }
+        else if (i < BSRCount + TRCount) {
+            size_t nodeIndex = (i - BSRCount) / 2;
+            bool removeLeft = ((i - BSRCount) % 2 != 0);
+            ternaryNodesToChange.emplace(ternaryNodes[nodeIndex], removeLeft);
+        }
+        else {
+            size_t nodeIndex = (i - BSRCount - TRCount) / 2;
+            bool removeTrueBranch = ((i - BSRCount - TRCount) % 2 != 0);
+            ifNodesToChange.emplace(ifNodes[nodeIndex], removeTrueBranch);
+        }
     }
+
+    return transform(tree); 
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> Papercutter::shrinkAllBits() {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+    nodesToShrink.clear();
+    runMap.clear();
+
+    for (const auto& pair : shrinkNodes) {
+        nodesToShrink.clear();
+        runMap.clear();
+        nodesToShrink.emplace(pair.first->name.valueText());
+        runMap.emplace(pair);
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+    }
+
+    return newTrees;
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllTernaries() {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
 
-    return tree; // Placeholder
+    ternaryNodesToChange.clear();
+
+    for (const auto& node : ternaryNodes) {
+        ternaryNodesToChange.clear();
+        this->ternaryNodesToChange.emplace(node, false);
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+        ternaryNodesToChange.clear();
+        this->ternaryNodesToChange.emplace(node, true);
+        newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+    }
+
+    return newTrees;
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllIfs() {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    this->ifNodesToChange.clear();
+
+    for (const auto& node : ifNodes) {
+        ifNodesToChange.clear();
+        ifNodesToChange.emplace(node, false);
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+        ifNodesToChange.clear();
+        ifNodesToChange.emplace(node, true);
+        newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+    }
+
+    return newTrees;
+}
+
+void Papercutter::handle(const DeclaratorSyntax& node) {
+    if (runMap.contains(&node)) {
+        auto newName = std::string(node.name.valueText()) + "_papercuts";
+        int newWidth = runMap[&node] - 1; // Get the width of the node and calculate the new width after shrinking
+        auto& parentDecl = node.parent->as<DataDeclarationSyntax>();
+        auto& type = parentDecl.type;
+
+        auto& newDecl = factory.declarator(makeId(persistString(alloc, newName), SingleSpace),
+                                           std::span<VariableDimensionSyntax*>{}, nullptr);
+
+        auto declElem = std::span(alloc.emplace<TokenOrSyntax>(&newDecl), size_t{1});
+        SeparatedSyntaxList<DeclaratorSyntax> declList(declElem);
+
+        auto& newDataDecl = factory.dataDeclaration(std::span<AttributeInstanceSyntax*>{},
+                                                    *deepClone(parentDecl.modifiers, alloc), *deepClone(*type, alloc),
+                                                    declList, makeSemicolon());
+        insertAfter(parentDecl, newDataDecl);
+
+        std::string oldTriviaText;
+        for (const auto& t : parentDecl.getFirstToken().trivia())
+            oldTriviaText += t.getRawText();
+
+        std::string assignText = oldTriviaText + "assign " + newName + " = {1'b0, " +
+                                 std::string(node.name.valueText()) + "[" + std::to_string(newWidth - 1) + ":0]};";
+        auto& newAssign = parse(assignText);
+
+        insertAfter(parentDecl, newAssign);
+    }
+}
+
+void Papercutter::handle(const IdentifierNameSyntax& node) {
+    // Check to see if this is the left side of a declaration
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
+        return; // If it is, we don't want to replace it
+    }
+
+    if (nodesToShrink.contains(std::string(node.identifier.valueText()))) {
+        replaceToken(node, 0, makeId(persistString(alloc, std::string(node.identifier.valueText()) + "_papercuts")),
+                     true);
+    }
+}
+
+void Papercutter::handle(const IdentifierSelectNameSyntax& node) {
+    // Check to see if this is the left side of a declaration
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
+        return; // If it is, we don't want to replace it
+    }
+
+    if (nodesToShrink.contains(std::string(node.identifier.valueText()))) {
+        replaceToken(node, 0, makeId(persistString(alloc, std::string(node.identifier.valueText()) + "_papercuts")),
+                     true);
+    }
+}
+
+void Papercutter::handle(const SyntaxNode& node) {
+    // Check to see if this is the left side of a declaration
+    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
+        &node == node.parent->as<BinaryExpressionSyntax>().left) {
+        return; // If it is, we don't want to replace it
+    }
+    visitDefault(node);
+}
+
+void Papercutter::handle(const ConditionalExpressionSyntax& node) {
+    if (ternaryNodesToChange.contains(&node)) {
+        auto replacement = ternaryNodesToChange[&node] ? node.left : node.right;
+        this->replace(node, *replacement);
+    }
+}
+
+void Papercutter::handle(const ConditionalStatementSyntax& node) {
+    if (ifNodesToChange.contains(&node)) {
+        if (ifNodesToChange[&node]) { // If true, replace with the true branch of the if statement
+            if (node.elseClause == nullptr) {
+                std::cout << "If statement has no else clause, replacing with empty statement" << std::endl;
+                this->remove(node);
+            }
+            else {
+                auto replacement = node.elseClause->clause;
+                this->replace(node, *replacement);
+            }
+        }
+        else {
+            auto replacement = node.statement;
+            this->replace(node, *replacement);
+        }
+    }
 }
 
 } // namespace papercuts

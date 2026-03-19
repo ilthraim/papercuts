@@ -290,17 +290,48 @@ public:
 
 // MARK: Papercutter
 
-class Papercutter {
+class Papercutter: public PapercutsRewriter<Papercutter> {
 private:
     std::shared_ptr<SyntaxTree> tree;
     size_t cutCount = 0;
-    BitShrinker BSR;
-    TernaryRemover TR;
-    IfRemover IR;
+    size_t BSRCount = 0;
+    size_t TRCount = 0;
+    size_t IRCount = 0;
+
+    // Bit shrinker variables
+    std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
+    std::unordered_map<const DeclaratorSyntax*, int> runMap;
+    std::unordered_set<std::string> nodesToShrink; // Set to store the names of the nodes we want to shrink bits in
+
+    // Ternary remover variables
+    std::vector<const ConditionalExpressionSyntax*> ternaryNodes;
+    std::unordered_map<const ConditionalExpressionSyntax*, bool> ternaryNodesToChange;
+
+    // If remover variables
+    std::vector<const ConditionalStatementSyntax*> ifNodes;
+    std::unordered_map<const ConditionalStatementSyntax*, bool> ifNodesToChange;
+
+    void clearState() {
+        nodesToShrink.clear();
+        runMap.clear();
+        ternaryNodesToChange.clear();
+        ifNodesToChange.clear();
+    }
 public:
     Papercutter(const std::shared_ptr<SyntaxTree> tree);
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
     std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut);
+
+    std::vector<std::shared_ptr<SyntaxTree>> shrinkAllBits();
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllIfs();
+
+    void handle(const DeclaratorSyntax& node);
+    void handle(const IdentifierNameSyntax& node);
+    void handle(const IdentifierSelectNameSyntax& node);
+    void handle(const SyntaxNode& node);
+    void handle(const ConditionalExpressionSyntax&);
+    void handle(const ConditionalStatementSyntax&);
 };
 
 } // namespace papercuts
