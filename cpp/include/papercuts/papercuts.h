@@ -97,19 +97,9 @@ public:
     std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree>, std::string);
 };
 
-class Papercutter {
-private:
-    std::shared_ptr<SyntaxTree> tree;
-    size_t cutCount = 0;
-
-public:
-    Papercutter(const std::shared_ptr<SyntaxTree> tree);
-    
-};
-
 // MARK: Base functions
 
-std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree>, bool bitShrink, bool ternaryRemove,
+std::vector<std::shared_ptr<SyntaxTree>> cutAll(const std::shared_ptr<SyntaxTree>, bool bitShrink, bool ternaryRemove,
                                              bool ifRemove);
 
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
@@ -206,7 +196,7 @@ public:
 
 class BitShrinker : public PapercutsRewriter<BitShrinker> {
 private:
-    std::map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
+    std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
     std::unordered_map<const DeclaratorSyntax*, int> runMap;
     std::unordered_set<std::string> nodesToShrink; // Set to store the names of the nodes we want to shrink bits in
     const std::shared_ptr<SyntaxTree> tree; // Store the current tree we're shrinking bits in
@@ -219,14 +209,15 @@ public:
     void handle(const SyntaxNode& node);
     std::vector<std::shared_ptr<SyntaxTree>> shrinkAllBits();
     std::shared_ptr<SyntaxTree> shrinkBitsIndex(const std::vector<size_t>& indicesToShrink);
+    size_t getCutCount() const { return cutCount; }
 };
 
 class BitShrinkCollector : public SyntaxVisitor<BitShrinkCollector> {
 private:
-    std::map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
+    std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
 public:
     void handle(const DeclaratorSyntax&);
-    std::map<const DeclaratorSyntax*, int> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+    std::vector<std::pair<const DeclaratorSyntax*, int>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
 // MARK: Ternary
@@ -250,6 +241,7 @@ public:
     TernaryRemover(const::std::shared_ptr<SyntaxTree> tree);
     void handle(const ConditionalExpressionSyntax&);
     std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();
+    size_t getCutCount() const { return cutCount; }
 };
 
 class TernaryCollector : public SyntaxVisitor<TernaryCollector> {
@@ -274,20 +266,39 @@ public:
 
 class IfRemover : public PapercutsRewriter<IfRemover> {
 private:
-    std::unordered_set<const ConditionalStatementSyntax*> nodesToChange;
-    bool done = false;
-    bool TF = false; // Flag to indicate whether to replace with the true or false branch of the if statement
+    std::set<const ConditionalStatementSyntax*> ifNodes;
+    std::unordered_map<const ConditionalStatementSyntax*, bool> nodesToChange;
+    const std::shared_ptr<SyntaxTree> tree;
+    size_t cutCount;
 public:
+    IfRemover(const::std::shared_ptr<SyntaxTree> tree);
     void handle(const ConditionalStatementSyntax&);
-    std::vector<std::shared_ptr<SyntaxTree>> removeIfs(const std::shared_ptr<SyntaxTree>);
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllIfs();
+    size_t getCutCount() const { return cutCount; }
 };
 
 class IfCollector : public SyntaxVisitor<IfCollector> {
 private:
-    std::unordered_set<const ConditionalStatementSyntax*> foundNodes;
+    std::set<const ConditionalStatementSyntax*> foundNodes;
 
 public:
     void handle(const ConditionalStatementSyntax&);
-    std::unordered_set<const ConditionalStatementSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+    std::set<const ConditionalStatementSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
+
+// MARK: Papercutter
+
+class Papercutter {
+private:
+    std::shared_ptr<SyntaxTree> tree;
+    size_t cutCount = 0;
+    BitShrinker BSR;
+    TernaryRemover TR;
+    IfRemover IR;
+public:
+    Papercutter(const std::shared_ptr<SyntaxTree> tree);
+    std::vector<std::shared_ptr<SyntaxTree>> cutAll();
+    std::shared_ptr<SyntaxTree> cutIndex(size_t index);
+};
+
 } // namespace papercuts

@@ -36,8 +36,7 @@ std::shared_ptr<SyntaxTree> ModuleNameRewriter::renameModule(const std::shared_p
     return this->transform(tree);
 }
 
-std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree> tree, bool bitShrink, bool ternaryRemove,
-                                             bool ifRemove) {
+std::vector<std::shared_ptr<SyntaxTree>> cutAll(const std::shared_ptr<SyntaxTree> tree) {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
 
     // if (ternaryRemove) {
@@ -45,11 +44,11 @@ std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree> t
     //     auto ternaryRemoveTrees = TR.removeTernaries(tree);
     //     newTrees.insert(newTrees.end(), ternaryRemoveTrees.begin(), ternaryRemoveTrees.end());
     // }
-    if (ifRemove) {
-        IfRemover IR;
-        auto ifRemoveTrees = IR.removeIfs(tree);
-        newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
-    }
+    // if (ifRemove) {
+    //     IfRemover IR;
+    //     auto ifRemoveTrees = IR.removeIfs(tree);
+    //     newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
+    // }
     // if (bitShrink) {
     //     BitShrinker BSR;
     //     auto bitShrinkTrees = BSR.shrinkBits(tree);
@@ -177,8 +176,8 @@ void BitMuxer::handle(const SyntaxNode& node) {
 BitShrinker::BitShrinker(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
     // Initialize the widthMap with the widths of all the nodes we want to shrink bits in
     BitShrinkCollector collector;
-    this->widthMap = collector.getFoundNodes(tree);
-    this->cutCount = widthMap.size();
+    this->shrinkNodes = collector.getFoundNodes(tree);
+    this->cutCount = shrinkNodes.size();
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> BitShrinker::shrinkAllBits() {
@@ -186,7 +185,7 @@ std::vector<std::shared_ptr<SyntaxTree>> BitShrinker::shrinkAllBits() {
     nodesToShrink.clear();
     runMap.clear();
 
-    for (const auto& pair : widthMap) {
+    for (const auto& pair : shrinkNodes) {
         nodesToShrink.clear();
         runMap.clear();
         nodesToShrink.emplace(pair.first->name.valueText());
@@ -199,29 +198,24 @@ std::vector<std::shared_ptr<SyntaxTree>> BitShrinker::shrinkAllBits() {
 }
 
 std::shared_ptr<SyntaxTree> BitShrinker::shrinkBitsIndex(const std::vector<size_t>& indicesToShrink) {
-    // std::vector<const DeclaratorSyntax*> nodesToShrink;
-    // size_t index = 0;
-    // for (const auto& pair : widthMap) {
-    //     if (std::find(indicesToShrink.begin(), indicesToShrink.end(), index) != indicesToShrink.end()) {
-    //         nodesToShrink.push_back(pair.first);
-    //     }
-    //     index++;
-    // }
+    nodesToShrink.clear();
+    runMap.clear();
 
-    // for (const auto& node : nodesToShrink) {
-    //     nodeToShrink = node->name.valueText();
-    //     newName = std::string(nodeToShrink) + "_papercuts";
-    //     newWidth = widthMap[node] - 1; // Get the width of the node and calculate the new width after shrinking
-    //     tree = transform(tree);
-    // }
+    for (size_t i: indicesToShrink) {
+        if (i >= cutCount) {
+            throw std::out_of_range("Index out of range for shrinkBitsIndex");
+        }
+        nodesToShrink.emplace(shrinkNodes[i].first->name.valueText());
+        runMap.emplace(shrinkNodes[i]);
+    }
 
-    return tree;
+    return transform(tree);
 }
 
 void BitShrinker::handle(const DeclaratorSyntax& node) {
     if (runMap.contains(&node)) {
         auto newName = std::string(node.name.valueText()) + "_papercuts";
-        int newWidth = widthMap[&node] - 1; // Get the width of the node and calculate the new width after shrinking
+        int newWidth = runMap[&node] - 1; // Get the width of the node and calculate the new width after shrinking
         auto& parentDecl = node.parent->as<DataDeclarationSyntax>();
         auto& type = parentDecl.type;
 
@@ -324,14 +318,14 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
             return; // Skip this node if it's a single-bit logic declaration
         }
 
-        this->widthMap.insert({&node, width}); // Insert the node and its width into the map
+        shrinkNodes.emplace_back(&node, width); // Insert the node and its width into the vector
     }
 }
 
-std::map<const DeclaratorSyntax*, int> BitShrinkCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
+std::vector<std::pair<const DeclaratorSyntax*, int>> BitShrinkCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
-    return this->widthMap;
+    return this->shrinkNodes;
 }
 
 // MARK: TernaryMuxer
@@ -352,7 +346,7 @@ void TernaryMuxer::handle(const ConditionalExpressionSyntax& node) {
 
 // MARK: TernaryRemover
 
-TernaryRemover::TernaryRemover(const::std::shared_ptr<SyntaxTree> tree): tree(tree){
+TernaryRemover::TernaryRemover(const ::std::shared_ptr<SyntaxTree> tree) : tree(tree) {
     TernaryCollector collector;
     ternaryNodes = collector.getFoundNodes(tree);
     cutCount = ternaryNodes.size() * 2;
@@ -389,8 +383,7 @@ void TernaryCollector::handle(const ConditionalExpressionSyntax& node) {
     this->visitDefault(node);
 }
 
-std::set<const ConditionalExpressionSyntax*> TernaryCollector::getFoundNodes(
-    const std::shared_ptr<SyntaxTree> tree) {
+std::set<const ConditionalExpressionSyntax*> TernaryCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
     return this->foundNodes;
@@ -412,10 +405,15 @@ void IfMuxer::handle(const ConditionalStatementSyntax& node) {
 }
 
 // MARK: IfRemover
-void IfRemover::handle(const ConditionalStatementSyntax& node) {
-    if ((this->nodesToChange.find(&node) != nodesToChange.end()) && !this->done) {
+IfRemover::IfRemover(const ::std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+    IfCollector collector;
+    ifNodes = collector.getFoundNodes(tree);
+    cutCount = ifNodes.size() * 2;
+}
 
-        if (this->TF) {
+void IfRemover::handle(const ConditionalStatementSyntax& node) {
+    if (nodesToChange.contains(&node)) {
+        if (nodesToChange[&node]) { // If true, replace with the true branch of the if statement
             if (node.elseClause == nullptr) {
                 std::cout << "If statement has no else clause, replacing with empty statement" << std::endl;
                 this->remove(node);
@@ -429,27 +427,23 @@ void IfRemover::handle(const ConditionalStatementSyntax& node) {
             auto replacement = node.statement;
             this->replace(node, *replacement);
         }
-        if (this->TF)
-            this->nodesToChange.erase(&node); // Remove the node from the set after promoting both branches
-        this->TF = !this->TF;                 // Alternate between replacing with the true and false branch of the
-                                              // if statement
-        this->done = true;                    // Set the flag to indicate we've hit this node already
     }
 }
 
-std::vector<std::shared_ptr<SyntaxTree>> IfRemover::removeIfs(const std::shared_ptr<SyntaxTree> tree) {
-    IfCollector visitor;
-    auto foundNodes = visitor.getFoundNodes(tree);
+std::vector<std::shared_ptr<SyntaxTree>> IfRemover::removeAllIfs() {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
 
     this->nodesToChange.clear();
-    for (const auto& node : foundNodes) {
-        this->nodesToChange.insert(node);
-    }
 
-    while (!this->nodesToChange.empty()) {
-        this->done = false; // Reset the flag for each call to removeIfs
-        newTrees.push_back(this->transform(tree));
+    for (const auto& node : ifNodes) {
+        nodesToChange.clear();
+        nodesToChange.emplace(node, false);
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+        nodesToChange.clear();
+        nodesToChange.emplace(node, true);
+        newTree = transform(tree);
+        newTrees.emplace_back(newTree);
     }
 
     return newTrees;
@@ -460,11 +454,39 @@ void IfCollector::handle(const ConditionalStatementSyntax& node) {
     this->visitDefault(node);
 }
 
-std::unordered_set<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(
-    const std::shared_ptr<SyntaxTree> tree) {
+std::set<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
     return this->foundNodes;
+}
+
+Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree) : tree(tree), BSR(tree), TR(tree), IR(tree) {
+
+    cutCount = BSR.getCutCount() + TR.getCutCount() + IR.getCutCount();
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    auto bitShrinkTrees = BSR.shrinkAllBits();
+    newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
+
+    auto ternaryRemoveTrees = TR.removeAllTernaries();
+    newTrees.insert(newTrees.end(), ternaryRemoveTrees.begin(), ternaryRemoveTrees.end());
+
+    auto ifRemoveTrees = IR.removeAllIfs();
+    newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
+
+    return newTrees;
+}
+
+std::shared_ptr<SyntaxTree> Papercutter::cutIndex(size_t index) {
+    if (index >= cutCount) {
+        throw std::out_of_range("Index out of range for cutIndex");
+    }
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    return tree; // Placeholder
 }
 
 } // namespace papercuts

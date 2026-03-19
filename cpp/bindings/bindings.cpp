@@ -11,7 +11,7 @@ PYBIND11_MODULE(pypercuts, m) {
 
     m.doc() = "papercuts C++ bindings";
 
-    m.def("cut", &papercuts::cut,
+    m.def("cut_all", &papercuts::cutAll,
         py::arg("tree"),
         py::arg("bitShrink") = false,
         py::arg("ternaryRemove") = false,

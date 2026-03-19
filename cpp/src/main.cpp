@@ -56,19 +56,21 @@ int main() {
 
     papercuts::BitShrinker BSR(tree);
     papercuts::TernaryRemover TR(tree);
-    papercuts::IfRemover IR;
+    papercuts::IfRemover IR(tree);
     papercuts::ModuleNameRewriter MNR;
     papercuts::TestRewriter TRW;
     papercuts::ASTPrinter AP;
 
-    std::vector<std::shared_ptr<SyntaxTree>> newTrees = TR.removeAllTernaries();
+    papercuts::Papercutter PC(tree);
 
-    for (const auto& newTree : newTrees) {
-        std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
-    }
+    // std::vector<std::shared_ptr<SyntaxTree>> newTrees = PC.cutAll();
 
-    // auto newTree = papercuts::insertMuxes(tree, true, true, true);
-    // std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    // for (const auto& newTree : newTrees) {
+    //     std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    // }
+
+    auto newTree = BSR.shrinkBitsIndex({0}); // Shrink the first node in the list of nodes to shrink
+    std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
 
     return 0;
 }
