@@ -54,21 +54,21 @@ int main() {
 
     std::cout << "Papercuts C++ build successful!" << std::endl;
 
-    papercuts::BitShrinker BSR;
+    papercuts::BitShrinker BSR(tree);
     papercuts::TernaryRemover TR;
     papercuts::IfRemover IR;
     papercuts::ModuleNameRewriter MNR;
     papercuts::TestRewriter TRW;
     papercuts::ASTPrinter AP;
 
-    // std::vector<std::shared_ptr<SyntaxTree>> newTrees = papercuts::cut(tree, true, true, true);
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees = BSR.shrinkAllBits();
 
-    // for (const auto& newTree : newTrees) {
-    //     std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
-    // }
+    for (const auto& newTree : newTrees) {
+        std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    }
 
-    auto newTree = papercuts::insertMuxes(tree, true, true, true);
-    std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    // auto newTree = papercuts::insertMuxes(tree, true, true, true);
+    // std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
 
     return 0;
 }

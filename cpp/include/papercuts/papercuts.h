@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -6,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 #include "slang/parsing/TokenKind.h"
 #include "slang/syntax/AllSyntax.h"
@@ -93,6 +95,16 @@ private:
 public:
     void handle(const ModuleHeaderSyntax&);
     std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree>, std::string);
+};
+
+class Papercutter {
+private:
+    std::shared_ptr<SyntaxTree> tree;
+    size_t cutCount = 0;
+
+public:
+    Papercutter(const std::shared_ptr<SyntaxTree> tree);
+    
 };
 
 // MARK: Base functions
@@ -194,26 +206,27 @@ public:
 
 class BitShrinker : public PapercutsRewriter<BitShrinker> {
 private:
-    std::string_view nodeToShrink;       // Store the name of the current node we want to shrink
-    const DeclaratorSyntax* currentNode; // Store the current DeclaratorSyntax node we want to shrink
-    std::string newName;                 // Store the new name we want to give to the node we're shrinking
-    int newWidth;                        // Store the new width we want to give to the node we're shrinking
-    std::unordered_map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
-    bool done = false; // Flag to indicate if we've already shrunk bits in the current tree
+    std::map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
+    std::unordered_map<const DeclaratorSyntax*, int> runMap;
+    std::unordered_set<std::string> nodesToShrink; // Set to store the names of the nodes we want to shrink bits in
+    const std::shared_ptr<SyntaxTree> tree; // Store the current tree we're shrinking bits in
+    size_t cutCount;
 public:
+    BitShrinker(const std::shared_ptr<SyntaxTree> tree);
     void handle(const DeclaratorSyntax& node);
     void handle(const IdentifierNameSyntax& node);
     void handle(const IdentifierSelectNameSyntax& node);
     void handle(const SyntaxNode& node);
-    std::vector<std::shared_ptr<SyntaxTree>> shrinkBits(const std::shared_ptr<SyntaxTree>);
+    std::vector<std::shared_ptr<SyntaxTree>> shrinkAllBits();
+    std::shared_ptr<SyntaxTree> shrinkBitsIndex(const std::vector<size_t>& indicesToShrink);
 };
 
 class BitShrinkCollector : public SyntaxVisitor<BitShrinkCollector> {
 private:
-    std::unordered_map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
+    std::map<const DeclaratorSyntax*, int> widthMap; // Map to store the width of each DeclaratorSyntax node
 public:
     void handle(const DeclaratorSyntax&);
-    std::unordered_map<const DeclaratorSyntax*, int> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+    std::map<const DeclaratorSyntax*, int> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
 // MARK: Ternary

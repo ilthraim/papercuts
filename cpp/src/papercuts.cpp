@@ -50,11 +50,11 @@ std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree> t
         auto ifRemoveTrees = IR.removeIfs(tree);
         newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
     }
-    if (bitShrink) {
-        BitShrinker BSR;
-        auto bitShrinkTrees = BSR.shrinkBits(tree);
-        newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
-    }
+    // if (bitShrink) {
+    //     BitShrinker BSR;
+    //     auto bitShrinkTrees = BSR.shrinkBits(tree);
+    //     newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
+    // }
 
     return newTrees;
 }
@@ -174,30 +174,54 @@ void BitMuxer::handle(const SyntaxNode& node) {
 }
 
 // MARK: BitShrinker
-std::vector<std::shared_ptr<SyntaxTree>> BitShrinker::shrinkBits(const std::shared_ptr<SyntaxTree> tree) {
-    widthMap.clear();
-
+BitShrinker::BitShrinker(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+    // Initialize the widthMap with the widths of all the nodes we want to shrink bits in
     BitShrinkCollector collector;
-    widthMap = collector.getFoundNodes(tree);
+    this->widthMap = collector.getFoundNodes(tree);
+    this->cutCount = widthMap.size();
+}
 
+std::vector<std::shared_ptr<SyntaxTree>> BitShrinker::shrinkAllBits() {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+    nodesToShrink.clear();
+    runMap.clear();
 
-    while (!widthMap.empty()) {
-        currentNode = widthMap.begin()->first; // Get the first node in the map to shrink
-        nodeToShrink = currentNode->name.valueText();
-        newName = std::string(nodeToShrink) + "_papercuts";
-        newWidth = widthMap.begin()->second -
-                   1; // Get the width of the node and calculate the new width after shrinking
+    for (const auto& pair : widthMap) {
+        nodesToShrink.clear();
+        runMap.clear();
+        nodesToShrink.emplace(pair.first->name.valueText());
+        runMap.emplace(pair);
         auto newTree = transform(tree);
         newTrees.emplace_back(newTree);
-        widthMap.erase(currentNode); // Remove the current node from the map after shrinking
     }
 
     return newTrees;
 }
 
+std::shared_ptr<SyntaxTree> BitShrinker::shrinkBitsIndex(const std::vector<size_t>& indicesToShrink) {
+    // std::vector<const DeclaratorSyntax*> nodesToShrink;
+    // size_t index = 0;
+    // for (const auto& pair : widthMap) {
+    //     if (std::find(indicesToShrink.begin(), indicesToShrink.end(), index) != indicesToShrink.end()) {
+    //         nodesToShrink.push_back(pair.first);
+    //     }
+    //     index++;
+    // }
+
+    // for (const auto& node : nodesToShrink) {
+    //     nodeToShrink = node->name.valueText();
+    //     newName = std::string(nodeToShrink) + "_papercuts";
+    //     newWidth = widthMap[node] - 1; // Get the width of the node and calculate the new width after shrinking
+    //     tree = transform(tree);
+    // }
+
+    return tree;
+}
+
 void BitShrinker::handle(const DeclaratorSyntax& node) {
-    if (node.name.valueText() == nodeToShrink) {
+    if (runMap.contains(&node)) {
+        auto newName = std::string(node.name.valueText()) + "_papercuts";
+        int newWidth = widthMap[&node] - 1; // Get the width of the node and calculate the new width after shrinking
         auto& parentDecl = node.parent->as<DataDeclarationSyntax>();
         auto& type = parentDecl.type;
 
@@ -216,7 +240,7 @@ void BitShrinker::handle(const DeclaratorSyntax& node) {
         for (const auto& t : parentDecl.getFirstToken().trivia())
             oldTriviaText += t.getRawText();
 
-        std::string assignText = oldTriviaText + "assign " + newName + " = {1'b0, " + std::string(nodeToShrink) + "[" +
+        std::string assignText = oldTriviaText + "assign " + newName + " = {1'b0, " + std::string(node.name.valueText()) + "[" +
                                  std::to_string(newWidth - 1) + ":0]};";
         auto& newAssign = parse(assignText);
 
@@ -231,8 +255,8 @@ void BitShrinker::handle(const IdentifierNameSyntax& node) {
         return; // If it is, we don't want to replace it
     }
 
-    if (this->nodeToShrink == node.identifier.valueText()) {
-        replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
+    if (nodesToShrink.contains(std::string(node.identifier.valueText()))) {
+        replaceToken(node, 0, makeId(persistString(alloc, std::string(node.identifier.valueText()) + "_papercuts")), true);
     }
 }
 
@@ -243,8 +267,8 @@ void BitShrinker::handle(const IdentifierSelectNameSyntax& node) {
         return; // If it is, we don't want to replace it
     }
 
-    if (this->nodeToShrink == node.identifier.valueText()) {
-        replaceToken(node, 0, makeId(persistString(alloc, newName)), true);
+    if (nodesToShrink.contains(std::string(node.identifier.valueText()))) {
+        replaceToken(node, 0, makeId(persistString(alloc, std::string(node.identifier.valueText()) + "_papercuts")), true);
     }
 }
 
@@ -302,7 +326,7 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
     }
 }
 
-std::unordered_map<const DeclaratorSyntax*, int> BitShrinkCollector::getFoundNodes(
+std::map<const DeclaratorSyntax*, int> BitShrinkCollector::getFoundNodes(
     const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
