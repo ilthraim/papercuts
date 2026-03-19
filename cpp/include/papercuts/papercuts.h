@@ -267,7 +267,7 @@ public:
 
 class IfRemover : public PapercutsRewriter<IfRemover> {
 private:
-    std::set<const ConditionalStatementSyntax*> ifNodes;
+    std::vector<const ConditionalStatementSyntax*> ifNodes;
     std::unordered_map<const ConditionalStatementSyntax*, bool> nodesToChange;
     const std::shared_ptr<SyntaxTree> tree;
     size_t cutCount;
@@ -275,17 +275,17 @@ public:
     IfRemover(const::std::shared_ptr<SyntaxTree> tree);
     void handle(const ConditionalStatementSyntax&);
     std::vector<std::shared_ptr<SyntaxTree>> removeAllIfs();
-    //std::shared_ptr<SyntaxTree> removeIfIndex(const std::vector<size_t>& indicesToRemove);
+    std::shared_ptr<SyntaxTree> removeIfIndex(const std::vector<size_t>& indicesToRemove);
     size_t getCutCount() const { return cutCount; }
 };
 
 class IfCollector : public SyntaxVisitor<IfCollector> {
 private:
-    std::set<const ConditionalStatementSyntax*> foundNodes;
+    std::vector<const ConditionalStatementSyntax*> foundNodes;
 
 public:
     void handle(const ConditionalStatementSyntax&);
-    std::set<const ConditionalStatementSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+    std::vector<const ConditionalStatementSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
 // MARK: Papercutter
@@ -300,7 +300,7 @@ private:
 public:
     Papercutter(const std::shared_ptr<SyntaxTree> tree);
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
-    std::shared_ptr<SyntaxTree> cutIndex(size_t index);
+    std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut);
 };
 
 } // namespace papercuts

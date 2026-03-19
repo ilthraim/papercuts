@@ -445,6 +445,21 @@ void IfRemover::handle(const ConditionalStatementSyntax& node) {
     }
 }
 
+std::shared_ptr<SyntaxTree> IfRemover::removeIfIndex(const std::vector<size_t>& indicesToRemove) {
+    nodesToChange.clear();
+
+    for (size_t i: indicesToRemove) {
+        if (i >= cutCount) {
+            throw std::out_of_range("Index out of range for removeIfIndex");
+        }
+        size_t nodeIndex = i / 2;
+        bool removeTrueBranch = (i % 2 != 0);
+        nodesToChange.emplace(ifNodes[nodeIndex], removeTrueBranch);
+    }
+
+    return transform(tree);
+}
+
 std::vector<std::shared_ptr<SyntaxTree>> IfRemover::removeAllIfs() {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
 
@@ -465,11 +480,11 @@ std::vector<std::shared_ptr<SyntaxTree>> IfRemover::removeAllIfs() {
 }
 
 void IfCollector::handle(const ConditionalStatementSyntax& node) {
-    this->foundNodes.insert(&node);
+    this->foundNodes.emplace_back(&node);
     this->visitDefault(node);
 }
 
-std::set<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
+std::vector<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
     return this->foundNodes;
