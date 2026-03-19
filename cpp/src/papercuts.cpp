@@ -550,7 +550,9 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
         }
     }
 
-    return transform(tree); 
+    auto newTree = transform(tree);
+    clearState();
+    return newTree; 
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::shrinkAllBits() {
@@ -566,7 +568,7 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::shrinkAllBits() {
         auto newTree = transform(tree);
         newTrees.emplace_back(newTree);
     }
-
+    clearState();
     return newTrees;
 }
 
@@ -585,7 +587,7 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllTernaries() {
         newTree = transform(tree);
         newTrees.emplace_back(newTree);
     }
-
+    clearState();
     return newTrees;
 }
 
@@ -604,7 +606,7 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllIfs() {
         newTree = transform(tree);
         newTrees.emplace_back(newTree);
     }
-
+    clearState();
     return newTrees;
 }
 
@@ -682,7 +684,7 @@ void Papercutter::handle(const ConditionalExpressionSyntax& node) {
 
 void Papercutter::handle(const ConditionalStatementSyntax& node) {
     if (ifNodesToChange.contains(&node)) {
-        if (ifNodesToChange[&node]) { // If true, replace with the true branch of the if statement
+        if (!ifNodesToChange[&node]) {
             if (node.elseClause == nullptr) {
                 std::cout << "If statement has no else clause, replacing with empty statement" << std::endl;
                 this->remove(node);

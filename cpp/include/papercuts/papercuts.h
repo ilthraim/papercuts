@@ -332,6 +332,8 @@ public:
     void handle(const SyntaxNode& node);
     void handle(const ConditionalExpressionSyntax&);
     void handle(const ConditionalStatementSyntax&);
+
+    size_t getCutCount() const { return cutCount; }
 };
 
 } // namespace papercuts

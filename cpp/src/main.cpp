@@ -63,14 +63,19 @@ int main() {
 
     papercuts::Papercutter PC(tree);
 
-    std::vector<std::shared_ptr<SyntaxTree>> newTrees = IR.removeAllIfs();
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees = PC.cutAll();
 
     for (const auto& newTree : newTrees) {
         std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
     }
 
-    auto newTree = IR.removeIfIndex({0}); // Shrink the first node in the list of nodes to shrink
-    std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    for (size_t i = 0; i < PC.getCutCount(); i++) {
+        auto newTree = PC.cutIndex({i});
+        std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    }
+
+    // auto newTree = IR.removeIfIndex({0}); // Shrink the first node in the list of nodes to shrink
+    // std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
 
     return 0;
 }
