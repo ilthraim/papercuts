@@ -97,7 +97,8 @@ public:
 
 // MARK: Base functions
 
-std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree>, bool, bool, bool);
+std::vector<std::shared_ptr<SyntaxTree>> cut(const std::shared_ptr<SyntaxTree>, bool bitShrink, bool ternaryRemove,
+                                             bool ifRemove);
 
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
                                         bool ifMux);
