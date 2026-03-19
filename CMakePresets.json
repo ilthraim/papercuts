@@ -9,8 +9,8 @@
         "CMAKE_CXX_FLAGS": "-DSLANG_ASSERT_ENABLED -fsanitize=undefined,address -fno-sanitize-recover=undefined -fno-omit-frame-pointer -fno-common -Wno-deprecated-declarations -Wno-error=deprecated-declarations",
         "SLANG_CLANG_TIDY": "true",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "Python3_ROOT_DIR": "${sourceDir}/../.venv",
-        "Python3_FIND_VIRTUALENV": "ONLY"
+        "Python_ROOT_DIR": "${sourceDir}/../.venv",
+        "Python_FIND_VIRTUALENV": "ONLY"
       }
     },
     {
@@ -21,8 +21,8 @@
         "CMAKE_CXX_FLAGS": "-DSLANG_ASSERT_ENABLED -Wno-deprecated-declarations -Wno-error=deprecated-declarations",
         "SLANG_CLANG_TIDY": "true",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "Python3_ROOT_DIR": "${sourceDir}/../.venv",
-        "Python3_FIND_VIRTUALENV": "ONLY"
+        "Python_ROOT_DIR": "${sourceDir}/../.venv",
+        "Python_FIND_VIRTUALENV": "ONLY"
       }
 
     }

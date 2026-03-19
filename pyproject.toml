@@ -1,5 +1,8 @@
 [build-system]
-requires = ["scikit-build-core", "pybind11"]
+requires = [
+    "scikit-build-core>=0.8",
+    "pybind11>=2.13",
+]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -9,16 +12,17 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pybind11-stubgen>=2.5.5",
-    "pyslang",
     "z3>=0.2.0",
     "z3-solver>=4.15.4.0",
 ]
 
 [tool.scikit-build]
-cmake.source-dir = "cpp"
+cmake.source-dir = "."
 cmake.build-type = "Release"
-wheel.packages = ["python/papercuts"]
+install.components = ["pylib"]
+
+[tool.scikit-build.wheel]
+packages = ["python/papercuts"]
 
 [tool.uv]
 cache-dir = "./.uv_cache"
@@ -28,6 +32,4 @@ cache-dir = "./.uv_cache"
 line-length = 100
 
 [tool.uv.sources]
-#pyslang = { git = "https://github.com/ilthraim/slang.git", branch = "working"}
-pyslang = { git = "https://github.com/MikePopoloski/slang.git" }
-#pyslang = { path = "/usr/scratch/emiller76/slang" }
+
