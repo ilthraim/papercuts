@@ -14,10 +14,9 @@ wheels = [
 [[package]]
 name = "papercuts"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "pybind11-stubgen" },
-    { name = "pyslang" },
     { name = "z3" },
     { name = "z3-solver" },
 ]
@@ -25,7 +24,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pybind11-stubgen", specifier = ">=2.5.5" },
-    { name = "pyslang", git = "https://github.com/MikePopoloski/slang.git" },
     { name = "z3", specifier = ">=0.2.0" },
     { name = "z3-solver", specifier = ">=4.15.4.0" },
 ]
@@ -38,11 +36,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/81/81/81900180501a51056
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/e4/4f2d41881fae547f06ffa4c9748fa8ed13c4db5c830ff268b84175546b3c/pybind11_stubgen-2.5.5-py3-none-any.whl", hash = "sha256:10824cd2fc5cbbee032b8fb39e6f6c08de232deb309bc66d786a6c6e8a4601bd", size = 30210, upload-time = "2025-08-09T01:22:43.135Z" },
 ]
-
-[[package]]
-name = "pyslang"
-version = "10.0.0"
-source = { git = "https://github.com/MikePopoloski/slang.git#c8162767dbdc32c14a6e2a6e07f27a3561ad2cf8" }
 
 [[package]]
 name = "z3"

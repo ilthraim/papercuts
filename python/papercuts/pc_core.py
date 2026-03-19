@@ -3,17 +3,11 @@
 
 from __future__ import annotations
 from typing import Callable, Union, List, Any
-import pyslang
-from pyslang import syntax, parsing, ast
-from pyslang.syntax import (
-    SyntaxKind,
-    SyntaxNode,
-    SyntaxRewriter,
-    SyntaxTree,
-    SyntaxFactory,
-    SyntaxPrinter,
-)
-from pyslang.parsing import TokenKind
+from papercuts.pypercuts import cut
+from papercuts.pyslang.syntax import SyntaxNode, SyntaxTree, SyntaxRewriter, SyntaxPrinter, SyntaxFactory, SyntaxKind
+from papercuts.pyslang.parsing import Token, TokenKind
+from papercuts.pyslang import syntax, parsing, ast
+
 import argparse
 import os
 import shutil
@@ -22,6 +16,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 import concretizer
+
 import ec
 
 
@@ -68,6 +63,8 @@ class Rewrite:
             return syntax.rewrite(tree, handler)
         except Exception as e:
             print(f"Error applying rewrite: {e}")
+
+        return tree  # Return original tree if rewrite fails for some reason
 
 
 @dataclass

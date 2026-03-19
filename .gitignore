@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 *.so
+*.pyi
 
 # Virtual environments
 .venv

@@ -1,20 +1,13 @@
-import time
+from papercuts import cut, insert_muxes
+from pyslang.syntax import SyntaxPrinter, SyntaxTree
+import sys
 
-from pc_core import make_identifier
+tree = SyntaxTree.fromFile(sys.argv[1])
 
-from pyslang import syntax
-from pyslang.syntax import SyntaxTree, SyntaxPrinter, SyntaxRewriter, SyntaxNode, SyntaxKind
-from pyslang.parsing import TokenKind
+newTrees = cut(tree, True, True, True)
 
-tree = SyntaxTree.fromText("module bit_shrink_ex(input logic [32:0] a);\nendmodule")
+# for ntree in newTrees:
+#     print(SyntaxPrinter.printFile(ntree))
 
-def handler(node, r: SyntaxRewriter):
-    if isinstance(node, syntax.ModuleHeaderSyntax):
-        new_token = r.makeId("TEST")
-        node.name = r.makeId("TEST")
-
-nt = syntax.rewrite(tree, handler)
-
-time.sleep(5)
-
-print(SyntaxPrinter.printFile(nt))
+muxTree = insert_muxes(tree, True, True, True)
+print(SyntaxPrinter.printFile(muxTree))
