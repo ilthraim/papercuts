@@ -55,13 +55,13 @@ int main() {
     std::cout << "Papercuts C++ build successful!" << std::endl;
 
     papercuts::BitShrinker BSR(tree);
-    papercuts::TernaryRemover TR;
+    papercuts::TernaryRemover TR(tree);
     papercuts::IfRemover IR;
     papercuts::ModuleNameRewriter MNR;
     papercuts::TestRewriter TRW;
     papercuts::ASTPrinter AP;
 
-    std::vector<std::shared_ptr<SyntaxTree>> newTrees = BSR.shrinkAllBits();
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees = TR.removeAllTernaries();
 
     for (const auto& newTree : newTrees) {
         std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;

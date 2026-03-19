@@ -242,21 +242,23 @@ public:
 
 class TernaryRemover : public PapercutsRewriter<TernaryRemover> {
 private:
-    std::unordered_set<const ConditionalExpressionSyntax*> nodesToChange;
-    bool done = false;
-    bool LR = false; // Flag to indicate whether to replace with the left or right side of the ternary operator
+    std::set<const ConditionalExpressionSyntax*> ternaryNodes;
+    std::unordered_map<const ConditionalExpressionSyntax*, bool> nodesToChange;
+    const std::shared_ptr<SyntaxTree> tree;
+    size_t cutCount;
 public:
+    TernaryRemover(const::std::shared_ptr<SyntaxTree> tree);
     void handle(const ConditionalExpressionSyntax&);
-    std::vector<std::shared_ptr<SyntaxTree>> removeTernaries(const std::shared_ptr<SyntaxTree>);
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();
 };
 
 class TernaryCollector : public SyntaxVisitor<TernaryCollector> {
 private:
-    std::unordered_set<const ConditionalExpressionSyntax*> foundNodes;
+    std::set<const ConditionalExpressionSyntax*> foundNodes;
 
 public:
     void handle(const ConditionalExpressionSyntax&);
-    std::unordered_set<const ConditionalExpressionSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+    std::set<const ConditionalExpressionSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
 // MARK: If
