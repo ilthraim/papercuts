@@ -63,13 +63,13 @@ int main() {
 
     papercuts::Papercutter PC(tree);
 
-    // std::vector<std::shared_ptr<SyntaxTree>> newTrees = PC.cutAll();
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees = TR.removeAllTernaries();
 
-    // for (const auto& newTree : newTrees) {
-    //     std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
-    // }
+    for (const auto& newTree : newTrees) {
+        std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    }
 
-    auto newTree = BSR.shrinkBitsIndex({0}); // Shrink the first node in the list of nodes to shrink
+    auto newTree = TR.removeTernaryIndex({0}); // Shrink the first node in the list of nodes to shrink
     std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
 
     return 0;

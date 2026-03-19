@@ -359,6 +359,21 @@ void TernaryRemover::handle(const ConditionalExpressionSyntax& node) {
     }
 }
 
+std::shared_ptr<SyntaxTree> TernaryRemover::removeTernaryIndex(const std::vector<size_t>& indicesToRemove) {
+    nodesToChange.clear();
+
+    for (size_t i: indicesToRemove) {
+        if (i >= cutCount) {
+            throw std::out_of_range("Index out of range for removeTernaryIndex");
+        }
+        size_t nodeIndex = i / 2;
+        bool removeLeft = (i % 2 != 0);
+        nodesToChange.emplace(ternaryNodes[nodeIndex], removeLeft);
+    }
+
+    return transform(tree);
+}
+
 std::vector<std::shared_ptr<SyntaxTree>> TernaryRemover::removeAllTernaries() {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
 
@@ -379,11 +394,11 @@ std::vector<std::shared_ptr<SyntaxTree>> TernaryRemover::removeAllTernaries() {
 }
 
 void TernaryCollector::handle(const ConditionalExpressionSyntax& node) {
-    this->foundNodes.insert(&node);
+    this->foundNodes.emplace_back(&node);
     this->visitDefault(node);
 }
 
-std::set<const ConditionalExpressionSyntax*> TernaryCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
+std::vector<const ConditionalExpressionSyntax*> TernaryCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
     return this->foundNodes;

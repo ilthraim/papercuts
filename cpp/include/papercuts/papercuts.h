@@ -233,7 +233,7 @@ public:
 
 class TernaryRemover : public PapercutsRewriter<TernaryRemover> {
 private:
-    std::set<const ConditionalExpressionSyntax*> ternaryNodes;
+    std::vector<const ConditionalExpressionSyntax*> ternaryNodes;
     std::unordered_map<const ConditionalExpressionSyntax*, bool> nodesToChange;
     const std::shared_ptr<SyntaxTree> tree;
     size_t cutCount;
@@ -241,16 +241,17 @@ public:
     TernaryRemover(const::std::shared_ptr<SyntaxTree> tree);
     void handle(const ConditionalExpressionSyntax&);
     std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();
+    std::shared_ptr<SyntaxTree> removeTernaryIndex(const std::vector<size_t>& indicesToRemove);
     size_t getCutCount() const { return cutCount; }
 };
 
 class TernaryCollector : public SyntaxVisitor<TernaryCollector> {
 private:
-    std::set<const ConditionalExpressionSyntax*> foundNodes;
+    std::vector<const ConditionalExpressionSyntax*> foundNodes;
 
 public:
     void handle(const ConditionalExpressionSyntax&);
-    std::set<const ConditionalExpressionSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+    std::vector<const ConditionalExpressionSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
 // MARK: If
@@ -274,6 +275,7 @@ public:
     IfRemover(const::std::shared_ptr<SyntaxTree> tree);
     void handle(const ConditionalStatementSyntax&);
     std::vector<std::shared_ptr<SyntaxTree>> removeAllIfs();
+    //std::shared_ptr<SyntaxTree> removeIfIndex(const std::vector<size_t>& indicesToRemove);
     size_t getCutCount() const { return cutCount; }
 };
 
