@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 from typing import Callable, Union, List, Any
-from papercuts.pypercuts import cut
-from papercuts.pyslang.syntax import SyntaxNode, SyntaxTree, SyntaxRewriter, SyntaxPrinter, SyntaxFactory, SyntaxKind
-from papercuts.pyslang.parsing import Token, TokenKind
-from papercuts.pyslang import syntax, parsing, ast
+from papercuts.pypercuts import Papercutter, rename_module
+from pyslang.syntax import SyntaxNode, SyntaxTree, SyntaxRewriter, SyntaxPrinter, SyntaxFactory, SyntaxKind
+from pyslang.parsing import Token, TokenKind
+from pyslang import syntax, parsing, ast
 
 import argparse
 import os
@@ -15,9 +15,8 @@ import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field
 
-import concretizer
-
-import ec
+from papercuts import concretizer
+from papercuts import ec
 
 
 # MARK: Modules
@@ -119,7 +118,6 @@ class Run:
     mod_fname: str
     input_tree: SyntaxTree
     output_tree: SyntaxTree
-    rewrite: Rewrite
     index: int = 0
     wrapper_fname: str = ""
     valid: bool = False
@@ -130,26 +128,26 @@ class Run:
         pass  # Implementation would go here
 
 
-def consolidate_runs(tree: SyntaxTree, runs: List[Run]) -> SyntaxTree:
-    """Consolidate multiple runs into a single SyntaxTree with all rewrites applied."""
+# def consolidate_runs(tree: SyntaxTree, runs: List[Run]) -> SyntaxTree:
+#     """Consolidate multiple runs into a single SyntaxTree with all rewrites applied."""
 
-    def handler(node, rewriter):
-        matching_rewrites = [rw for rw in runs if rw.rewrite.matcher(node)]
+#     def handler(node, rewriter):
+#         matching_rewrites = [rw for rw in runs if rw.rewrite.matcher(node)]
 
-        if len(matching_rewrites) > 1:
-            print(
-                f"Warning: multiple rewrites match node at offsets {node.sourceRange.start.offset}-{node.sourceRange.end.offset}"
-            )
+#         if len(matching_rewrites) > 1:
+#             print(
+#                 f"Warning: multiple rewrites match node at offsets {node.sourceRange.start.offset}-{node.sourceRange.end.offset}"
+#             )
 
-            matching_rewrites[0].rewrite.do_replacement(node, True, rewriter)
-        else:
-            for rw in matching_rewrites:
-                branch = False if rw.index == 1 else False
-                rw.rewrite.do_replacement(node, branch, rewriter)
+#             matching_rewrites[0].rewrite.do_replacement(node, True, rewriter)
+#         else:
+#             for rw in matching_rewrites:
+#                 branch = False if rw.index == 1 else False
+#                 rw.rewrite.do_replacement(node, branch, rewriter)
 
-    new_tree = syntax.rewrite(tree, handler)
+#     new_tree = syntax.rewrite(tree, handler)
 
-    return new_tree
+#     return new_tree
 
 
 # MARK: Helpers and Papercuts
@@ -253,17 +251,6 @@ def make_int_vector(
 
 
 # MARK: Module Refactoring
-def rename_module(tree: SyntaxTree, new_name: str) -> SyntaxTree:
-    """Rename the module in a SystemVerilog source string."""
-
-    def handler(node, r: SyntaxRewriter):
-        if isinstance(node, syntax.ModuleHeaderSyntax):
-            new_token = r.makeId(new_name, [r.makeTrivia(parsing.TriviaKind.Whitespace, " ")])
-            node.name = new_token
-
-    nt = SyntaxTree.fromText(SyntaxPrinter.printFile(tree))
-    return syntax.rewrite(nt, handler)
-
 
 def find_module_decl(tree: SyntaxTree) -> syntax.ModuleDeclarationSyntax:
     """Find the first ModuleDeclarationSyntax node in the tree."""
@@ -699,10 +686,6 @@ async def main():
     parser = argparse.ArgumentParser(description="Process a SystemVerilog file.")
 
     parser.add_argument("input_file", help="The input SystemVerilog files to process.")
-    parser.add_argument("-s", "--shrink-bits", action="store_true")
-    parser.add_argument("-c", "--delete-case-branch", action="store_true")
-    parser.add_argument("-i", "--remove-if-conditionals", action="store_true")
-    parser.add_argument("-t", "--remove-ternary-conditionals", action="store_true")
     parser.add_argument("-e", "--check-equivalence", action="store_true")
 
     args = parser.parse_args()
@@ -715,49 +698,26 @@ async def main():
 
     print("Concretization complete.")
 
-    runs = []
-    rewrites = RewriteSet()
+    runs: list[Run] = []
+
+    pcutter = Papercutter(sw)
+
+    rewrites = pcutter.cut_all()
 
     fname = get_module_name(sw)
 
-    start_index = 0
-
-    muxed_tree = _copy_tree(sw)
-
-    if args.delete_case_branch:
-        pass
-        # cbd_trees = case_branch_deletion(sw)
-
-    if args.remove_if_conditionals:
-        (muxed_tree, start_index) = remove_if_conditionals(muxed_tree, rewrites, start_index)
-
-    if args.remove_ternary_conditionals:
-        (muxed_tree, start_index) = remove_ternary_conditionals(muxed_tree, rewrites, start_index)
-
-    # Make sure we shrink bits last since it adds new nodes that could be matched by the other rewrites
-    if args.shrink_bits:
-        (muxed_tree, start_index) = shrink_bits(muxed_tree, rewrites, start_index)
-
-    muxed_tree = rename_module(muxed_tree, f"{fname}_muxed")
-    muxed_tree = add_select_inputs(muxed_tree, sum(rw.num_selections for rw in rewrites.rewrites))
-
-    with open(f"{fname}_muxed.sv", "w") as fout:
-        fout.write(SyntaxPrinter.printFile(muxed_tree))
-
-    for rewrite in rewrites.rewrites:
-        for i in range(rewrite.num_selections):
-            runs.append(
-                Run(
-                    canonical_fname=fname,
-                    mod_fname=f"{fname}_pc{rewrite.start_index + i}",
-                    input_tree=sw,
-                    output_tree=rename_module(
-                        rewrite.apply(sw, i + 1), f"{fname}_pc{rewrite.start_index + i}"
-                    ),
-                    rewrite=rewrite,
-                    index=i,
-                )
+    for idx, rewrite in enumerate(rewrites):
+        runs.append(
+            Run(
+                canonical_fname=fname,
+                mod_fname=f"{fname}_pc{idx}",
+                input_tree=sw,
+                output_tree=rename_module(
+                    rewrite, f"{fname}_pc{idx}"
+                ),
+                index=idx
             )
+        )
 
         
     # TODO: change this to based on the source file directory
@@ -822,30 +782,20 @@ async def main():
 
             print("Initial equivalence checks complete. Attempting consolidation...")
 
-            consolidated_rewrites = [run.rewrite for run in runs if run.valid]
+            working_rewrites = [run.index for run in runs if run.valid]
 
-            consolidated_set = RewriteSet(rewrites=consolidated_rewrites)
-            # consolidated_tree = consolidated_set.apply(sw)
 
-            # consolidated_run = Run(
-            #     canonical_fname=fname,
-            #     mod_fname=f"{fname}_consolidated",
-            #     input_tree=sw,
-            #     output_tree=rename_module(consolidated_tree, f"{fname}_consolidated"),
-            #     rewrite_set=consolidated_set
-            # )
+            # with open(f"{fname}_consolidated.sv", "w") as fout:
+            #     fout.write(SyntaxPrinter.printFile(pcutter.cut_index(working_rewrites)))
 
-            with open(f"{fname}_consolidated.sv", "w") as fout:
-                fout.write(SyntaxPrinter.printFile(consolidate_runs(sw, runs)))
+            # # ec.generate_jasper_files(consolidated_run, output_dir=".")
 
-            # ec.generate_jasper_files(consolidated_run, output_dir=".")
+            # # result = await ec.run_jasper(consolidated_run, True)
 
-            # result = await ec.run_jasper(consolidated_run, True)
+            # # print(f"JasperGold run for {consolidated_run.wrapper_fname} completed with return code {consolidated_run.valid}")
 
-            # print(f"JasperGold run for {consolidated_run.wrapper_fname} completed with return code {consolidated_run.valid}")
-
-            os.chdir("..")
-            directory = Path(output_dir)
+            # os.chdir("..")
+            # directory = Path(output_dir)
 
 
 if __name__ == "__main__":

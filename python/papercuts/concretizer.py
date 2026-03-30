@@ -3,7 +3,7 @@ import pyslang
 from pyslang import parsing, syntax, driver
 import re
 
-import pc_core
+import papercuts.pc_core as pc_core
 
 def extract_params(tree: syntax.SyntaxTree) -> dict:
 

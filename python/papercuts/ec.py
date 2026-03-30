@@ -1,10 +1,11 @@
 from __future__ import annotations
 import asyncio
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, TYPE_CHECKING
 import pyslang
 from pyslang.syntax import SyntaxPrinter
-import pc_core
+
+import papercuts.pc_core as pc_core
 
 
 # MARK: Jasper Wrapper

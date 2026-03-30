@@ -74,8 +74,8 @@ int main() {
         std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
     }
 
-    // auto newTree = IR.removeIfIndex({0}); // Shrink the first node in the list of nodes to shrink
-    // std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    std::cout << "Original module name: " << papercuts::getModuleName(tree) << std::endl;
+
 
     return 0;
 }

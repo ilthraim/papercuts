@@ -11,14 +11,6 @@ PYBIND11_MODULE(pypercuts, m) {
 
     m.doc() = "papercuts C++ bindings";
 
-    m.def("cut_all", &papercuts::cutAll,
-        py::arg("tree"),
-        py::arg("bitShrink") = false,
-        py::arg("ternaryRemove") = false,
-        py::arg("ifRemove") = false,
-        "Cut a SyntaxTree into multiple trees based on mux types"
-    );
-
     m.def("insert_muxes", &papercuts::insertMuxes,
         py::arg("tree"),
         py::arg("bitMux") = false,
@@ -26,4 +18,19 @@ PYBIND11_MODULE(pypercuts, m) {
         py::arg("ifMux") = false,
         "Insert muxes into a SyntaxTree"
     );
+
+    m.def("rename_module", &papercuts::renameModule,
+        py::arg("tree"),
+        py::arg("newName"),
+        "Rename the module in a SyntaxTree"
+    );
+
+    py::classh<papercuts::Papercutter>(m, "Papercutter")
+        .def(py::init<const std::shared_ptr<slang::syntax::SyntaxTree>>())
+        .def("cut_all", &papercuts::Papercutter::cutAll)
+        .def("cut_index", &papercuts::Papercutter::cutIndex)
+        .def("shrink_all_bits", &papercuts::Papercutter::shrinkAllBits)
+        .def("remove_all_ternaries", &papercuts::Papercutter::removeAllTernaries)
+        .def("remove_all_ifs", &papercuts::Papercutter::removeAllIfs)
+        .def("get_cut_count", &papercuts::Papercutter::getCutCount);
 }

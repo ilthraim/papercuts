@@ -55,6 +55,8 @@ public:
     }
 };
 
+// MARK: Utility classes
+
 class ParentSetter{
 public:
     void visit(SyntaxNode& node) {
@@ -97,13 +99,22 @@ public:
     std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree>, std::string);
 };
 
-// MARK: Base functions
+class ModuleNameFinder : public SyntaxVisitor<ModuleNameFinder> {
+private:
+    std::string moduleName;
+public:
+    void handle(const ModuleHeaderSyntax&);
+    std::string getModuleName(const std::shared_ptr<SyntaxTree> tree);
+};
 
-std::vector<std::shared_ptr<SyntaxTree>> cutAll(const std::shared_ptr<SyntaxTree>, bool bitShrink, bool ternaryRemove,
-                                             bool ifRemove);
+// MARK: Base functions
 
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
                                         bool ifMux);
+
+std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName);
+
+std::string getModuleName(const std::shared_ptr<SyntaxTree> tree);
 
 // MARK: Base Rewriter
 template<typename TDerived>

@@ -9,7 +9,8 @@ from pyslang.ast import Symbol, Compilation, Expression
 from pyslang.parsing import Token, TokenKind
 from pyslang.driver import Driver
 
-from pc_core import visitor_wrapper, rename_module, rewrite_wrapper, get_module_name, ModuleInfo
+from pc_core import visitor_wrapper, rewrite_wrapper, ModuleInfo
+from papercuts.pypercuts import Papercutter, rename_module
 
 
 def collect_modules_ast(comp: Compilation) -> dict[str, ast.DefinitionSymbol]:

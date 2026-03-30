@@ -96,6 +96,7 @@ add_custom_target(copy_pypercuts ALL
     VERBATIM
 )
 
+
 set_target_properties(pypercuts PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python/papercuts"
 )
@@ -116,7 +117,7 @@ if(STUBGEN_AVAILABLE EQUAL 0)
             "${Python_EXECUTABLE}" -m pybind11_stubgen pyslang
                 --output-dir "${CMAKE_SOURCE_DIR}/python"
         COMMAND ${CMAKE_COMMAND} -E env
-            "PYTHONPATH=${CMAKE_SOURCE_DIR}/python"
+            "PYTHONPATH=${CMAKE_SOURCE_DIR}/python/papercuts:${CMAKE_SOURCE_DIR}/python"
             "${Python_EXECUTABLE}" -m pybind11_stubgen pypercuts
                 --output-dir "${CMAKE_SOURCE_DIR}/python/papercuts"
         DEPENDS copy_pyslang copy_pypercuts

@@ -1,8 +1,6 @@
 #include "papercuts/papercuts.h"
 
 #include "papercuts/utils.h"
-#include <charconv>
-#include <concepts>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -16,7 +14,6 @@
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/syntax/SyntaxTree.h"
-#include "slang/util/SmallVector.h"
 #include "slang/util/Util.h"
 
 using namespace slang::syntax;
@@ -30,32 +27,32 @@ void ModuleNameRewriter::handle(const ModuleHeaderSyntax& node) {
     this->replaceToken(node, 2, newToken, true);
 }
 
+void ModuleNameFinder::handle(const ModuleHeaderSyntax& node) {
+    this->moduleName = std::string(node.name.valueText());
+}
+
+std::string ModuleNameFinder::getModuleName(const std::shared_ptr<SyntaxTree> tree) {
+    visit(tree->root());
+    if (moduleName.empty()) {
+        throw std::runtime_error("No module declaration found in the syntax tree");
+    }
+    return moduleName;
+}
+
 std::shared_ptr<SyntaxTree> ModuleNameRewriter::renameModule(const std::shared_ptr<SyntaxTree> tree,
                                                              std::string newName) {
     this->newName = newName;
     return this->transform(tree);
 }
 
-std::vector<std::shared_ptr<SyntaxTree>> cutAll(const std::shared_ptr<SyntaxTree> tree) {
-    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName) {
+    ModuleNameRewriter rewriter;
+    return rewriter.renameModule(tree, newName);
+}
 
-    // if (ternaryRemove) {
-    //     TernaryRemover TR;
-    //     auto ternaryRemoveTrees = TR.removeTernaries(tree);
-    //     newTrees.insert(newTrees.end(), ternaryRemoveTrees.begin(), ternaryRemoveTrees.end());
-    // }
-    // if (ifRemove) {
-    //     IfRemover IR;
-    //     auto ifRemoveTrees = IR.removeIfs(tree);
-    //     newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
-    // }
-    // if (bitShrink) {
-    //     BitShrinker BSR;
-    //     auto bitShrinkTrees = BSR.shrinkBits(tree);
-    //     newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
-    // }
-
-    return newTrees;
+std::string getModuleName(const std::shared_ptr<SyntaxTree> tree) {
+    ModuleNameFinder finder;
+    return finder.getModuleName(tree);
 }
 
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
