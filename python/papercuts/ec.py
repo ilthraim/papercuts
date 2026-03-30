@@ -3,9 +3,9 @@ import asyncio
 import re
 from typing import Dict, List, Tuple, TYPE_CHECKING
 import pyslang
-from pyslang.syntax import SyntaxPrinter
 
 import papercuts.pc_core as pc_core
+from papercuts.pc_utils import print_tree
 
 
 # MARK: Jasper Wrapper
@@ -210,8 +210,8 @@ def generate_jasper_files(run: pc_core.Run, output_dir: str = ".") -> None:
     """
 
     wrapper_str = generate_jasper_wrapper(
-        module1_str=SyntaxPrinter.printFile(run.input_tree),
-        module2_str=SyntaxPrinter.printFile(run.output_tree),
+        module1_str=print_tree(run.input_tree),
+        module2_str=print_tree(run.output_tree),
     )
 
     try:

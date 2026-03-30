@@ -1,16 +1,18 @@
+from __future__ import annotations
 import os
 import shutil
 from typing import Union
 import sys
+
 import pyslang
 from pyslang import syntax, ast
-from pyslang.syntax import SyntaxNode, SyntaxPrinter, SyntaxRewriter, SyntaxTree
+from pyslang.syntax import SyntaxNode, SyntaxRewriter, SyntaxTree
 from pyslang.ast import Symbol, Compilation, Expression
 from pyslang.parsing import Token, TokenKind
 from pyslang.driver import Driver
+from papercuts.pypercuts import rename_module, get_module_name, rename_submodules
 
-from pc_core import visitor_wrapper, rewrite_wrapper, ModuleInfo
-from papercuts.pypercuts import Papercutter, rename_module
+from papercuts.pc_utils import rewrite_wrapper, print_tree
 
 
 def collect_modules_ast(comp: Compilation) -> dict[str, ast.DefinitionSymbol]:
@@ -74,7 +76,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         return g_ref
 
     def _eval_visitor(obj: Union[Token, SyntaxNode]) -> None:
-        if isinstance(obj, Expression):
+        if isinstance(obj, Expression) and not isinstance(obj, ast.IntegerLiteral):
             ev = obj.eval(ecx)
             if ev.value is not None:
                 print("Evaluating: ", obj.syntax)
@@ -96,16 +98,18 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                             (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                         ]
                 else:
+                    # print(ev.value)
                     global_replacement_syntax_pairs.append(
                         (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                     )
 
     comp.getRoot().visit(_eval_visitor)
 
-    def _apply_all_replacements(node, rewriter, rewrite_list) -> None:
+    def _apply_all_replacements(node, rewriter: SyntaxRewriter, rewrite_list) -> None:
         for syntax_node, replacement in rewrite_list:
             if node == syntax_node:
-                rewriter.replace(node, replacement)
+                nr = rewriter.deepClone(replacement)
+                rewriter.replace(node, nr)
                 return
 
     conc_trees = []
@@ -124,7 +128,9 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                     tree_dict[mod_path.name],
                     rewrite_wrapper(
                         _apply_all_replacements,
-                        local_replacement_syntax_pairs[mod_name] + global_replacement_syntax_pairs,
+                        local_replacement_syntax_pairs[mod_name]
+                        if mod_name in local_replacement_syntax_pairs
+                        else [] + global_replacement_syntax_pairs,
                     ),
                 ),
                 mod_name,  # mod_name is path e.g. top.inst1.inst2 . Names are actual instance names
@@ -138,78 +144,13 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         new_name = tree_name.replace(".", "_")
         print(f"Renaming tree {tree_name} to {new_name}")
         # Rename all submodules in the tree to match the new names of the concretized trees
-        renamed_conc_trees.append((rewrite_submodules(rename_module(tree, new_name)), new_name))
+        renamed_conc_trees.append(
+            (rename_submodules(rename_module(tree, new_name)), new_name)
+        )
 
-    print("returned")
     return renamed_conc_trees
 
     # DO REWRITES OVER DEFINITIONS FROM COMPILATION
-
-def rewrite_submodules(tree: SyntaxTree) -> SyntaxTree:
-    """Rewrites all submodule instances in the given syntax tree to match the new names of the concretized trees."""
-
-    # We can leverage to our advantage the fact that the supermodule name already contains the 
-    # hierarchical path to the submodule instance, so we can just replace the dots with underscores
-    # to get the new name of the submodule instance
-
-    name = get_module_name(tree)
-
-    def handler(node, r: SyntaxRewriter, super_name: str):
-        if isinstance(node, syntax.HierarchicalInstanceSyntax):
-            inst_name = node.decl.name.valueText
-            full_name = f"{super_name}_{inst_name}"
-            print(f"Rewriting instance {inst_name} to {full_name}")
-            new_node = r.factory.instanceName(
-                name=r.makeToken(
-                    kind=TokenKind.Identifier,
-                    text=full_name,
-                    trivia=node.decl.name.trivia
-                ),
-                dimensions=node.decl.dimensions
-            )
-
-            r.replace(node.decl, new_node)
-            
-    return syntax.rewrite(tree, rewrite_wrapper(handler, name))
-
-
-def get_submodules(tree: SyntaxTree) -> list[ModuleInfo]:
-    """Extracts the names, types, and params of all submodules instantiated within the given syntax tree.
-
-    Args:
-        tree: The input syntax tree.
-    Returns:
-        A list of ModuleInfo objects representing submodules.
-    """
-    submodules = []
-
-    # TODO: Non-named params
-    def _submodule_collector(obj: Union[Token, SyntaxNode], submodules: list[ModuleInfo]) -> None:
-        if isinstance(obj, syntax.HierarchyInstantiationSyntax):
-            for inst in obj.instances:
-                if isinstance(inst, syntax.HierarchicalInstanceSyntax):
-                    params = {}
-                    # obj.parameters contains the parentheses etc, obj.parameters.parameters contains a list of parameters,
-                    # either OrderedParamAssignmentSyntax or NamedParamAssignmentSyntax
-                    # NamedParamAssignmentSyntax contains the dot, name, etc, OrderedParamAssignmentSyntax is just the value as ExpressionSyntax
-                    for param in obj.parameters.parameters if obj.parameters else []:
-                        if isinstance(param, syntax.NamedParamAssignmentSyntax):
-                            assert isinstance(param.expr, syntax.LiteralExpressionSyntax)
-                            params[param.name.valueText] = param.expr.literal.valueText  # type: ignore
-                        elif isinstance(param, syntax.OrderedParamAssignmentSyntax):
-                            raise NotImplementedError("Ordered parameters not supported yet")
-
-                    print(type(inst))
-
-                    submodules.append(
-                        ModuleInfo(
-                            name=inst.decl.name.valueText, m_type=obj.type.valueText, params=params
-                        )
-                    )
-
-    tree.root.visit(visitor_wrapper(_submodule_collector, submodules))
-
-    return submodules
 
 
 def split_tree(tree: SyntaxTree) -> list[tuple[str, SyntaxTree]]:
@@ -225,7 +166,9 @@ def split_tree(tree: SyntaxTree) -> list[tuple[str, SyntaxTree]]:
             info_trees.append(st.__str__())
 
     for module in raw_modules:
-        modules.append((module[0], SyntaxTree.fromText("\n".join(info_trees + [module[1]]))))
+        modules.append(
+            (module[0], SyntaxTree.fromText("\n".join(info_trees + [module[1]])))
+        )
 
     return modules
 
@@ -252,7 +195,7 @@ def main():
         for tree in split_trees:
             src_list.append(f"{output_dir}/{tree[0]}.sv")
             with open(f"{output_dir}/{tree[0]}.sv", "w") as f:
-                f.write(SyntaxPrinter.printFile(tree[1]))
+                f.write(print_tree(tree[1]))
 
     d = Driver()
     d.addStandardArgs()
@@ -277,7 +220,7 @@ def main():
 
     for tree, name in conc_trees:
         with open(f"{output_dir}/{name}_concretized.sv", "w") as f:
-            f.write(SyntaxPrinter.printFile(tree))
+            f.write(print_tree(tree))
 
     print()
     print()

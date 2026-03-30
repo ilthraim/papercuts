@@ -25,6 +25,16 @@ PYBIND11_MODULE(pypercuts, m) {
         "Rename the module in a SyntaxTree"
     );
 
+    m.def("get_module_name", &papercuts::getModuleName,
+        py::arg("tree"),
+        "Get the name of the module in a SyntaxTree"
+    );
+
+    m.def("rename_submodules", &papercuts::renameSubmodules,
+        py::arg("tree"),
+        "Rename submodules in a SyntaxTree based on the parent module name"
+    );
+
     py::classh<papercuts::Papercutter>(m, "Papercutter")
         .def(py::init<const std::shared_ptr<slang::syntax::SyntaxTree>>())
         .def("cut_all", &papercuts::Papercutter::cutAll)

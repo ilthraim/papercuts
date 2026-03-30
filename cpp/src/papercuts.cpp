@@ -45,6 +45,26 @@ std::shared_ptr<SyntaxTree> ModuleNameRewriter::renameModule(const std::shared_p
     return this->transform(tree);
 }
 
+SubmoduleRenamer::SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+    ModuleNameFinder finder;
+    this->moduleName = finder.getModuleName(tree);
+}
+
+void SubmoduleRenamer::handle(const InstanceNameSyntax& node) {
+    auto newName = makeToken(TokenKind::Identifier, persistString(alloc, moduleName + "_" + std::string(node.name.valueText())));
+
+    replaceToken(node, 0, newName, true);
+}
+
+std::shared_ptr<SyntaxTree> SubmoduleRenamer::renameSubmodules() {
+    return this->transform(tree);
+}
+
+std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> tree) {
+    SubmoduleRenamer rewriter(tree);
+    return rewriter.renameSubmodules();
+}
+
 std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName) {
     ModuleNameRewriter rewriter;
     return rewriter.renameModule(tree, newName);

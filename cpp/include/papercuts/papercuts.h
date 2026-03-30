@@ -107,12 +107,24 @@ public:
     std::string getModuleName(const std::shared_ptr<SyntaxTree> tree);
 };
 
+class SubmoduleRenamer : public SyntaxRewriter<SubmoduleRenamer> {
+private:
+    std::string moduleName; // Store the new name we want to give to the module
+    std::shared_ptr<SyntaxTree> tree;
+public:
+    SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree);
+    void handle(const InstanceNameSyntax& node);
+    std::shared_ptr<SyntaxTree> renameSubmodules();
+};
+
 // MARK: Base functions
 
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
                                         bool ifMux);
 
 std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName);
+
+std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> tree);
 
 std::string getModuleName(const std::shared_ptr<SyntaxTree> tree);
 
