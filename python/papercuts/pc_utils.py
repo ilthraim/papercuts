@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Callable, Union
 from pyslang.syntax import SyntaxNode, SyntaxRewriter, SyntaxTree, SyntaxPrinter
 from pyslang.parsing import Token
@@ -18,3 +19,19 @@ def print_tree(tree: SyntaxTree) -> str:
         # Some rewritten trees can carry invalid source buffer ids in pyslang.
         # `str(tree.root)` prints from CST text without querying those locations.
         return str(tree.root)
+    
+# MARK: Run
+@dataclass
+class Run:
+    """A single test run with input and expected output."""
+
+    canonical_fname: str
+    mod_fname: str
+    index: int = 0
+    wrapper_fname: str = ""
+    valid: bool = False
+    output: str = ""
+
+    def run(self):
+        """Run JasperGold on the wrapper file and capture output."""
+        pass  # Implementation would go here

@@ -3,67 +3,20 @@
 
 from __future__ import annotations
 import sys
-from typing import Callable, Union, List
-from papercuts.pypercuts import Papercutter, rename_module, get_module_name
 from pyslang.syntax import (
-    SyntaxNode,
     SyntaxTree,
-    SyntaxRewriter,
-    SyntaxFactory,
-    SyntaxKind,
 )
-from pyslang.parsing import Token, TokenKind
 from pyslang.driver import Driver
-from pyslang import syntax, parsing, ast, driver
+from pyslang import ast, driver
 
 import argparse
 import os
 import shutil
 import asyncio
-from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from papercuts import ec
 import papercuts.chipper as chipper
-from papercuts.pc_utils import print_tree
-
-
-# MARK: Modules
-@dataclass
-class Module:
-    """A SystemVerilog module with its name and syntax tree."""
-
-    name: str
-    tree: SyntaxTree
-    submodules: list[ModuleInfo]
-    is_top: bool = False
-
-
-@dataclass
-class ModuleInfo:
-    name: str
-    m_type: str
-    params: dict
-
-
-# MARK: Run
-@dataclass
-class Run:
-    """A single test run with input and expected output."""
-
-    canonical_fname: str
-    mod_fname: str
-    input_tree: SyntaxTree
-    output_tree: SyntaxTree
-    index: int = 0
-    wrapper_fname: str = ""
-    valid: bool = False
-    output: str = ""
-
-    def run(self):
-        """Run JasperGold on the wrapper file and capture output."""
-        pass  # Implementation would go here
-
+from papercuts.pc_utils import print_tree, Run
 
 # MARK: Main
 async def main():
@@ -125,7 +78,7 @@ async def main():
     os.makedirs(ctree_dir, exist_ok=True)
 
     for tree, name in conc_trees:
-        with open(f"{ctree_dir}/{name}_concretized.sv", "w") as f:
+        with open(f"{ctree_dir}/{name}.sv", "w") as f:
             f.write(print_tree(tree))
 
     print("Concretization complete.")
@@ -134,12 +87,6 @@ async def main():
         cur_dir = f"{output_dir}/{name}"
         os.makedirs(cur_dir, exist_ok=True)
         # Make sure we have all relevant trees for equivalence testing
-        for itree, iname in conc_trees:
-            if iname != name:
-                with open(f"{cur_dir}/{iname}.sv", "w") as f:
-                    f.write(print_tree(itree))
-
-        
 
 
     # runs: list[Run] = []
