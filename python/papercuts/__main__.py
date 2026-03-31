@@ -14,7 +14,8 @@ import asyncio
 
 import papercuts.chipper as chipper
 from papercuts.utils import print_tree, Run
-from papercuts.pypercuts import Papercutter
+from papercuts.ec import generate_jasper_tcl_script, run_jasper
+from papercuts.pypercuts import Papercutter, insert_muxes
 
 
 # MARK: Main
@@ -23,6 +24,7 @@ async def main():
 
     parser.add_argument("input_files", help="The input SystemVerilog files to process", nargs="+")
     parser.add_argument("-e", "--check-equivalence", action="store_true")
+    parser.add_argument("-m", "--mux-rewrites", action="store_true")
 
     args = parser.parse_args()
 
@@ -67,6 +69,7 @@ async def main():
     print(f"Compilation root has {len(comp_root.topInstances)} top-level instances.")
     print("Top-level instances:", [top.name for top in comp_root.topInstances])
     assert len(comp_root.topInstances) == 1, "Expected exactly one top-level instance."
+    top_name = comp_root.topInstances[0].name
 
     # Attempt concretization
     print("Extracting parameters and concretizing...")
@@ -75,117 +78,81 @@ async def main():
     ctree_dir = f"{output_dir}/concrete_sources"
     os.makedirs(ctree_dir, exist_ok=True)
 
-
+    # Write concretized trees to output directory (this will be out spec lib)
     for tree, name in conc_trees:
         with open(f"{ctree_dir}/{name}.sv", "w") as f:
             f.write(print_tree(tree))
 
-
     print("Concretization complete.")
 
+    # Make a directory for the final output sources
     consolidated_dir = f"{output_dir}/consolidated_sources"
     os.makedirs(consolidated_dir, exist_ok=True)
 
+    # write our tcl script for JasperGold equivalence checking
+    with open("pcjg.tcl", "w") as f:
+        f.write(generate_jasper_tcl_script())
+
+    if args.mux_rewrites:
+        print("Performing mux rewrites...")
+        mux_dir = f"{output_dir}/muxed_sources"
+        os.makedirs(mux_dir, exist_ok=True)
+        for tree, name in conc_trees:
+            rewrite = insert_muxes(tree, True, True, True)
+            with open(f"{mux_dir}/{name}.sv", "w") as f:
+                f.write(print_tree(rewrite))
+        print("Mux rewrites complete.")
+
+    # Now cut all of our trees
     for tree, name in conc_trees:
+        runs: list[Run] = []
         cur_dir = f"{output_dir}/{name}"
         os.makedirs(cur_dir, exist_ok=True)
+        is_top = name == top_name
 
         pc = Papercutter(tree)
         rewrites = pc.cut_all()
         for idx, rewrite in enumerate(rewrites):
+            runs.append(
+                Run(
+                    top_module_path=f"{ctree_dir}/{top_name}.sv",
+                    spec_lib_path=ctree_dir,
+                    impl_module_path=f"{cur_dir}/{name}_pc{idx}.sv",
+                    impl_module_folder=cur_dir,
+                    is_top=is_top,
+                    index=idx,
+                )
+            )
             with open(f"{cur_dir}/{name}_pc{idx}.sv", "w") as f:
                 f.write(print_tree(rewrite))
 
-        
+        # We've added all of our rewritten modules to the runs list, now check all of them for equivalence
 
-            
+        if args.check_equivalence:
 
-    # runs: list[Run] = []
+            async def run_with_limit(semaphore, run):
+                async with semaphore:
+                    return await run_jasper(run, False)
 
-    # pcutter = Papercutter(sw)
+            semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent tasks
 
-    # rewrites = pcutter.cut_all()
+            tasks = [run_with_limit(semaphore, run) for run in runs]
+            await asyncio.gather(*tasks)
 
-    # fname = get_module_name(sw)
+            print("JasperGold runs complete. Processing results...")
 
-    # for idx, rewrite in enumerate(rewrites):
-    #     runs.append(
-    #         Run(
-    #             canonical_fname=fname,
-    #             mod_fname=f"{fname}_pc{idx}",
-    #             input_tree=sw,
-    #             output_tree=rename_module(rewrite, f"{fname}_pc{idx}"),
-    #             index=idx,
-    #         )
-    #     )
+            for run in runs:
+                print(
+                    f"JasperGold run for {run.impl_module_path} completed with return code {run.valid}"
+                )
 
-    # try:
-    #     with open(f"{output_dir}/{fname}_concretized.sv", "w") as fout:
-    #         fout.write(SyntaxPrinter.printFile(sw))
-    # except Exception as e:
-    #     print(f"Error writing original file: {e}")
-
-    # for run in runs:
-    #     try:
-    #         with open(f"{output_dir}/{run.mod_fname}.sv", "w") as fout:
-    #             fout.write(SyntaxPrinter.printFile(run.output_tree))
-    #     except Exception as e:
-    #         print(f"Error writing output files: {e}")
-
-    # if args.check_equivalence:
-    #     for run in runs:
-    #         ec.generate_jasper_files(run, output_dir=output_dir)
-
-    #     directory = Path(output_dir)
-
-    #     for item in directory.glob("*_jgproject"):
-    #         if item.is_dir():
-    #             shutil.rmtree(item)
-
-    #     if runs:
-    #         shutil.copy(args.input_file, output_dir)
-    #         os.chdir(output_dir)
-
-    #         async def run_with_limit(semaphore, run):
-    #             async with semaphore:
-    #                 return await ec.run_jasper(run, True)
-
-    #         semaphore = asyncio.Semaphore(32)  # Limit to 32 concurrent tasks
-
-    #         tasks = [run_with_limit(semaphore, run) for run in runs]
-    #         await asyncio.gather(*tasks)
-
-    #         print("JasperGold runs complete. Processing results...")
-
-    #         successes = ""
-
-    #         for run in runs:
-    #             with open(f"{run.wrapper_fname}_output.log", "w") as fout:
-    #                 fout.write(run.output)
-
-    #             print(
-    #                 f"JasperGold run for {run.wrapper_fname} completed with return code {run.valid}"
-    #             )
-    #             successes += f"{run.wrapper_fname}: {'PASS' if run.valid else 'FAIL'}\n"
-
-    #         with open("../equivalence_results.txt", "w") as fout:
-    #             fout.write(successes)
-
-    #         print("Initial equivalence checks complete. Attempting consolidation...")
-
-    #         working_rewrites = [run.index for run in runs if run.valid]
-
-    #         # with open(f"{fname}_consolidated.sv", "w") as fout:
-    #         #     fout.write(SyntaxPrinter.printFile(pcutter.cut_index(working_rewrites)))
-
-    #         # # ec.generate_jasper_files(consolidated_run, output_dir=".")
-
-    #         # # result = await ec.run_jasper(consolidated_run, True)
-
-    #         # # print(f"JasperGold run for {consolidated_run.wrapper_fname} completed with return code {consolidated_run.valid}")
-
-    #         # os.chdir("..")
-    #         # directory = Path(output_dir)
+            working_rewrites = [run.index for run in runs if run.valid]
+            if working_rewrites:
+                with open(f"{consolidated_dir}/{name}.sv", "w") as f:
+                    f.write(print_tree(pc.cut_index(working_rewrites)))
+            else:
+                with open(f"{consolidated_dir}/{name}.sv", "w") as f:
+                    f.write(print_tree(tree))
 
 
 if __name__ == "__main__":

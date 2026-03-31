@@ -25,13 +25,11 @@ def print_tree(tree: SyntaxTree) -> str:
 class Run:
     """A single test run with input and expected output."""
 
-    canonical_fname: str
-    mod_fname: str
+    top_module_path: str
+    spec_lib_path: str
+    impl_module_path: str
+    impl_module_folder: str
+    is_top: bool
     index: int = 0
-    wrapper_fname: str = ""
     valid: bool = False
     output: str = ""
-
-    def run(self):
-        """Run JasperGold on the wrapper file and capture output."""
-        pass  # Implementation would go here

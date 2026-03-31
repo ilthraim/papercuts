@@ -201,32 +201,32 @@ def generate_jasper_wrapper(
 
 
 # MARK: Jasper Files
-def generate_jasper_files(run: pc_core.Run, output_dir: str = ".") -> None:
-    """
-    Generate SystemVerilog wrapper and TCL script files for formal verification.
+# def generate_jasper_files(run: pc_core.Run, output_dir: str = ".") -> None:
+#     """
+#     Generate SystemVerilog wrapper and TCL script files for formal verification.
 
-    Args:
-        run: pc_core.Run object containing module information
-    """
+#     Args:
+#         run: pc_core.Run object containing module information
+#     """
 
-    wrapper_str = generate_jasper_wrapper(
-        module1_str=print_tree(run.input_tree),
-        module2_str=print_tree(run.output_tree),
-    )
+#     # wrapper_str = generate_jasper_wrapper(
+#     #     module1_str=print_tree(run.input_tree),
+#     #     module2_str=print_tree(run.output_tree),
+#     # )
 
-    try:
-        tcl_script = generate_jasper_tcl_script(f"{run.mod_fname}_wrapper")
-        run.wrapper_fname = f"{run.mod_fname}_wrapper"
-        with open(f"{output_dir}/{run.wrapper_fname}.tcl", "w") as fout:
-            fout.write(tcl_script)
-        with open(f"{output_dir}/{run.wrapper_fname}.sv", "w") as fout:
-            fout.write(wrapper_str)
-    except Exception as e:
-        print(f"Error generating files for {run.mod_fname}: {e}")
+#     try:
+#         tcl_script = generate_jasper_tcl_script(f"{run.mod_fname}_wrapper")
+#         run.wrapper_fname = f"{run.mod_fname}_wrapper"
+#         with open(f"{output_dir}/{run.wrapper_fname}.tcl", "w") as fout:
+#             fout.write(tcl_script)
+#         with open(f"{output_dir}/{run.wrapper_fname}.sv", "w") as fout:
+#             fout.write(wrapper_str)
+#     except Exception as e:
+#         print(f"Error generating files for {run.mod_fname}: {e}")
 
 
 # MARK: Jasper TCL
-def generate_jasper_tcl_script(wrapper_name: str) -> str:
+def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
     """
     Generate a TCL script for formal verification of the wrapper module.
 
@@ -261,9 +261,69 @@ def generate_jasper_tcl_script(wrapper_name: str) -> str:
 
     return tcl_script
 
+def generate_jasper_tcl_script() -> str:
+    tcl_script = "# TCL script for formal verification of wrapper module\n"
+    tcl_script += """\n
+#Arguments are : (5) top_module_path, (6) spec_lib_path, (7) imp_module_path, (8) is_top
+
+set is_top [lindex $argv 8]
+
+if {[catch {
+
+    check_sec -compile_context spec
+    if {$is_top eq "True"} {
+        analyze -sv -y [lindex $argv 6] [lindex $argv 7] +libext+.sv
+    } else {
+        analyze -sv -v [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
+    }
+    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
+    # Analyze and elaborate the implementation design
+    check_sec -compile_context imp
+    analyze -sv -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
+    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
+    # Setup verification environment
+    check_sec -setup
+    reset -none
+    clock -none
+    # Run proof and check results
+    set res [check_sec -prove -silent]
+
+    if {$res eq "proven"} {
+            exit 0
+        } else {
+            exit 1
+        }
+
+} err]} {
+    puts "Error during formal verification: $err"
+    exit 1
+}"""
+
+    return tcl_script
 
 # MARK: Jasper Runner
-async def run_jasper(run: pc_core.Run, print_output: bool = True):
+async def run_jasper(run: pc_core.Run, print_output: bool = False):
+    process = await asyncio.create_subprocess_shell(
+        f"csh -c 'jg -no_gui -proj {run.impl_module_folder}/jgproject{run.index} pcjg.tcl --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    output = ""
+
+    if process.stdout is not None:
+        async for line in process.stdout:
+            if print_output:
+                print(line.decode(), end="")
+            output += line.decode()
+
+    await process.wait()
+
+    run.valid = process.returncode == 0
+    run.output = output
+    return
+
+async def run_jasper_old(run: pc_core.Run, print_output: bool = False):
     name = run.wrapper_fname.split("_wrapper")[0]
     process = await asyncio.create_subprocess_shell(
         f"csh -c 'jg -no_gui -tcl {run.wrapper_fname}.tcl -proj ./{name}_jgproject'",
