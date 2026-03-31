@@ -4,8 +4,8 @@ import re
 from typing import Dict, List, Tuple, TYPE_CHECKING
 import pyslang
 
-import papercuts.pc_core as pc_core
-from papercuts.pc_utils import print_tree
+import papercuts.utils as pc_core
+from papercuts.utils import print_tree
 
 
 # MARK: Jasper Wrapper

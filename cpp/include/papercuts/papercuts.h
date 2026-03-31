@@ -113,7 +113,7 @@ private:
     std::shared_ptr<SyntaxTree> tree;
 public:
     SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree);
-    void handle(const InstanceNameSyntax& node);
+    void handle(const HierarchyInstantiationSyntax& node);
     std::shared_ptr<SyntaxTree> renameSubmodules();
 };
 

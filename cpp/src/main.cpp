@@ -46,6 +46,9 @@ int main() {
                 end
             end
 
+            add3 U_ADD3_5(.a(a5), .y(y5)); 
+            add3 U_ADD3_6(.a(a6), .y(y6)), U_ADD3_7(.a(a7), .y(y7));
+
         endmodule
     )");
 
@@ -63,18 +66,20 @@ int main() {
 
     papercuts::Papercutter PC(tree);
 
-    std::vector<std::shared_ptr<SyntaxTree>> newTrees = PC.cutAll();
+    // std::vector<std::shared_ptr<SyntaxTree>> newTrees = PC.cutAll();
 
-    for (const auto& newTree : newTrees) {
-        std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
-    }
+    // for (const auto& newTree : newTrees) {
+    //     std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    // }
 
-    for (size_t i = 0; i < PC.getCutCount(); i++) {
-        auto newTree = PC.cutIndex({i});
-        std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
-    }
+    // for (size_t i = 0; i < PC.getCutCount(); i++) {
+    //     auto newTree = PC.cutIndex({i});
+    //     std::cout << SyntaxPrinter::printFile(*newTree) << std::endl;
+    // }
 
-    std::cout << "Original module name: " << papercuts::getModuleName(tree) << std::endl;
+    // std::cout << "Original module name: " << papercuts::getModuleName(tree) << std::endl;
+
+    std::cout << SyntaxPrinter::printFile(*papercuts::renameSubmodules(tree)) << std::endl;
 
 
     return 0;

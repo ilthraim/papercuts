@@ -12,7 +12,7 @@ from pyslang.parsing import Token, TokenKind
 from pyslang.driver import Driver
 from papercuts.pypercuts import rename_module, get_module_name, rename_submodules
 
-from papercuts.pc_utils import rewrite_wrapper, print_tree
+from papercuts.utils import rewrite_wrapper, print_tree
 
 
 def collect_modules_ast(comp: Compilation) -> dict[str, ast.DefinitionSymbol]:

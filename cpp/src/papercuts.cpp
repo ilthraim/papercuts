@@ -50,10 +50,35 @@ SubmoduleRenamer::SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree) : tre
     this->moduleName = finder.getModuleName(tree);
 }
 
-void SubmoduleRenamer::handle(const InstanceNameSyntax& node) {
-    auto newName = makeToken(TokenKind::Identifier, persistString(alloc, moduleName + "_" + std::string(node.name.valueText())));
+void SubmoduleRenamer::handle(const HierarchyInstantiationSyntax& node) {
+    if (node.instances.size() == 1) { // if there's only one instance we can just rename without splitting it out
+        auto newType =
+            makeToken(TokenKind::Identifier,
+                      persistString(alloc, moduleName + "_" + std::string(node.instances[0]->decl->name.valueText())));
 
-    replaceToken(node, 0, newName, true);
+        replaceToken(node, 1, newType, true);
+    }
+    else {
+        for (const auto& instance : node.instances) {
+            std::string oldTriviaText;
+            for (const auto& t : node.getFirstToken().trivia())
+                oldTriviaText += t.getRawText();
+
+            auto& newInst = parse(
+                persistString(alloc, 
+                    oldTriviaText + 
+                    (node.attributes.size() > 0 ? node.attributes.toString() + " " : "") + 
+                    moduleName + "_" + std::string(instance->decl->name.valueText()) + 
+                    (node.parameters ? node.parameters->toString() : "")
+                    + " " + std::string(instance->decl->name.valueText()) + " (" + instance->connections.toString() + ");"
+                )
+            );
+
+            insertBefore(node, newInst);
+            std::cout << "Inserted new instance: " << newInst.toString() << std::endl;
+        }
+        remove(node);
+    }
 }
 
 std::shared_ptr<SyntaxTree> SubmoduleRenamer::renameSubmodules() {
@@ -218,7 +243,7 @@ std::shared_ptr<SyntaxTree> BitShrinker::shrinkBitsIndex(const std::vector<size_
     nodesToShrink.clear();
     runMap.clear();
 
-    for (size_t i: indicesToShrink) {
+    for (size_t i : indicesToShrink) {
         if (i >= cutCount) {
             throw std::out_of_range("Index out of range for shrinkBitsIndex");
         }
@@ -295,10 +320,12 @@ void BitShrinker::handle(const SyntaxNode& node) {
 }
 
 void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
-    // I'm not sure if/when we will ever have a DeclaratorSyntax node that isn't a child of a
-    // DataDeclarationSyntax node, so lets throw an assert if not
-    auto& dataDecl = node.parent->as<DataDeclarationSyntax>();
-    auto& type = dataDecl.type;
+    auto* dataDecl = node.parent->as_if<DataDeclarationSyntax>();
+    if (!dataDecl) {
+        return; // If the parent of this DeclaratorSyntax node is not a DataDeclarationSyntax node, we can skip it
+    }
+    auto& type = dataDecl->type;
+
     if (type->kind == SyntaxKind::LogicType) {
         auto& intType = type->as<IntegerTypeSyntax>();
         if (intType.signing && intType.signing.kind != TokenKind::UnsignedKeyword) {
@@ -339,7 +366,8 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
     }
 }
 
-std::vector<std::pair<const DeclaratorSyntax*, int>> BitShrinkCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
+std::vector<std::pair<const DeclaratorSyntax*, int>> BitShrinkCollector::getFoundNodes(
+    const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
     return this->shrinkNodes;
@@ -379,7 +407,7 @@ void TernaryRemover::handle(const ConditionalExpressionSyntax& node) {
 std::shared_ptr<SyntaxTree> TernaryRemover::removeTernaryIndex(const std::vector<size_t>& indicesToRemove) {
     nodesToChange.clear();
 
-    for (size_t i: indicesToRemove) {
+    for (size_t i : indicesToRemove) {
         if (i >= cutCount) {
             throw std::out_of_range("Index out of range for removeTernaryIndex");
         }
@@ -415,7 +443,8 @@ void TernaryCollector::handle(const ConditionalExpressionSyntax& node) {
     this->visitDefault(node);
 }
 
-std::vector<const ConditionalExpressionSyntax*> TernaryCollector::getFoundNodes(const std::shared_ptr<SyntaxTree> tree) {
+std::vector<const ConditionalExpressionSyntax*> TernaryCollector::getFoundNodes(
+    const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
     return this->foundNodes;
@@ -465,7 +494,7 @@ void IfRemover::handle(const ConditionalStatementSyntax& node) {
 std::shared_ptr<SyntaxTree> IfRemover::removeIfIndex(const std::vector<size_t>& indicesToRemove) {
     nodesToChange.clear();
 
-    for (size_t i: indicesToRemove) {
+    for (size_t i : indicesToRemove) {
         if (i >= cutCount) {
             throw std::out_of_range("Index out of range for removeIfIndex");
         }
@@ -510,6 +539,7 @@ std::vector<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(const 
 // MARK: Papercutter
 
 Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+
     BitShrinkCollector BSC;
     shrinkNodes = BSC.getFoundNodes(tree);
     cutCount += shrinkNodes.size();
@@ -545,7 +575,7 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
 
     clearState();
 
-    for (size_t i: indicesToCut) {
+    for (size_t i : indicesToCut) {
         if (i >= cutCount) {
             throw std::out_of_range("Index out of range for cutIndex");
         }
@@ -569,7 +599,7 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
 
     auto newTree = transform(tree);
     clearState();
-    return newTree; 
+    return newTree;
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::shrinkAllBits() {
@@ -631,8 +661,12 @@ void Papercutter::handle(const DeclaratorSyntax& node) {
     if (runMap.contains(&node)) {
         auto newName = std::string(node.name.valueText()) + "_papercuts";
         int newWidth = runMap[&node] - 1; // Get the width of the node and calculate the new width after shrinking
-        auto& parentDecl = node.parent->as<DataDeclarationSyntax>();
-        auto& type = parentDecl.type;
+        auto* parentDecl = node.parent->as_if<DataDeclarationSyntax>();
+        if (!parentDecl) {
+            return; // If the parent of this DeclaratorSyntax node is not a DataDeclarationSyntax node, we can skip it
+        }
+
+        auto& type = parentDecl->type;
 
         auto& newDecl = factory.declarator(makeId(persistString(alloc, newName), SingleSpace),
                                            std::span<VariableDimensionSyntax*>{}, nullptr);
@@ -641,19 +675,19 @@ void Papercutter::handle(const DeclaratorSyntax& node) {
         SeparatedSyntaxList<DeclaratorSyntax> declList(declElem);
 
         auto& newDataDecl = factory.dataDeclaration(std::span<AttributeInstanceSyntax*>{},
-                                                    *deepClone(parentDecl.modifiers, alloc), *deepClone(*type, alloc),
+                                                    *deepClone(parentDecl->modifiers, alloc), *deepClone(*type, alloc),
                                                     declList, makeSemicolon());
-        insertAfter(parentDecl, newDataDecl);
+        insertAfter(*parentDecl, newDataDecl);
 
         std::string oldTriviaText;
-        for (const auto& t : parentDecl.getFirstToken().trivia())
+        for (const auto& t : parentDecl->getFirstToken().trivia())
             oldTriviaText += t.getRawText();
 
         std::string assignText = oldTriviaText + "assign " + newName + " = {1'b0, " +
                                  std::string(node.name.valueText()) + "[" + std::to_string(newWidth - 1) + ":0]};";
         auto& newAssign = parse(assignText);
 
-        insertAfter(parentDecl, newAssign);
+        insertAfter(*parentDecl, newAssign);
     }
 }
 

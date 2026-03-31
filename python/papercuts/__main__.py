@@ -3,20 +3,19 @@
 
 from __future__ import annotations
 import sys
-from pyslang.syntax import (
-    SyntaxTree,
-)
-from pyslang.driver import Driver
-from pyslang import ast, driver
+from pyslang.syntax import SyntaxTree
+from pyslang.driver import Driver, CommandLineOptions
+from pyslang.ast import RootSymbol
 
 import argparse
 import os
 import shutil
 import asyncio
-from dataclasses import dataclass
 
 import papercuts.chipper as chipper
-from papercuts.pc_utils import print_tree, Run
+from papercuts.utils import print_tree, Run
+from papercuts.pypercuts import Papercutter
+
 
 # MARK: Main
 async def main():
@@ -52,7 +51,7 @@ async def main():
     d = Driver()
     d.addStandardArgs()
     srcs = " ".join([sys.argv[0]] + src_list)
-    if not d.parseCommandLine(srcs, driver.CommandLineOptions()):
+    if not d.parseCommandLine(srcs, CommandLineOptions()):
         print("Error parsing command line arguments.")
         return
 
@@ -64,7 +63,7 @@ async def main():
     compilation = d.createCompilation()
     d.reportCompilation(compilation, False)
 
-    comp_root: ast.RootSymbol = compilation.getRoot()
+    comp_root: RootSymbol = compilation.getRoot()
     print(f"Compilation root has {len(comp_root.topInstances)} top-level instances.")
     print("Top-level instances:", [top.name for top in comp_root.topInstances])
     assert len(comp_root.topInstances) == 1, "Expected exactly one top-level instance."
@@ -73,21 +72,33 @@ async def main():
     print("Extracting parameters and concretizing...")
     conc_trees = chipper.eval_modules(compilation)
 
-
     ctree_dir = f"{output_dir}/concrete_sources"
     os.makedirs(ctree_dir, exist_ok=True)
+
 
     for tree, name in conc_trees:
         with open(f"{ctree_dir}/{name}.sv", "w") as f:
             f.write(print_tree(tree))
 
+
     print("Concretization complete.")
+
+    consolidated_dir = f"{output_dir}/consolidated_sources"
+    os.makedirs(consolidated_dir, exist_ok=True)
 
     for tree, name in conc_trees:
         cur_dir = f"{output_dir}/{name}"
         os.makedirs(cur_dir, exist_ok=True)
-        # Make sure we have all relevant trees for equivalence testing
 
+        pc = Papercutter(tree)
+        rewrites = pc.cut_all()
+        for idx, rewrite in enumerate(rewrites):
+            with open(f"{cur_dir}/{name}_pc{idx}.sv", "w") as f:
+                f.write(print_tree(rewrite))
+
+        
+
+            
 
     # runs: list[Run] = []
 
