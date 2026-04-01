@@ -110,7 +110,8 @@ async def main():
         os.makedirs(cur_dir, exist_ok=True)
         is_top = name == top_name
 
-        pc = Papercutter(tree)
+        ntree = SyntaxTree.fromText(print_tree(tree))
+        pc = Papercutter(ntree)
         rewrites = pc.cut_all()
         for idx, rewrite in enumerate(rewrites):
             runs.append(

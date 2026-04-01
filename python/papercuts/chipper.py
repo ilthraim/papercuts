@@ -61,7 +61,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
     local_replacement_syntax_pairs = {}
     global_replacement_syntax_pairs = []
 
-    def _attempt_getSymbolReference(obj: Expression) -> Union[Symbol, None]:
+    def _attempt_getSymbolReference(obj) -> Union[Symbol, None]:
         g_ref = None
 
         def _get_ref_from_children(obj: Union[Token, SyntaxNode]) -> None:
@@ -76,6 +76,33 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         return g_ref
 
     def _eval_visitor(obj: Union[Token, SyntaxNode]) -> None:
+        if isinstance(obj, ast.VariableSymbol):
+            if isinstance(obj.syntax.parent, syntax.ImplicitAnsiPortSyntax):
+                new_type_str = str(obj.type)
+                path = obj.hierarchicalPath.rsplit(".", 1)[0]
+                if path in local_replacement_syntax_pairs:
+                    local_replacement_syntax_pairs[path].append(
+                        (obj.syntax.parent.header.dataType, SyntaxTree.fromText(new_type_str).root.type)
+                    )
+                else:
+                    local_replacement_syntax_pairs[path] = [
+                        (obj.syntax.parent.header.dataType, SyntaxTree.fromText(new_type_str).root.type)
+                    ]
+            elif isinstance(obj.syntax.parent, syntax.DataDeclarationSyntax):
+                # TODO: SUPER HACK INCOMING - NEED TO FIX TRIVIA - can fix by printing parts of old node out, parsing that, and then replacing the new node with the old node to preserve trivia
+                new_type_str = str(obj.type)
+                path = obj.hierarchicalPath.rsplit(".", 1)[0]
+                if path in local_replacement_syntax_pairs:
+                    local_replacement_syntax_pairs[path].append(
+                        (obj.syntax.parent.type, SyntaxTree.fromText(new_type_str).root.type)
+                    )
+                else:
+                    local_replacement_syntax_pairs[path] = [
+                        (obj.syntax.parent.type, SyntaxTree.fromText(new_type_str).root.type)
+                    ]
+            else:
+                raise NotImplementedError(
+                    "Don't know how to handle variable declarations that aren't ports or data declarations yet.")
         if isinstance(obj, Expression) and not isinstance(obj, ast.IntegerLiteral):
             ev = obj.eval(ecx)
             if ev.value is not None:
@@ -89,6 +116,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                 if ref is not None:
                     path = ref.hierarchicalPath.rsplit(".", 1)[0]
                     print("Path:", path)
+                    print("Value:", ev.value)
                     if path in local_replacement_syntax_pairs:
                         local_replacement_syntax_pairs[path].append(
                             (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
@@ -102,14 +130,15 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                     global_replacement_syntax_pairs.append(
                         (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                     )
-
+            else:
+                print("Could not evaluate: ", obj.syntax)
     comp.getRoot().visit(_eval_visitor)
 
     def _apply_all_replacements(node, rewriter: SyntaxRewriter, rewrite_list) -> None:
         for syntax_node, replacement in rewrite_list:
             if node == syntax_node:
-                nr = rewriter.deepClone(replacement)
-                rewriter.replace(node, nr)
+                #nr = rewriter.deepClone(replacement)
+                rewriter.replace(node, replacement)
                 return
 
     conc_trees = []
