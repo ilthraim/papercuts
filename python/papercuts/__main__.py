@@ -98,7 +98,7 @@ async def main():
         mux_dir = f"{output_dir}/muxed_sources"
         os.makedirs(mux_dir, exist_ok=True)
         for tree, name in conc_trees:
-            rewrite = insert_muxes(tree, True, True, True)
+            rewrite = insert_muxes(SyntaxTree.fromText(print_tree(tree)), True, True, True)
             with open(f"{mux_dir}/{name}.sv", "w") as f:
                 f.write(print_tree(rewrite))
         print("Mux rewrites complete.")
@@ -135,7 +135,7 @@ async def main():
                 async with semaphore:
                     return await run_jasper(run, False)
 
-            semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent tasks
+            semaphore = asyncio.Semaphore(32)  # Limit to 5 concurrent tasks
 
             tasks = [run_with_limit(semaphore, run) for run in runs]
             await asyncio.gather(*tasks)

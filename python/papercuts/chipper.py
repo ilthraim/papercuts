@@ -79,33 +79,34 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         if isinstance(obj, ast.VariableSymbol):
             if obj.type.isAggregate:
                 raise NotImplementedError("Papercuts cannot operate on packed arrays")
-            if isinstance(obj.syntax.parent, syntax.ImplicitAnsiPortSyntax):
-                new_type_str = " " + str(obj.type)
-                path = obj.hierarchicalPath.rsplit(".", 1)[0]
-                if path in local_replacement_syntax_pairs:
-                    local_replacement_syntax_pairs[path].append(
-                        (obj.syntax.parent.header.dataType, SyntaxTree.fromText(new_type_str).root.type)
-                    )
+            if not obj.type.isPredefinedInteger:
+                if isinstance(obj.syntax.parent, syntax.ImplicitAnsiPortSyntax):
+                    new_type_str = " " + str(obj.type)
+                    path = obj.hierarchicalPath.rsplit(".", 1)[0]
+                    if path in local_replacement_syntax_pairs:
+                        local_replacement_syntax_pairs[path].append(
+                            (obj.syntax.parent.header.dataType, SyntaxTree.fromText(new_type_str).root.type)
+                        )
+                    else:
+                        local_replacement_syntax_pairs[path] = [
+                            (obj.syntax.parent.header.dataType, SyntaxTree.fromText(new_type_str).root.type)
+                        ]
+                elif isinstance(obj.syntax.parent, syntax.DataDeclarationSyntax):
+                    old_trivia = obj.syntax.parent.type.getFirstToken().trivia
+                    new_type_str = "".join(triv.getRawText() for triv in old_trivia) + str(obj.type)
+                    print(new_type_str)
+                    path = obj.hierarchicalPath.rsplit(".", 1)[0]
+                    if path in local_replacement_syntax_pairs:
+                        local_replacement_syntax_pairs[path].append(
+                            (obj.syntax.parent.type, SyntaxTree.fromText(new_type_str).root.type)
+                        )
+                    else:
+                        local_replacement_syntax_pairs[path] = [
+                            (obj.syntax.parent.type, SyntaxTree.fromText(new_type_str).root.type)
+                        ]
                 else:
-                    local_replacement_syntax_pairs[path] = [
-                        (obj.syntax.parent.header.dataType, SyntaxTree.fromText(new_type_str).root.type)
-                    ]
-            elif isinstance(obj.syntax.parent, syntax.DataDeclarationSyntax):
-                old_trivia = obj.syntax.parent.type.getFirstToken().trivia
-                new_type_str = "".join(triv.getRawText() for triv in old_trivia) + str(obj.type)
-                print(new_type_str)
-                path = obj.hierarchicalPath.rsplit(".", 1)[0]
-                if path in local_replacement_syntax_pairs:
-                    local_replacement_syntax_pairs[path].append(
-                        (obj.syntax.parent.type, SyntaxTree.fromText(new_type_str).root.type)
-                    )
-                else:
-                    local_replacement_syntax_pairs[path] = [
-                        (obj.syntax.parent.type, SyntaxTree.fromText(new_type_str).root.type)
-                    ]
-            else:
-                raise NotImplementedError(
-                    "Don't know how to handle variable declarations that aren't ports or data declarations yet.")
+                    raise NotImplementedError(
+                        f"Can't handle symbol {obj} of type {obj.type}.")
         if isinstance(obj, Expression) and not isinstance(obj, ast.IntegerLiteral):
             ev = obj.eval(ecx)
             if ev.value is not None:

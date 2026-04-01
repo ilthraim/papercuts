@@ -27,6 +27,12 @@ void ModuleNameRewriter::handle(const ModuleHeaderSyntax& node) {
     this->replaceToken(node, 2, newToken, true);
 }
 
+std::shared_ptr<SyntaxTree> ModuleNameRewriter::renameModule(const std::shared_ptr<SyntaxTree> tree,
+                                                             std::string newName) {
+    this->newName = newName;
+    return this->transform(tree);
+}
+
 void ModuleNameFinder::handle(const ModuleHeaderSyntax& node) {
     this->moduleName = std::string(node.name.valueText());
 }
@@ -37,12 +43,6 @@ std::string ModuleNameFinder::getModuleName(const std::shared_ptr<SyntaxTree> tr
         throw std::runtime_error("No module declaration found in the syntax tree");
     }
     return moduleName;
-}
-
-std::shared_ptr<SyntaxTree> ModuleNameRewriter::renameModule(const std::shared_ptr<SyntaxTree> tree,
-                                                             std::string newName) {
-    this->newName = newName;
-    return this->transform(tree);
 }
 
 SubmoduleRenamer::SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
@@ -387,6 +387,7 @@ void TernaryMuxer::handle(const ConditionalExpressionSyntax& node) {
     auto& newPred = makeConditionalPredicate(newNode.as<ExpressionSyntax>());
 
     replace(*node.predicate, newPred);
+    visitDefault(node);
 }
 
 // MARK: TernaryRemover
@@ -402,6 +403,7 @@ void TernaryRemover::handle(const ConditionalExpressionSyntax& node) {
         auto replacement = nodesToChange[&node] ? node.left : node.right;
         this->replace(node, *replacement);
     }
+    visitDefault(node);
 }
 
 std::shared_ptr<SyntaxTree> TernaryRemover::removeTernaryIndex(const std::vector<size_t>& indicesToRemove) {
@@ -463,6 +465,7 @@ void IfMuxer::handle(const ConditionalStatementSyntax& node) {
 
     auto& newPred = makeConditionalPredicate(newNode.as<ExpressionSyntax>());
     replace(*node.predicate, newPred);
+    visitDefault(node);
 }
 
 // MARK: IfRemover
@@ -731,6 +734,7 @@ void Papercutter::handle(const ConditionalExpressionSyntax& node) {
         auto replacement = ternaryNodesToChange[&node] ? node.left : node.right;
         this->replace(node, *replacement);
     }
+    visitDefault(node);
 }
 
 void Papercutter::handle(const ConditionalStatementSyntax& node) {
@@ -750,6 +754,7 @@ void Papercutter::handle(const ConditionalStatementSyntax& node) {
             this->replace(node, *replacement);
         }
     }
+    this->visitDefault(node);
 }
 
 } // namespace papercuts
