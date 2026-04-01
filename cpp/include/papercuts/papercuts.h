@@ -117,6 +117,14 @@ public:
     std::shared_ptr<SyntaxTree> renameSubmodules();
 };
 
+class InputAdder: public SyntaxRewriter<InputAdder> { 
+private:
+    int numInputs = 0;
+public:
+    void handle(const PortListSyntax& node);
+    std::shared_ptr<SyntaxTree> addInputs(std::shared_ptr<SyntaxTree> tree, int numInputs);
+};
+
 // MARK: Base functions
 
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,

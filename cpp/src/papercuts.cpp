@@ -126,7 +126,29 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
         newTree = BM.insertBitShrinkMuxes(newTree);
     }
 
+    InputAdder IA;
+    newTree = IA.addInputs(newTree, context.muxCount);
+
     return newTree;
+}
+
+void InputAdder::handle(const PortListSyntax& node){
+    if (node.kind == SyntaxKind::NonAnsiPortList || node.kind == SyntaxKind::WildcardPortList)
+        throw std::logic_error("Papercuts only supports ANSI port lists");
+
+    auto& ansiNode = node.as<AnsiPortListSyntax>();
+    std::string newPortStr = "input logic ";
+    for (int i = 0; i < numInputs; i++) {
+        newPortStr += "pc_sel" + std::to_string(i);
+        if (i != numInputs - 1 || ansiNode.ports.size() > 0) {
+            newPortStr += ", ";
+        }
+    }
+    insertAtFront(ansiNode.ports, parse(newPortStr));
+}
+std::shared_ptr<SyntaxTree> InputAdder::addInputs(std::shared_ptr<SyntaxTree> tree, int numInputs) {
+    this->numInputs = numInputs;
+    return transform(tree);
 }
 
 // MARK: BitMuxer
