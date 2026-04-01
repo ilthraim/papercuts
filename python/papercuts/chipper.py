@@ -77,8 +77,10 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
 
     def _eval_visitor(obj: Union[Token, SyntaxNode]) -> None:
         if isinstance(obj, ast.VariableSymbol):
+            if obj.type.isAggregate:
+                raise NotImplementedError("Papercuts cannot operate on packed arrays")
             if isinstance(obj.syntax.parent, syntax.ImplicitAnsiPortSyntax):
-                new_type_str = str(obj.type)
+                new_type_str = " " + str(obj.type)
                 path = obj.hierarchicalPath.rsplit(".", 1)[0]
                 if path in local_replacement_syntax_pairs:
                     local_replacement_syntax_pairs[path].append(
@@ -89,8 +91,9 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                         (obj.syntax.parent.header.dataType, SyntaxTree.fromText(new_type_str).root.type)
                     ]
             elif isinstance(obj.syntax.parent, syntax.DataDeclarationSyntax):
-                # TODO: SUPER HACK INCOMING - NEED TO FIX TRIVIA - can fix by printing parts of old node out, parsing that, and then replacing the new node with the old node to preserve trivia
-                new_type_str = str(obj.type)
+                old_trivia = obj.syntax.parent.type.getFirstToken().trivia
+                new_type_str = "".join(triv.getRawText() for triv in old_trivia) + str(obj.type)
+                print(new_type_str)
                 path = obj.hierarchicalPath.rsplit(".", 1)[0]
                 if path in local_replacement_syntax_pairs:
                     local_replacement_syntax_pairs[path].append(
