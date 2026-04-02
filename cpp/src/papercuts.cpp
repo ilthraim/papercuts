@@ -584,17 +584,48 @@ Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
     std::vector<std::shared_ptr<SyntaxTree>> newTrees;
 
-    auto bitShrinkTrees = shrinkAllBits();
-    newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
-
     auto ternaryRemoveTrees = removeAllTernaries();
     newTrees.insert(newTrees.end(), ternaryRemoveTrees.begin(), ternaryRemoveTrees.end());
 
     auto ifRemoveTrees = removeAllIfs();
     newTrees.insert(newTrees.end(), ifRemoveTrees.begin(), ifRemoveTrees.end());
 
+    auto bitShrinkTrees = shrinkAllBits();
+    newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
+
     return newTrees;
 }
+
+// std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
+
+//     clearState();
+
+//     for (size_t i : indicesToCut) {
+//         if (i >= cutCount) {
+//             throw std::out_of_range("Index out of range for cutIndex");
+//         }
+
+//         if (i < BSRCount) {
+//             size_t nodeIndex = i;
+//             nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
+//             runMap.emplace(shrinkNodes[nodeIndex]);
+//         }
+//         else if (i < BSRCount + TRCount) {
+//             size_t nodeIndex = (i - BSRCount) / 2;
+//             bool removeLeft = ((i - BSRCount) % 2 != 0);
+//             ternaryNodesToChange.emplace(ternaryNodes[nodeIndex], removeLeft);
+//         }
+//         else {
+//             size_t nodeIndex = (i - BSRCount - TRCount) / 2;
+//             bool removeTrueBranch = ((i - BSRCount - TRCount) % 2 != 0);
+//             ifNodesToChange.emplace(ifNodes[nodeIndex], removeTrueBranch);
+//         }
+//     }
+
+//     auto newTree = transform(tree);
+//     clearState();
+//     return newTree;
+// }
 
 std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
 
@@ -605,20 +636,20 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
             throw std::out_of_range("Index out of range for cutIndex");
         }
 
-        if (i < BSRCount) {
-            size_t nodeIndex = i;
-            nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
-            runMap.emplace(shrinkNodes[nodeIndex]);
-        }
-        else if (i < BSRCount + TRCount) {
-            size_t nodeIndex = (i - BSRCount) / 2;
-            bool removeLeft = ((i - BSRCount) % 2 != 0);
+        if (i < TRCount) {
+            size_t nodeIndex = (i) / 2;
+            bool removeLeft = ((i) % 2 != 0);
             ternaryNodesToChange.emplace(ternaryNodes[nodeIndex], removeLeft);
         }
-        else {
-            size_t nodeIndex = (i - BSRCount - TRCount) / 2;
-            bool removeTrueBranch = ((i - BSRCount - TRCount) % 2 != 0);
+        else if (i < TRCount + IRCount) {
+            size_t nodeIndex = (i - TRCount) / 2;
+            bool removeTrueBranch = ((i - TRCount) % 2 != 0);
             ifNodesToChange.emplace(ifNodes[nodeIndex], removeTrueBranch);
+        }
+        else {
+            size_t nodeIndex = i - TRCount - IRCount;
+            nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
+            runMap.emplace(shrinkNodes[nodeIndex]);
         }
     }
 
