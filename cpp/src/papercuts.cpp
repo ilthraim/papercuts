@@ -64,15 +64,12 @@ void SubmoduleRenamer::handle(const HierarchyInstantiationSyntax& node) {
             for (const auto& t : node.getFirstToken().trivia())
                 oldTriviaText += t.getRawText();
 
-            auto& newInst = parse(
-                persistString(alloc, 
-                    oldTriviaText + 
-                    (node.attributes.size() > 0 ? node.attributes.toString() + " " : "") + 
-                    moduleName + "_" + std::string(instance->decl->name.valueText()) + 
-                    (node.parameters ? node.parameters->toString() : "")
-                    + " " + std::string(instance->decl->name.valueText()) + " (" + instance->connections.toString() + ");"
-                )
-            );
+            auto& newInst = parse(persistString(
+                alloc, oldTriviaText + (node.attributes.size() > 0 ? node.attributes.toString() + " " : "") +
+                           moduleName + "_" + std::string(instance->decl->name.valueText()) +
+                           (node.parameters ? node.parameters->toString() : "") + " " +
+                           std::string(instance->decl->name.valueText()) + " (" + instance->connections.toString() +
+                           ");"));
 
             insertBefore(node, newInst);
             std::cout << "Inserted new instance: " << newInst.toString() << std::endl;
@@ -132,7 +129,7 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
     return newTree;
 }
 
-void InputAdder::handle(const PortListSyntax& node){
+void InputAdder::handle(const PortListSyntax& node) {
     if (node.kind == SyntaxKind::NonAnsiPortList || node.kind == SyntaxKind::WildcardPortList)
         throw std::logic_error("Papercuts only supports ANSI port lists");
 
@@ -595,37 +592,6 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
 
     return newTrees;
 }
-
-// std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
-
-//     clearState();
-
-//     for (size_t i : indicesToCut) {
-//         if (i >= cutCount) {
-//             throw std::out_of_range("Index out of range for cutIndex");
-//         }
-
-//         if (i < BSRCount) {
-//             size_t nodeIndex = i;
-//             nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
-//             runMap.emplace(shrinkNodes[nodeIndex]);
-//         }
-//         else if (i < BSRCount + TRCount) {
-//             size_t nodeIndex = (i - BSRCount) / 2;
-//             bool removeLeft = ((i - BSRCount) % 2 != 0);
-//             ternaryNodesToChange.emplace(ternaryNodes[nodeIndex], removeLeft);
-//         }
-//         else {
-//             size_t nodeIndex = (i - BSRCount - TRCount) / 2;
-//             bool removeTrueBranch = ((i - BSRCount - TRCount) % 2 != 0);
-//             ifNodesToChange.emplace(ifNodes[nodeIndex], removeTrueBranch);
-//         }
-//     }
-
-//     auto newTree = transform(tree);
-//     clearState();
-//     return newTree;
-// }
 
 std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
 
