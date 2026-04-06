@@ -595,7 +595,7 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
 
 std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
 
-    clearState();
+    clearState(); 
 
     for (size_t i : indicesToCut) {
         if (i >= cutCount) {
@@ -615,12 +615,17 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
         else {
             size_t nodeIndex = i - TRCount - IRCount;
             nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
+            std::cout << "Adding node to shrink: " << shrinkNodes[nodeIndex].first->name.valueText() << " with width " << shrinkNodes[nodeIndex].second << std::endl;
             runMap.emplace(shrinkNodes[nodeIndex]);
         }
     }
 
     auto newTree = transform(tree);
+    auto finalNodesToShrink = nodesToShrink;
     clearState();
+    nodesToShrink = finalNodesToShrink; // Restore the nodesToShrink state for a finishing pass on identifier names
+    newTree = transform(newTree); // Do a finishing pass to replace identifier names with the _papercuts versions for any ifs/ternarys that were cut
+
     return newTree;
 }
 
