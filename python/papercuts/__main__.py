@@ -155,6 +155,22 @@ async def main():
                 with open(f"{consolidated_dir}/{name}.sv", "w") as f:
                     f.write(print_tree(tree))
 
+            final_run = Run(
+                top_module_path=f"{ctree_dir}/{top_name}.sv",
+                spec_lib_path=ctree_dir,
+                impl_module_path=f"{consolidated_dir}/{name}.sv",
+                impl_module_folder=consolidated_dir,
+                is_top=is_top,
+                index=-1,
+            )
+
+            print("Running JasperGold on final consolidated source...")
+            await run_jasper(final_run, False)
+
+            print(
+                f"Final JasperGold run for {final_run.impl_module_path} completed with return code {final_run.valid}"
+            )
+
 
 if __name__ == "__main__":
     asyncio.run(main())
