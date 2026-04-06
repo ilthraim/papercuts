@@ -165,7 +165,7 @@ async def main():
             )
 
             print("Running JasperGold on final consolidated source...")
-            await run_jasper(final_run, True)
+            await run_jasper(final_run, False)
 
             print(
                 f"Final JasperGold run for {final_run.impl_module_path} completed with return code {final_run.valid}"

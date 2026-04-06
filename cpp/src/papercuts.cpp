@@ -101,8 +101,10 @@ std::string getModuleName(const std::shared_ptr<SyntaxTree> tree) {
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
                                         bool ifMux) {
     std::shared_ptr<SyntaxTree> newTree = tree;
+    std::vector<std::shared_ptr<SyntaxTree>> keepAlive;
 
     MuxContext context;
+    
 
     BitMuxer BM(context);
     TernaryMuxer TM(context);
@@ -113,19 +115,32 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
         BM.initialize(tree);
     }
     if (ternaryMux) {
-        newTree = TM.insertTernaryMuxes(newTree);
+        auto transformed = TM.insertTernaryMuxes(newTree);
+        keepAlive.push_back(newTree);
+        newTree = transformed;
     }
     // PS.visit(newTree->root());
     if (ifMux) {
-        newTree = IM.insertIfMuxes(newTree);
+        auto transformed = IM.insertIfMuxes(newTree);
+        keepAlive.push_back(newTree);
+        newTree = transformed;
     }
     PS.visit(newTree->root());
     if (bitMux) {
-        newTree = BM.insertBitShrinkMuxes(newTree);
+        auto transformed = BM.insertBitShrinkMuxes(newTree);
+        keepAlive.push_back(newTree);
+        newTree = transformed;
     }
 
     InputAdder IA;
-    newTree = IA.addInputs(newTree, context.muxCount);
+    {
+        auto transformed = IA.addInputs(newTree, context.muxCount);
+        keepAlive.push_back(newTree);
+        newTree = transformed;
+    }
+
+    auto stabilized = SyntaxPrinter::printFile(*newTree);
+    newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
 
     return newTree;
 }
