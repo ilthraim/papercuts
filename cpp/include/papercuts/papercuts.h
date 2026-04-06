@@ -363,6 +363,7 @@ public:
     void handle(const SyntaxNode& node);
     void handle(const ConditionalExpressionSyntax&);
     void handle(const ConditionalStatementSyntax&);
+    void handle(const BinaryExpressionSyntax& node);
 
     size_t getCutCount() const { return cutCount; }
 };

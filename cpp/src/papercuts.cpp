@@ -14,6 +14,7 @@
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/syntax/SyntaxTree.h"
+#include "slang/syntax/SyntaxVisitor.h"
 #include "slang/util/Util.h"
 
 using namespace slang::syntax;
@@ -623,6 +624,9 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
     auto newTree = transform(tree);
     auto finalNodesToShrink = nodesToShrink;
     clearState();
+    // Need to restore parents here
+    auto parentSetter = ParentSetter();
+    parentSetter.visit(newTree->root());
     nodesToShrink = finalNodesToShrink; // Restore the nodesToShrink state for a finishing pass on identifier names
     newTree = transform(newTree); // Do a finishing pass to replace identifier names with the _papercuts versions for any ifs/ternarys that were cut
 
@@ -716,6 +720,18 @@ void Papercutter::handle(const DeclaratorSyntax& node) {
 
         insertAfter(*parentDecl, newAssign);
     }
+}
+
+void Papercutter::handle(const BinaryExpressionSyntax& node) {
+    // we don't want to replace the assignment of a node we're shrinking
+    if (auto leftNode = node.left->as_if<IdentifierNameSyntax>()) {
+        if (std::string(leftNode->identifier.valueText()).find("_papercuts") != std::string::npos) {
+            return; // If the left side of this assignment is a node we're shrinking, we don't want to replace it
+        }
+        else visitDefault(node);
+    }
+    else visitDefault(node);
+
 }
 
 void Papercutter::handle(const IdentifierNameSyntax& node) {
