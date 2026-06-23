@@ -14,7 +14,8 @@ import asyncio
 
 import papercuts.chipper as chipper
 from papercuts.utils import print_tree, Run
-from papercuts.ec import generate_jasper_tcl_script, run_jasper
+from papercuts.ec import generate_jasper_tcl_script
+from papercuts.backends import discover_backends, get_backend
 from papercuts.pypercuts import Papercutter, insert_muxes
 
 
@@ -25,8 +26,20 @@ async def main():
     parser.add_argument("input_files", help="The input SystemVerilog files to process", nargs="+")
     parser.add_argument("-e", "--check-equivalence", action="store_true")
     parser.add_argument("-m", "--mux-rewrites", action="store_true")
+    parser.add_argument(
+        "--backend",
+        default="jg",
+        choices=sorted(discover_backends()),
+        help="Equivalence-checking backend (default: jg)",
+    )
 
+    # Two-phase parse: resolve the backend, let it add its own args, then parse.
+    args, _ = parser.parse_known_args()
+    backend_cls = get_backend(args.backend)
+    backend_cls.add_cli_args(parser)
     args = parser.parse_args()
+
+    backend = backend_cls.from_args(args) if args.check_equivalence else None
 
     raw_trees = [SyntaxTree.fromFile(f) for f in args.input_files]
 
@@ -133,7 +146,7 @@ async def main():
 
             async def run_with_limit(semaphore, run):
                 async with semaphore:
-                    return await run_jasper(run, False)
+                    return await backend.check(run)
 
             semaphore = asyncio.Semaphore(32)  # Limit to 5 concurrent tasks
 
@@ -165,7 +178,7 @@ async def main():
             )
 
             print("Running JasperGold on final consolidated source...")
-            await run_jasper(final_run, False)
+            await backend.check(final_run)
 
             print(
                 f"Final JasperGold run for {final_run.impl_module_path} completed with return code {final_run.valid}"
