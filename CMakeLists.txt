@@ -16,6 +16,12 @@ message(STATUS "Python version: ${Python_VERSION}")
 # ---- Fetch dependencies ----
 include(FetchContent)
 
+# Force slang's bundled boost::regex into standalone mode. Otherwise its
+# auto-detection (regex/config.hpp) sees the stale system boost-devel 1.66
+# headers at /usr/include/boost and pulls them in, colliding with slang's
+# vendored boost_unordered.hpp (redefinition of boost::exception_detail::*).
+add_compile_definitions(BOOST_REGEX_STANDALONE)
+
 FetchContent_Declare(pybind11
     GIT_REPOSITORY https://github.com/pybind/pybind11.git
     GIT_TAG        v3.0.2
@@ -29,9 +35,26 @@ set(SLANG_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)    # don't need slang tests
 set(SLANG_INCLUDE_INSTALL OFF CACHE BOOL "" FORCE)  # we handle our own install
 set(SLANG_USE_MIMALLOC OFF CACHE BOOL "" FORCE)     # incompatible with python's global symbol visibility requirements
 
+# Pin slang to the commit that added SyntaxRewriter::removeToken/replaceToken
+# (PR #1736, 2026-03-17), which papercuts requires. This commit predates the
+# v11.0 breaking changes (2026-04-28) that moved SyntaxRewriter to its own
+# header and removed the SyntaxKind list enumerators (SyntaxList/TokenList/
+# SeparatedList) papercuts.h relies on. No release tag falls in this window,
+# so we pin to the exact SHA. (Shallow clone is disabled: FetchContent cannot
+# reliably shallow-fetch an arbitrary commit SHA.)
 FetchContent_Declare(slang
     GIT_REPOSITORY https://github.com/MikePopoloski/slang.git
+    GIT_TAG        03153b5c6d58c263e1a177872ed40a410f007f9d
 )
+
+# GCC 13.2.0 hits an internal compiler error in LTO partitioning
+# (add_symbol_to_partition_1, lto-partition.cc) when linking the pybind11
+# modules in Release builds. pybind11 adds -flto per target; pre-marking its
+# LTO-detection cache vars as unsupported makes it skip -flto for BOTH pyslang
+# and pypercuts (check_cxx_compiler_flag short-circuits on a cached result).
+set(HAS_FLTO_THIN FALSE CACHE INTERNAL "" FORCE)
+set(HAS_FLTO_AUTO FALSE CACHE INTERNAL "" FORCE)
+set(HAS_FLTO FALSE CACHE INTERNAL "" FORCE)
 
 # Populate slang and pybind11 FIRST — so pyslang reuses them
 FetchContent_MakeAvailable(slang pybind11)
