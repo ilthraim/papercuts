@@ -85,9 +85,12 @@ target_link_libraries(pc PRIVATE papercuts_core)
 pybind11_add_module(pypercuts cpp/bindings/bindings.cpp)
 target_link_libraries(pypercuts PRIVATE papercuts_core)
 
-# ---- Install BOTH modules into the Python package ----
+# ---- Install the extension into the papercuts package ----
+# Must land inside the package so it imports as `papercuts.pypercuts` from an
+# installed wheel (the in-place dev build relies on copy_pypercuts below). NB:
+# pyslang stays top-level — it is imported as `import pyslang`, not a subpackage.
 install(TARGETS pypercuts
-    LIBRARY DESTINATION .
+    LIBRARY DESTINATION papercuts
     COMPONENT pylib
 )
 
