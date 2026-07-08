@@ -39,6 +39,7 @@ PYBIND11_MODULE(pypercuts, m) {
         .def(py::init<const std::shared_ptr<slang::syntax::SyntaxTree>>())
         .def("cut_all", &papercuts::Papercutter::cutAll)
         .def("cut_index", &papercuts::Papercutter::cutIndex)
+        .def("cut_info", &papercuts::Papercutter::cutInfo)
         .def("shrink_all_bits", &papercuts::Papercutter::shrinkAllBits)
         .def("remove_all_ternaries", &papercuts::Papercutter::removeAllTernaries)
         .def("remove_all_ifs", &papercuts::Papercutter::removeAllIfs)

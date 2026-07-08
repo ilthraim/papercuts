@@ -12,7 +12,7 @@ from pyslang.parsing import Token, TokenKind
 from pyslang.driver import Driver
 from papercuts.pypercuts import rename_module, get_module_name, rename_submodules
 
-from papercuts.utils import rewrite_wrapper, print_tree
+from papercuts.utils import rewrite_wrapper, print_tree, vprint
 
 
 def collect_modules_ast(comp: Compilation) -> dict[str, ast.DefinitionSymbol]:
@@ -21,7 +21,7 @@ def collect_modules_ast(comp: Compilation) -> dict[str, ast.DefinitionSymbol]:
 
     def _module_collector(obj: Union[Token, SyntaxNode]) -> None:
         if isinstance(obj, ast.InstanceSymbol):
-            print("Found module instance: ", obj.name)
+            vprint("Found module instance: ", obj.name)
             modules[obj.hierarchicalPath] = obj.definition
 
     comp.getRoot().visit(_module_collector)
@@ -36,7 +36,7 @@ def collect_modules_cst(comp: Compilation) -> dict[str, SyntaxTree]:
 
     def _module_collector(obj: Union[Token, SyntaxNode]) -> None:
         if isinstance(obj, syntax.ModuleDeclarationSyntax):
-            print("Found module declaration: ", obj.header.name.valueText)
+            vprint("Found module declaration: ", obj.header.name.valueText)
             name_list.append(obj.header.name.valueText)
 
     for tree in comp.getSyntaxTrees():
@@ -94,7 +94,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                 elif isinstance(obj.syntax.parent, syntax.DataDeclarationSyntax):
                     old_trivia = obj.syntax.parent.type.getFirstToken().trivia
                     new_type_str = "".join(triv.getRawText() for triv in old_trivia) + str(obj.type)
-                    print(new_type_str)
+                    vprint(new_type_str)
                     path = obj.hierarchicalPath.rsplit(".", 1)[0]
                     if path in local_replacement_syntax_pairs:
                         local_replacement_syntax_pairs[path].append(
@@ -110,7 +110,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
         if isinstance(obj, Expression) and not isinstance(obj, ast.IntegerLiteral):
             ev = obj.eval(ecx)
             if ev.value is not None:
-                print("Evaluating: ", obj.syntax)
+                vprint("Evaluating: ", obj.syntax)
 
                 ref = obj.getSymbolReference()
 
@@ -119,8 +119,8 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
 
                 if ref is not None:
                     path = ref.hierarchicalPath.rsplit(".", 1)[0]
-                    print("Path:", path)
-                    print("Value:", ev.value)
+                    vprint("Path:", path)
+                    vprint("Value:", ev.value)
                     if path in local_replacement_syntax_pairs:
                         local_replacement_syntax_pairs[path].append(
                             (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
@@ -135,7 +135,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
                         (obj.syntax, SyntaxTree.fromText(str(ev.value)).root)
                     )
             else:
-                print("Could not evaluate: ", obj.syntax)
+                vprint("Could not evaluate: ", obj.syntax)
     comp.getRoot().visit(_eval_visitor)
 
     def _apply_all_replacements(node, rewriter: SyntaxRewriter, rewrite_list) -> None:
@@ -154,7 +154,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
     # trees
     tree_dict = collect_modules_cst(comp)
     for mod_name, mod_path in mod_dict.items():
-        print(f"Module: {mod_name}, Path: {mod_path}")
+        vprint(f"Module: {mod_name}, Path: {mod_path}")
         conc_trees.append(
             (
                 syntax.rewrite(
@@ -175,7 +175,7 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
     for tree, tree_name in conc_trees:
         # Replace dots in tree names with underscores to avoid issues with naming in SV
         new_name = tree_name.replace(".", "_")
-        print(f"Renaming tree {tree_name} to {new_name}")
+        vprint(f"Renaming tree {tree_name} to {new_name}")
         # Rename all submodules in the tree to match the new names of the concretized trees
         renamed_conc_trees.append(
             (rename_submodules(rename_module(tree, new_name)), new_name)

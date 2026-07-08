@@ -1,7 +1,36 @@
+import sys
 from dataclasses import dataclass
 from typing import Callable, Union
 from pyslang.syntax import SyntaxNode, SyntaxRewriter, SyntaxTree, SyntaxPrinter
 from pyslang.parsing import Token
+
+# MARK: Output control
+# Verbose (debug) output is off by default; the pipeline enables it with
+# set_verbose(True) when the user passes --verbose. `status` lines are always
+# printed (they are the user-facing progress), `vprint` lines only when verbose.
+_VERBOSE = False
+
+
+def set_verbose(verbose: bool) -> None:
+    """Enable/disable debug (`vprint`) output for the whole pipeline."""
+    global _VERBOSE
+    _VERBOSE = verbose
+
+
+def is_verbose() -> bool:
+    return _VERBOSE
+
+
+def vprint(*args, **kwargs) -> None:
+    """print() that is silenced unless --verbose was passed."""
+    if _VERBOSE:
+        print(*args, **kwargs)
+
+
+def status(msg: str) -> None:
+    """Always-on, user-facing progress line, prefixed and flushed."""
+    print(f"[papercuts] {msg}", flush=True)
+
 
 def rewrite_wrapper(f, *args, **kwargs) -> Callable[[SyntaxNode, SyntaxRewriter], None]:
     return lambda node, rewriter: f(node, rewriter, *args, **kwargs)

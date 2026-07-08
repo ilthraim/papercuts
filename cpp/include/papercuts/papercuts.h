@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "slang/parsing/TokenKind.h"
@@ -352,6 +353,9 @@ public:
     Papercutter(const std::shared_ptr<SyntaxTree> tree);
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
     std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut);
+    // Per-cut (type, line) aligned 1:1 with cutAll() indices. Line numbers are
+    // relative to the source tree this Papercutter was constructed from.
+    std::vector<std::pair<std::string, size_t>> cutInfo();
 
     std::vector<std::shared_ptr<SyntaxTree>> shrinkAllBits();
     std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();

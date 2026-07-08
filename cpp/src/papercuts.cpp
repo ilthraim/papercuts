@@ -15,6 +15,7 @@
 #include "slang/syntax/SyntaxPrinter.h"
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/syntax/SyntaxVisitor.h"
+#include "slang/text/SourceManager.h"
 #include "slang/util/Util.h"
 
 using namespace slang::syntax;
@@ -662,6 +663,45 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
     newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
 
     return newTree;
+}
+
+std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
+    // Describe every cut in the SAME order cutAll() produces its trees, so that
+    // index i here corresponds 1:1 to cutAll()[i] (and to cutIndex({i})).
+    // Line numbers are relative to the tree this Papercutter was constructed
+    // from (the concretized per-module source).
+    std::vector<std::pair<std::string, size_t>> info;
+    info.reserve(cutCount);
+
+    auto& sm = tree->sourceManager();
+    auto lineOf = [&](const SyntaxNode& node) -> size_t {
+        return sm.getLineNumber(node.sourceRange().start());
+    };
+
+    // Ternaries: 2 cuts per node (matches removeAllTernaries + cutIndex mapping).
+    //   even index -> nodesToChange=false -> keep node.right (false branch)
+    //   odd index  -> nodesToChange=true  -> keep node.left  (true branch)
+    for (const auto* node : ternaryNodes) {
+        size_t line = lineOf(*node);
+        info.emplace_back("ternary(keep-false)", line);
+        info.emplace_back("ternary(keep-true)", line);
+    }
+
+    // Ifs: 2 cuts per node.
+    //   even index -> removeTrueBranch=false -> keep the true branch (statement)
+    //   odd index  -> removeTrueBranch=true  -> keep the else clause (false branch)
+    for (const auto* node : ifNodes) {
+        size_t line = lineOf(*node);
+        info.emplace_back("if(keep-true)", line);
+        info.emplace_back("if(keep-false)", line);
+    }
+
+    // Bit shrinks: 1 cut per declarator.
+    for (const auto& pair : shrinkNodes) {
+        info.emplace_back("bitshrink", sm.getLineNumber(pair.first->name.location()));
+    }
+
+    return info;
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::shrinkAllBits() {

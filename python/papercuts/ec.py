@@ -303,8 +303,12 @@ if {[catch {
 
 # MARK: Jasper Runner
 async def run_jasper(run: pc_core.Run, print_output: bool = False):
+    # stdin=DEVNULL detaches jg from our controlling terminal; otherwise it puts
+    # the inherited tty into raw mode (ONLCR off) and doesn't restore it, making
+    # subsequent status prints "stairstep" across the screen.
     process = await asyncio.create_subprocess_shell(
         f"csh -c 'jg -no_gui -proj {run.impl_module_folder}/jgproject{run.index} pcjg.tcl --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
