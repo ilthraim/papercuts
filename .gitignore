@@ -25,3 +25,7 @@ traces
 
 # Output folders get really big
 outputs/
+.clangd
+build.log
+build.sh
+compile_commands.json

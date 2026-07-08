@@ -637,6 +637,18 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
     }
 
     auto newTree = transform(tree);
+
+    // Stabilize before the finishing pass. Pass 1 produces a tree whose nodes
+    // span multiple source buffers (spliced ternary/if branches from the original
+    // tree, freshly parsed bit-shrink assigns, and stolen temp-tree allocators).
+    // Running a second transform directly on that mixed tree corrupts output:
+    // replaceToken(preserveTrivia=true) clones trivia whose rawText string_views
+    // are no longer valid, splicing unrelated source text into the result.
+    // Serializing and re-parsing collapses everything into one clean buffer, the
+    // same technique insertMuxes uses after chaining sub-rewriters.
+    auto stabilized = SyntaxPrinter::printFile(*newTree);
+    newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
+
     auto finalNodesToShrink = nodesToShrink;
     clearState();
     // Need to restore parents here
@@ -644,6 +656,10 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
     parentSetter.visit(newTree->root());
     nodesToShrink = finalNodesToShrink; // Restore the nodesToShrink state for a finishing pass on identifier names
     newTree = transform(newTree); // Do a finishing pass to replace identifier names with the _papercuts versions for any ifs/ternarys that were cut
+
+    // Stabilize the final result too, so callers always get a single-buffer tree.
+    stabilized = SyntaxPrinter::printFile(*newTree);
+    newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
 
     return newTree;
 }
