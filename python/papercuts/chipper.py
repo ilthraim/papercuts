@@ -29,6 +29,22 @@ def collect_modules_ast(comp: Compilation) -> dict[str, ast.DefinitionSymbol]:
     return modules
 
 
+def concretized_definition_names(comp: Compilation) -> dict[str, str]:
+    """Map each concretized module name to its original definition name.
+
+    ``eval_modules`` names each concretized tree after the *instance path*
+    (hierarchical path with ``.`` replaced by ``_``), so a module defined as
+    ``DW02_multp`` and instantiated as ``top.u_mul`` becomes ``top_u_mul``.
+    This returns ``{concretized_name: definition_name}`` so callers can act on
+    a module by its definition (e.g. skip every instance of a library
+    primitive) rather than by each instance-path name.
+    """
+    return {
+        path.replace(".", "_"): defn.name
+        for path, defn in collect_modules_ast(comp).items()
+    }
+
+
 def collect_modules_cst(comp: Compilation) -> dict[str, SyntaxTree]:
     """Collects all module instances from the given compilation and returns a dictionary mapping their hierarchical paths (string) to their syntax trees."""
     modules = {}

@@ -364,7 +364,10 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
 
     if (type->kind == SyntaxKind::LogicType) {
         auto& intType = type->as<IntegerTypeSyntax>();
-        if (intType.signing && intType.signing.kind != TokenKind::UnsignedKeyword) {
+        if (!allowSigned && intType.signing && intType.signing.kind != TokenKind::UnsignedKeyword) {
+            // Zero-extending a signed value ({1'b0, ...}) corrupts its sign, so the
+            // intermediate-wire strategy must skip signed decls. Narrowing the
+            // declaration in place preserves signedness, so narrow mode allows them.
             std::cout << "Skipping signed logic declaration: " << node.name.valueText() << std::endl;
             return; // Skip this node if it's a signed logic declaration
         }
@@ -577,9 +580,11 @@ std::vector<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(const 
 
 // MARK: Papercutter
 
-Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate)
+    : tree(tree), shrinkWithIntermediate(shrinkWithIntermediate) {
 
-    BitShrinkCollector BSC;
+    // Narrow (default) mode can shrink signed decls; intermediate-wire mode cannot.
+    BitShrinkCollector BSC(!shrinkWithIntermediate);
     shrinkNodes = BSC.getFoundNodes(tree);
     cutCount += shrinkNodes.size();
     BSRCount = shrinkNodes.size();
@@ -650,17 +655,22 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
     auto stabilized = SyntaxPrinter::printFile(*newTree);
     newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
 
-    auto finalNodesToShrink = nodesToShrink;
-    clearState();
-    // Need to restore parents here
-    auto parentSetter = ParentSetter();
-    parentSetter.visit(newTree->root());
-    nodesToShrink = finalNodesToShrink; // Restore the nodesToShrink state for a finishing pass on identifier names
-    newTree = transform(newTree); // Do a finishing pass to replace identifier names with the _papercuts versions for any ifs/ternarys that were cut
+    // The finishing pass only redirects identifiers to their `_papercuts` wires,
+    // so it is needed for the intermediate-wire strategy alone. Narrow mode never
+    // renames anything, so its pass-1 output is already final.
+    if (shrinkWithIntermediate) {
+        auto finalNodesToShrink = nodesToShrink;
+        clearState();
+        // Need to restore parents here
+        auto parentSetter = ParentSetter();
+        parentSetter.visit(newTree->root());
+        nodesToShrink = finalNodesToShrink; // Restore the nodesToShrink state for a finishing pass on identifier names
+        newTree = transform(newTree); // Do a finishing pass to replace identifier names with the _papercuts versions for any ifs/ternarys that were cut
 
-    // Stabilize the final result too, so callers always get a single-buffer tree.
-    stabilized = SyntaxPrinter::printFile(*newTree);
-    newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
+        // Stabilize the final result too, so callers always get a single-buffer tree.
+        stabilized = SyntaxPrinter::printFile(*newTree);
+        newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
+    }
 
     return newTree;
 }
@@ -759,7 +769,103 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllIfs() {
     return newTrees;
 }
 
+void Papercutter::handle(const DataDeclarationSyntax& node) {
+    // In legacy intermediate-wire mode the per-declarator handler does all the
+    // work; just descend so it fires.
+    if (shrinkWithIntermediate) {
+        visitDefault(node);
+        return;
+    }
+
+    // Narrow (default) mode: shrink each targeted declarator by rebuilding this
+    // declaration in place. The packed range ([7:0]) lives on the shared type, so
+    // when several signals share one declaration (e.g. `logic [2:0] a, b;`) we
+    // split it: the non-shrunk declarators stay together at the original width and
+    // each shrunk declarator becomes its own narrowed declaration. This keeps
+    // per-signal cuts independent even though they share a type.
+    std::vector<const DeclaratorSyntax*> targeted;
+    std::vector<const DeclaratorSyntax*> kept;
+    for (const auto* decl : node.declarators) {
+        if (runMap.contains(decl))
+            targeted.push_back(decl);
+        else
+            kept.push_back(decl);
+    }
+
+    if (targeted.empty()) {
+        visitDefault(node);
+        return;
+    }
+
+    // Only declarators the collector accepted (single packed dimension, unsigned
+    // logic) ever land in runMap, so the shared type is guaranteed narrow-able.
+    auto& intType = node.type->as<IntegerTypeSyntax>();
+    auto& dim0 = intType.dimensions[0]->specifier->as<RangeDimensionSpecifierSyntax>();
+    auto& rsel = dim0.selector->as<RangeSelectSyntax>();
+    int leftVal = tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal);
+    int rightVal = tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal);
+
+    // Drop one bit off the high end: [7:0] -> [6:0], [0:7] -> [0:6].
+    int newLeft = leftVal, newRight = rightVal;
+    if (leftVal >= rightVal)
+        newLeft = leftVal - 1;
+    else
+        newRight = rightVal - 1;
+
+    std::string origRange = "[" + std::to_string(leftVal) + ":" + std::to_string(rightVal) + "]";
+    std::string newRange = "[" + std::to_string(newLeft) + ":" + std::to_string(newRight) + "]";
+
+    auto trim = [](std::string s) {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos)
+            return std::string();
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return s.substr(b, e - b + 1);
+    };
+
+    // Leading trivia (newline + indentation) of the whole declaration, reused so
+    // each emitted declaration lands on its own indented line.
+    std::string trivia;
+    for (const auto& t : node.getFirstToken().trivia())
+        trivia += t.getRawText();
+
+    std::string mods = trim(std::string(node.modifiers.toString()));
+    std::string modsOut = mods.empty() ? "" : mods + " ";
+
+    std::string typeHead = std::string(intType.keyword.valueText());
+    if (intType.signing)
+        typeHead += " " + std::string(intType.signing.valueText());
+
+    // Preserve source order: kept declarators first (original width), then one
+    // narrowed declaration per shrunk declarator.
+    std::vector<std::string> repls;
+    if (!kept.empty()) {
+        std::string s = trivia + modsOut + typeHead + " " + origRange + " ";
+        for (size_t i = 0; i < kept.size(); ++i) {
+            s += trim(std::string(kept[i]->toString()));
+            if (i + 1 < kept.size())
+                s += ", ";
+        }
+        s += ";";
+        repls.push_back(s);
+    }
+    for (const auto* d : targeted) {
+        repls.push_back(trivia + modsOut + typeHead + " " + newRange + " " +
+                        trim(std::string(d->toString())) + ";");
+    }
+
+    for (const auto& r : repls)
+        insertBefore(node, parse(r));
+    remove(node);
+}
+
 void Papercutter::handle(const DeclaratorSyntax& node) {
+    // Narrow (default) shrink is done at the DataDeclaration level in
+    // handle(DataDeclarationSyntax); this per-declarator handler only builds the
+    // legacy intermediate-wire form.
+    if (!shrinkWithIntermediate) {
+        return;
+    }
     if (runMap.contains(&node)) {
         auto newName = std::string(node.name.valueText()) + "_papercuts";
         int newWidth = runMap[&node] - 1; // Get the width of the node and calculate the new width after shrinking
@@ -806,6 +912,14 @@ void Papercutter::handle(const BinaryExpressionSyntax& node) {
 }
 
 void Papercutter::handle(const IdentifierNameSyntax& node) {
+    // Narrow mode never renames reads (the signal keeps its name, only its
+    // declared width changes), so identifier redirection is wire-mode only.
+    // Still descend so any nested nodes (e.g. cuts inside select indices) are
+    // reached; a plain identifier name has no child nodes, so this is a no-op.
+    if (!shrinkWithIntermediate) {
+        visitDefault(node);
+        return;
+    }
     // Check to see if this is the left side of a declaration
     if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
         &node == node.parent->as<BinaryExpressionSyntax>().left) {
@@ -819,6 +933,12 @@ void Papercutter::handle(const IdentifierNameSyntax& node) {
 }
 
 void Papercutter::handle(const IdentifierSelectNameSyntax& node) {
+    // Narrow mode never renames reads; identifier redirection is wire-mode only.
+    // Descend anyway so cuts nested in select-index expressions are still reached.
+    if (!shrinkWithIntermediate) {
+        visitDefault(node);
+        return;
+    }
     // Check to see if this is the left side of a declaration
     if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
         &node == node.parent->as<BinaryExpressionSyntax>().left) {

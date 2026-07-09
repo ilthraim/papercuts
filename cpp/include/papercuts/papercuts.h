@@ -247,7 +247,9 @@ public:
 class BitShrinkCollector : public SyntaxVisitor<BitShrinkCollector> {
 private:
     std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
+    bool allowSigned; // Signed decls are only shrinkable when narrowing in place (not with intermediate wires)
 public:
+    BitShrinkCollector(bool allowSigned = false) : allowSigned(allowSigned) {}
     void handle(const DeclaratorSyntax&);
     std::vector<std::pair<const DeclaratorSyntax*, int>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
@@ -330,6 +332,12 @@ private:
     size_t TRCount = 0;
     size_t IRCount = 0;
 
+    // Bit-shrink strategy. When false (default), a shrink narrows the declaration
+    // in place (e.g. `logic [7:0] x;` -> `logic [6:0] x;`). When true, it keeps
+    // the legacy behavior: introduce an intermediate `x_papercuts` wire with its
+    // MSB forced to 0 and redirect all reads to it.
+    bool shrinkWithIntermediate = false;
+
     // Bit shrinker variables
     std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
     std::unordered_map<const DeclaratorSyntax*, int> runMap;
@@ -350,7 +358,7 @@ private:
         ifNodesToChange.clear();
     }
 public:
-    Papercutter(const std::shared_ptr<SyntaxTree> tree);
+    Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false);
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
     std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut);
     // Per-cut (type, line) aligned 1:1 with cutAll() indices. Line numbers are
@@ -361,6 +369,7 @@ public:
     std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();
     std::vector<std::shared_ptr<SyntaxTree>> removeAllIfs();
 
+    void handle(const DataDeclarationSyntax& node);
     void handle(const DeclaratorSyntax& node);
     void handle(const IdentifierNameSyntax& node);
     void handle(const IdentifierSelectNameSyntax& node);

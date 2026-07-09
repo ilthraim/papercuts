@@ -29,6 +29,20 @@ class ECBackend(ABC):
         """Construct the backend from parsed command-line arguments."""
         return cls()
 
+    def default_excluded_modules(self) -> set[str]:
+        """Module names this backend recommends never cutting.
+
+        A backend targeting an environment with vendor IP, blackboxes, or
+        library primitives that should be left untouched can return their
+        definition names here (exact match or ``fnmatch`` glob). The pipeline
+        keeps such modules in the golden source but skips enumerating and
+        checking cuts on them. The user can still extend this set with
+        ``--exclude-module`` or discard it with ``--no-default-excludes``.
+
+        Default: no exclusions.
+        """
+        return set()
+
     @abstractmethod
     async def check(self, run: Run) -> bool:
         """Equivalence-check a single run.

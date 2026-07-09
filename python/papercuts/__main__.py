@@ -9,6 +9,7 @@ from pyslang.driver import Driver, CommandLineOptions
 from pyslang.ast import RootSymbol
 
 import argparse
+import fnmatch
 import os
 import shutil
 import asyncio
@@ -27,25 +28,39 @@ class ModuleCuts:
 
     name: str
     tree: SyntaxTree           # concretized source tree (pre-cut)
-    pc: Papercutter            # cutter, retained for later cut_index() consolidation
+    pc: Papercutter | None     # cutter for later cut_index() consolidation (None if excluded)
     is_top: bool
     cut_infos: list            # per-index (type, line) from pc.cut_info()
     cur_dir: str
     runs: list[Run] = field(default_factory=list)
+    excluded: bool = False     # kept in the golden source but never cut
 
 
 # MARK: papercuts.log
-def write_papercuts_log(log_path: str, modules: list[ModuleCuts], checked: bool) -> None:
+def write_papercuts_log(
+    log_path: str,
+    modules: list[ModuleCuts],
+    checked: bool,
+    final_runs: "list[tuple[ModuleCuts, Run]] | None" = None,
+) -> None:
     """Write a text summary of every papercut that was tried.
 
     One row per cut: module, index, type, source line, and valid (Y/N). When
     equivalence checking was not requested, validity is unknown and shown as '-'.
+
+    When ``final_runs`` is provided (after consolidation), a second section
+    reports each module's consolidated run: how many valid cuts were merged and
+    whether the merged source verified (PROVEN/FAILED).
     """
     total = sum(len(m.runs) for m in modules)
     valid = sum(1 for m in modules for r in m.runs if r.valid)
 
     rows = []
     for m in modules:
+        if m.excluded:
+            # Kept in the golden source but never cut; no runs to report.
+            rows.append((m.name, "-", "excluded", "-", "X"))
+            continue
         for run in m.runs:
             ctype, line = m.cut_infos[run.index]
             if not checked:
@@ -54,8 +69,11 @@ def write_papercuts_log(log_path: str, modules: list[ModuleCuts], checked: bool)
                 v = "Y" if run.valid else "N"
             rows.append((m.name, run.index, ctype, line, v))
 
-    # Column widths for aligned output.
-    w_mod = max([len("module")] + [len(r[0]) for r in rows], default=len("module"))
+    # Column widths for aligned output (account for both sections' module names).
+    mod_names = [r[0] for r in rows] + (
+        [m.name for m, _ in final_runs] if final_runs else []
+    )
+    w_mod = max([len("module")] + [len(n) for n in mod_names], default=len("module"))
     w_type = max([len("type")] + [len(r[2]) for r in rows], default=len("type"))
 
     with open(log_path, "w") as f:
@@ -67,6 +85,18 @@ def write_papercuts_log(log_path: str, modules: list[ModuleCuts], checked: bool)
             f.write(
                 f"  {mod:<{w_mod}}  {idx:>4}  {ctype:<{w_type}}  {line:>6}  {v}\n"
             )
+
+        if final_runs is not None:
+            n_proven = sum(1 for _, fr in final_runs if fr.valid)
+            f.write("\n")
+            f.write(
+                f"# consolidated runs: {n_proven}/{len(final_runs)} verified\n"
+            )
+            f.write(f"# {'module':<{w_mod}}  {'applied':>7}  result\n")
+            for m, fr in final_runs:
+                applied = sum(1 for r in m.runs if r.valid)
+                result = "PROVEN" if fr.valid else "FAILED"
+                f.write(f"  {m.name:<{w_mod}}  {applied:>7}  {result}\n")
 
 
 # MARK: Main
@@ -89,10 +119,37 @@ async def main():
         help="Print concretization/cut debug output (off by default)",
     )
     parser.add_argument(
+        "--shrink-with-intermediate",
+        action="store_true",
+        help="Use the legacy bit-shrink strategy: introduce an intermediate "
+        "'<signal>_papercuts' wire with its MSB forced to 0 and redirect reads "
+        "to it. The default instead narrows the declaration in place "
+        "(e.g. 'logic [7:0] x;' -> 'logic [6:0] x;').",
+    )
+    parser.add_argument(
         "--backend",
         default="jg",
         choices=sorted(discover_backends()),
         help="Equivalence-checking backend (default: jg)",
+    )
+    parser.add_argument(
+        "--exclude-module",
+        action="append",
+        metavar="NAME",
+        help="Module definition name (or fnmatch glob) to leave uncut: keep it "
+        "in the golden source but skip enumerating/checking any cuts on it. "
+        "Repeatable. Unions with the backend's recommended defaults.",
+    )
+    parser.add_argument(
+        "--exclude-modules-file",
+        default=None,
+        help="File listing one module name/glob per line to exclude "
+        "('#' comments and blank lines ignored).",
+    )
+    parser.add_argument(
+        "--no-default-excludes",
+        action="store_true",
+        help="Ignore the exclusions the selected backend recommends by default.",
     )
 
     # Two-phase parse: resolve the backend, let it add its own args, then parse.
@@ -104,6 +161,22 @@ async def main():
     set_verbose(args.verbose)
 
     backend = backend_cls.from_args(args) if args.check_equivalence else None
+
+    # Modules to keep in the golden source but never cut. Union of the user's
+    # --exclude-module / --exclude-modules-file with the backend's recommended
+    # defaults (unless --no-default-excludes). Matching is fnmatch, so bare
+    # names match exactly and globs (e.g. "DW02_*") match families. Patterns are
+    # matched below against both the concretized (instance-path) module name and
+    # its original definition name (see def_names).
+    exclude_patterns: set[str] = set(args.exclude_module or [])
+    if args.exclude_modules_file:
+        with open(args.exclude_modules_file) as f:
+            for raw in f:
+                s = raw.split("#", 1)[0].strip()
+                if s:
+                    exclude_patterns.add(s)
+    if backend is not None and not args.no_default_excludes:
+        exclude_patterns |= backend.default_excluded_modules()
 
     raw_trees = [SyntaxTree.fromFile(f) for f in args.input_files]
 
@@ -151,6 +224,17 @@ async def main():
     status("Extracting parameters and concretizing...")
     conc_trees = chipper.eval_modules(compilation)
 
+    # Concretized trees are named after the instance path; map each back to its
+    # definition name so --exclude-module can target a module by definition
+    # (catching every instance of it) as well as by concretized name.
+    def_names = chipper.concretized_definition_names(compilation)
+
+    def is_excluded(module_name: str) -> bool:
+        names = {module_name, def_names.get(module_name, module_name)}
+        return any(
+            fnmatch.fnmatch(n, p) for n in names for p in exclude_patterns
+        )
+
     ctree_dir = f"{output_dir}/concrete_sources"
     os.makedirs(ctree_dir, exist_ok=True)
 
@@ -192,8 +276,26 @@ async def main():
         os.makedirs(cur_dir, exist_ok=True)
         is_top = name == top_name
 
+        if is_excluded(name):
+            # Left uncut: it stays in the golden source (already written to
+            # ctree_dir) so cuts on modules that instantiate it still see the
+            # real logic, but we enumerate and check no cuts on it.
+            modules.append(
+                ModuleCuts(
+                    name=name,
+                    tree=tree,
+                    pc=None,
+                    is_top=is_top,
+                    cut_infos=[],
+                    cur_dir=cur_dir,
+                    excluded=True,
+                )
+            )
+            status(f"excluding {name} from cuts")
+            continue
+
         ntree = SyntaxTree.fromText(print_tree(tree))
-        pc = Papercutter(ntree)
+        pc = Papercutter(ntree, shrink_with_intermediate=args.shrink_with_intermediate)
         rewrites = pc.cut_all()
         cut_infos = list(pc.cut_info())  # (type, line) aligned 1:1 with rewrites
 
@@ -267,8 +369,16 @@ async def main():
     status("Consolidating valid cuts...")
     final_runs: list[tuple[ModuleCuts, Run]] = []
     for mod in modules:
-        working = [run.index for run in mod.runs if run.valid]
         out_path = f"{consolidated_dir}/{mod.name}.sv"
+
+        if mod.excluded:
+            # Emit the untouched module so the consolidated design is complete,
+            # but don't re-verify it -- nothing was cut.
+            with open(out_path, "w") as f:
+                f.write(print_tree(mod.tree))
+            continue
+
+        working = [run.index for run in mod.runs if run.valid]
         with open(out_path, "w") as f:
             if working:
                 f.write(print_tree(mod.pc.cut_index(working)))
@@ -300,6 +410,11 @@ async def main():
 
     for mod, fr in final_runs:
         status(f"consolidated {mod.name}: {'PROVEN' if fr.valid else 'FAILED'}")
+
+    # Rewrite the log now that consolidation verdicts are known, so the final
+    # papercuts.log includes both the per-cut table and the consolidated results.
+    write_papercuts_log(log_path, modules, checked=True, final_runs=final_runs)
+    status(f"Consolidated results written to {log_path}")
 
 
 if __name__ == "__main__":
