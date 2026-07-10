@@ -220,9 +220,18 @@ async def main():
     assert len(comp_root.topInstances) == 1, "Expected exactly one top-level instance."
     top_name = comp_root.topInstances[0].name
 
+    # Resolve the exclude patterns to concrete definition names so eval_modules can
+    # keep them verbatim: excluded modules are neither concretized/individualized nor
+    # cut -- they reach the formal tool as their original (parameterized) source, and
+    # parents instantiate them by their original name.
+    all_def_names = {d.name for d in chipper.collect_modules_ast(compilation).values()}
+    excluded_defs = {
+        n for n in all_def_names if any(fnmatch.fnmatch(n, p) for p in exclude_patterns)
+    }
+
     # Attempt concretization
     status("Extracting parameters and concretizing...")
-    conc_trees = chipper.eval_modules(compilation)
+    conc_trees = chipper.eval_modules(compilation, excluded_defs)
 
     # Concretized trees are named after the instance path; map each back to its
     # definition name so --exclude-module can target a module by definition

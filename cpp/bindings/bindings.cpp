@@ -32,7 +32,9 @@ PYBIND11_MODULE(pypercuts, m) {
 
     m.def("rename_submodules", &papercuts::renameSubmodules,
         py::arg("tree"),
-        "Rename submodules in a SyntaxTree based on the parent module name"
+        py::arg("excluded") = std::vector<std::string>{},
+        "Rename submodules in a SyntaxTree based on the parent module name. "
+        "Instantiations whose module name is in `excluded` are left untouched."
     );
 
     py::classh<papercuts::Papercutter>(m, "Papercutter")

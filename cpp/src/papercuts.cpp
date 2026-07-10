@@ -47,12 +47,19 @@ std::string ModuleNameFinder::getModuleName(const std::shared_ptr<SyntaxTree> tr
     return moduleName;
 }
 
-SubmoduleRenamer::SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+SubmoduleRenamer::SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree, std::unordered_set<std::string> excluded)
+    : tree(tree), excluded(std::move(excluded)) {
     ModuleNameFinder finder;
     this->moduleName = finder.getModuleName(tree);
 }
 
 void SubmoduleRenamer::handle(const HierarchyInstantiationSyntax& node) {
+    // Leave excluded modules' instantiations untouched: they keep their original
+    // module name (and #(...) overrides) so the verbatim excluded definition, which
+    // is emitted under its original name, still resolves.
+    if (excluded.contains(std::string(node.type.valueText()))) {
+        return;
+    }
     if (node.instances.size() == 1) { // if there's only one instance we can just rename without splitting it out
         auto newType =
             makeToken(TokenKind::Identifier,
@@ -84,8 +91,9 @@ std::shared_ptr<SyntaxTree> SubmoduleRenamer::renameSubmodules() {
     return this->transform(tree);
 }
 
-std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> tree) {
-    SubmoduleRenamer rewriter(tree);
+std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> tree,
+                                             const std::vector<std::string>& excluded) {
+    SubmoduleRenamer rewriter(tree, std::unordered_set<std::string>(excluded.begin(), excluded.end()));
     return rewriter.renameSubmodules();
 }
 

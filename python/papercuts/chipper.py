@@ -66,10 +66,22 @@ def collect_modules_cst(comp: Compilation) -> dict[str, SyntaxTree]:
     return modules
 
 
-def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
+def eval_modules(
+    comp: Compilation, excluded_defs: "set[str] | None" = None
+) -> list[tuple[SyntaxTree, str]]:
     """Evaluates all expressions in the given compilation and returns a list of concretized syntax trees for each module.
     Each instance of a submodule is replaced with a separate syntax tree so optimizations can be performed on them individually.
+
+    Modules whose *definition* name is in ``excluded_defs`` are left untouched:
+    they are NOT concretized or individualized per instance. Instead the original
+    (parameterized) source is emitted once under its original name, and parents
+    that instantiate them keep the original name + ``#(...)`` overrides (via
+    ``rename_submodules``'s ``excluded`` list). All instances of an excluded
+    definition collapse to that single shared definition. An excluded module must
+    not instantiate a non-excluded submodule (its verbatim source would reference
+    an individualized child by a name that no longer exists) -- that raises.
     """
+    excluded_defs = set(excluded_defs or ())
     # The main point of this is to concretize any parameters that we can evaluate at compile time.
 
     cx = ast.ASTContext(comp.getRoot(), ast.LookupLocation.max)
@@ -169,12 +181,45 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
     # to rewrite every supermodule to to change names of the submodules, and rename the submodule
     # trees
     tree_dict = collect_modules_cst(comp)
+
+    # Guard: an excluded module is emitted verbatim (referencing its children by
+    # their original names) while non-excluded modules are individualized/renamed
+    # per instance. If an excluded module instantiated a non-excluded submodule the
+    # reference would dangle, so reject that configuration up front.
+    if excluded_defs:
+        excluded_paths = {
+            path: defn.name
+            for path, defn in mod_dict.items()
+            if defn.name in excluded_defs
+        }
+        for path, defn in mod_dict.items():
+            if defn.name in excluded_defs:
+                continue
+            for epath, ename in excluded_paths.items():
+                if path.startswith(epath + "."):
+                    raise Exception(
+                        f"Excluded module '{ename}' (instance '{epath}') instantiates "
+                        f"non-excluded submodule '{defn.name}' (instance '{path}'). "
+                        f"Excluded modules must not contain non-excluded submodules."
+                    )
+
+    excluded_list = list(excluded_defs)
+    emitted_excluded: set[str] = set()
+
     for mod_name, mod_path in mod_dict.items():
+        def_name = mod_path.name
+        if def_name in excluded_defs:
+            # Emit the original (parameterized) source once per excluded definition,
+            # untouched: no concretization, no rename. Every instance collapses to it.
+            if def_name not in emitted_excluded:
+                emitted_excluded.add(def_name)
+                conc_trees.append((tree_dict[def_name], def_name))
+            continue
         vprint(f"Module: {mod_name}, Path: {mod_path}")
         conc_trees.append(
             (
                 syntax.rewrite(
-                    tree_dict[mod_path.name],
+                    tree_dict[def_name],
                     rewrite_wrapper(
                         _apply_all_replacements,
                         local_replacement_syntax_pairs[mod_name]
@@ -189,12 +234,18 @@ def eval_modules(comp: Compilation) -> list[tuple[SyntaxTree, str]]:
     renamed_conc_trees = []
 
     for tree, tree_name in conc_trees:
+        # Excluded modules keep their original name and are handed over verbatim.
+        if tree_name in excluded_defs:
+            vprint(f"Keeping excluded module {tree_name} untouched")
+            renamed_conc_trees.append((tree, tree_name))
+            continue
         # Replace dots in tree names with underscores to avoid issues with naming in SV
         new_name = tree_name.replace(".", "_")
         vprint(f"Renaming tree {tree_name} to {new_name}")
-        # Rename all submodules in the tree to match the new names of the concretized trees
+        # Rename all submodules in the tree to match the new names of the concretized
+        # trees, but leave instantiations of excluded modules pointing at the original.
         renamed_conc_trees.append(
-            (rename_submodules(rename_module(tree, new_name)), new_name)
+            (rename_submodules(rename_module(tree, new_name), excluded_list), new_name)
         )
 
     return renamed_conc_trees

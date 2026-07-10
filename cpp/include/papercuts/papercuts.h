@@ -112,8 +112,9 @@ class SubmoduleRenamer : public SyntaxRewriter<SubmoduleRenamer> {
 private:
     std::string moduleName; // Store the new name we want to give to the module
     std::shared_ptr<SyntaxTree> tree;
+    std::unordered_set<std::string> excluded; // Module names to leave un-renamed (kept verbatim)
 public:
-    SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree);
+    SubmoduleRenamer(const std::shared_ptr<SyntaxTree> tree, std::unordered_set<std::string> excluded = {});
     void handle(const HierarchyInstantiationSyntax& node);
     std::shared_ptr<SyntaxTree> renameSubmodules();
 };
@@ -133,7 +134,8 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
 
 std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName);
 
-std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> tree);
+std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> tree,
+                                             const std::vector<std::string>& excluded = {});
 
 std::string getModuleName(const std::shared_ptr<SyntaxTree> tree);
 
