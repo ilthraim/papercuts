@@ -5,8 +5,6 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pyslang.syntax import SyntaxTree
-from pyslang.driver import Driver, CommandLineOptions
-from pyslang.ast import RootSymbol
 
 import argparse
 import fnmatch
@@ -15,6 +13,7 @@ import shutil
 import asyncio
 
 import papercuts.chipper as chipper
+from papercuts.elaborator import elaborate_design, ElaborationError, EmitError
 from papercuts.utils import print_tree, status, set_verbose, Run
 from papercuts.ec import generate_jasper_tcl_script
 from papercuts.backends import discover_backends, get_backend
@@ -42,6 +41,7 @@ def write_papercuts_log(
     modules: list[ModuleCuts],
     checked: bool,
     final_runs: "list[tuple[ModuleCuts, Run]] | None" = None,
+    fv_gate: "str | None" = None,
 ) -> None:
     """Write a text summary of every papercut that was tried.
 
@@ -78,6 +78,8 @@ def write_papercuts_log(
 
     with open(log_path, "w") as f:
         f.write(f"# papercuts summary: {total} cuts tried, {valid} valid\n")
+        if fv_gate is not None:
+            f.write(f"# elaboration-vs-original FV gate: {fv_gate}\n")
         f.write(
             f"# {'module':<{w_mod}}  {'idx':>4}  {'type':<{w_type}}  {'line':>6}  valid\n"
         )
@@ -165,9 +167,10 @@ async def main():
     # Modules to keep in the golden source but never cut. Union of the user's
     # --exclude-module / --exclude-modules-file with the backend's recommended
     # defaults (unless --no-default-excludes). Matching is fnmatch, so bare
-    # names match exactly and globs (e.g. "DW02_*") match families. Patterns are
-    # matched below against both the concretized (instance-path) module name and
-    # its original definition name (see def_names).
+    # names match exactly and globs (e.g. "lib_*") match families. These
+    # patterns feed the elaborator's `ignore` (excluded modules are emitted
+    # verbatim under their original names) and are matched again below, via
+    # is_excluded, against those same names to skip cutting them.
     exclude_patterns: set[str] = set(args.exclude_module or [])
     if args.exclude_modules_file:
         with open(args.exclude_modules_file) as f:
@@ -178,10 +181,6 @@ async def main():
     if backend is not None and not args.no_default_excludes:
         exclude_patterns |= backend.default_excluded_modules()
 
-    raw_trees = [SyntaxTree.fromFile(f) for f in args.input_files]
-
-    status("Splitting modules...")
-
     # TODO: change this to based on the source file directory
     output_dir = "./outputs"
 
@@ -190,69 +189,66 @@ async def main():
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Create a SyntaxTree for each module and write to output directory
-    src_list = []
-    for tree in raw_trees:
-        split_trees = chipper.split_tree(tree)
-        for tree in split_trees:
-            src_list.append(f"{output_dir}/{tree[0]}.sv")
-            with open(f"{output_dir}/{tree[0]}.sv", "w") as f:
-                f.write(print_tree(tree[1]))
+    # MARK: Elaboration -- the canonical front end.
+    # Unroll generates, resolve parameters, and flatten hierarchy up front by
+    # re-emitting the whole design from a live slang elaboration. Excluded
+    # modules are emitted verbatim (opaque boundaries) so they reach the formal
+    # tool as their original source and parents instantiate them by their
+    # original name. Everything downstream (the FV gate and the cut pipeline)
+    # treats the elaborated source as canonical -- chipper.eval_modules
+    # concretization is no longer part of the flow.
+    status("Elaborating design (unroll + flatten + concretize)...")
+    try:
+        elab = elaborate_design(args.input_files, flatten=True, ignore=exclude_patterns)
+    except (ElaborationError, EmitError) as e:
+        raise SystemExit(f"FATAL: elaboration failed: {e}")
 
-    # Parse our newly split trees and compile with pyslang to get elaborated ASTs
-    d = Driver()
-    d.addStandardArgs()
-    srcs = " ".join([sys.argv[0]] + src_list)
-    if not d.parseCommandLine(srcs, CommandLineOptions()):
-        print("Error parsing command line arguments.")
-        return
+    if len(elab.tops) != 1:
+        raise SystemExit(
+            f"FATAL: expected exactly one top-level instance, got {elab.tops or 'none'}."
+        )
+    top_name = elab.top
+    status(f"Elaborated top: {top_name}")
 
-    if not d.processOptions() or not d.parseAllSources():
-        print("Error processing options or parsing sources.")
-        return
+    # The elaborated whole-design source is a single self-contained blob (all
+    # specialized submodules + verbatim boundaries in one file). Keep it in its
+    # own dir so it never pollutes the original-source library used by the gate.
+    elab_dir = f"{output_dir}/elab"
+    os.makedirs(elab_dir, exist_ok=True)
+    elab_blob_path = f"{elab_dir}/{top_name}_elaborated.sv"
+    with open(elab_blob_path, "w") as f:
+        f.write(elab.source)
 
-    # Perform elaboration and report all diagnostics
-    compilation = d.createCompilation()
-    d.reportCompilation(compilation, False)
+    # The original design, split one module per file, is the golden ("spec") side
+    # of the elaboration-equivalence gate below.
+    orig_dir = f"{output_dir}/orig"
+    os.makedirs(orig_dir, exist_ok=True)
+    for raw in (SyntaxTree.fromFile(f) for f in args.input_files):
+        for name, tree in chipper.split_tree(raw):
+            with open(f"{orig_dir}/{name}.sv", "w") as f:
+                f.write(print_tree(tree))
 
-    comp_root: RootSymbol = compilation.getRoot()
-    status(f"Compilation root has {len(comp_root.topInstances)} top-level instance(s).")
-    assert len(comp_root.topInstances) == 1, "Expected exactly one top-level instance."
-    top_name = comp_root.topInstances[0].name
-
-    # Resolve the exclude patterns to concrete definition names so eval_modules can
-    # keep them verbatim: excluded modules are neither concretized/individualized nor
-    # cut -- they reach the formal tool as their original (parameterized) source, and
-    # parents instantiate them by their original name.
-    all_def_names = {d.name for d in chipper.collect_modules_ast(compilation).values()}
-    excluded_defs = {
-        n for n in all_def_names if any(fnmatch.fnmatch(n, p) for p in exclude_patterns)
-    }
-
-    # Attempt concretization
-    status("Extracting parameters and concretizing...")
-    conc_trees = chipper.eval_modules(compilation, excluded_defs)
-
-    # Concretized trees are named after the instance path; map each back to its
-    # definition name so --exclude-module can target a module by definition
-    # (catching every instance of it) as well as by concretized name.
-    def_names = chipper.concretized_definition_names(compilation)
+    # Canonical per-module sources = the elaborated blob, split one module per
+    # file. This replaces the old concretized-tree list and becomes the cut spec
+    # lib. split_tree yields (name, tree); the pipeline consumes (tree, name).
+    blob_tree = SyntaxTree.fromText(elab.source)
+    conc_trees = [(tree, name) for name, tree in chipper.split_tree(blob_tree)]
 
     def is_excluded(module_name: str) -> bool:
-        names = {module_name, def_names.get(module_name, module_name)}
-        return any(
-            fnmatch.fnmatch(n, p) for n in names for p in exclude_patterns
-        )
+        # The elaborator emits an excluded module AND its whole subtree verbatim
+        # (an opaque boundary), so the uncut set is exactly what it emitted
+        # verbatim -- not just the pattern-matched names. Skip cutting all of it.
+        return module_name in elab.verbatim
 
     ctree_dir = f"{output_dir}/concrete_sources"
     os.makedirs(ctree_dir, exist_ok=True)
 
-    # Write concretized trees to output directory (this will be out spec lib)
+    # Write the canonical (elaborated) per-module trees; this is the spec lib.
     for tree, name in conc_trees:
         with open(f"{ctree_dir}/{name}.sv", "w") as f:
             f.write(print_tree(tree))
 
-    status("Concretization complete.")
+    status("Elaboration complete.")
 
     # Make a directory for the final output sources
     consolidated_dir = f"{output_dir}/consolidated_sources"
@@ -261,6 +257,42 @@ async def main():
     # write our tcl script for JasperGold equivalence checking
     with open("pcjg.tcl", "w") as f:
         f.write(generate_jasper_tcl_script())
+
+    # The elaboration-vs-original FV verdict, recorded into papercuts.log below.
+    fv_gate_result = None
+
+    # MARK: Phase 0 -- elaboration-equivalence gate (LOAD-BEARING).
+    # Prove the elaborated whole design is equivalent to the original before it is
+    # trusted as canonical. Reuses the existing SEC infrastructure: a single
+    # is_top check with spec = original design (orig_dir), impl = elaborated blob.
+    # Both sides elaborate at the design top; the blob is self-contained so the
+    # -y orig_dir search path is harmless. A non-proven verdict is fatal -- every
+    # downstream cut is checked against the elaborated golden, so an unfaithful
+    # elaboration would silently invalidate the entire run.
+    if backend is not None:
+        status("FV gate: verifying elaborated design == original...")
+        gate_dir = f"{elab_dir}/fv"
+        os.makedirs(gate_dir, exist_ok=True)
+        gate_run = Run(
+            top_module_path=f"{orig_dir}/{top_name}.sv",
+            spec_lib_path=orig_dir,
+            impl_module_path=elab_blob_path,
+            impl_module_folder=gate_dir,
+            is_top=True,
+            index=0,
+        )
+        await backend.check(gate_run)
+        if not gate_run.valid:
+            verdict = getattr(gate_run, "verdict", "not-proven")
+            raise SystemExit(
+                f"FATAL: elaborated design is not equivalent to the original "
+                f"(verdict={verdict}). The elaboration cannot be trusted as "
+                f"canonical; aborting. See {gate_dir} for the run artifacts."
+            )
+        fv_gate_result = (getattr(gate_run, "verdict", None) or "proven").upper()
+        status("FV gate passed: elaborated design == original.")
+    else:
+        status("FV gate skipped (no -e/backend); elaborated source is unverified.")
 
     if args.mux_rewrites:
         status("Performing mux rewrites...")
@@ -336,7 +368,7 @@ async def main():
     log_path = f"{output_dir}/papercuts.log"
 
     if not args.check_equivalence:
-        write_papercuts_log(log_path, modules, checked=False)
+        write_papercuts_log(log_path, modules, checked=False, fv_gate=fv_gate_result)
         status(f"Enumeration-only (no -e). Cut summary written to {log_path}")
         return
 
@@ -369,7 +401,7 @@ async def main():
     status(f"done: {n_valid}/{total} cuts valid")
 
     # Persist the per-cut summary before consolidation.
-    write_papercuts_log(log_path, modules, checked=True)
+    write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate_result)
     status(f"Cut summary written to {log_path}")
 
     # MARK: Phase 3 -- consolidate each module's valid cuts, then verify the
@@ -422,7 +454,9 @@ async def main():
 
     # Rewrite the log now that consolidation verdicts are known, so the final
     # papercuts.log includes both the per-cut table and the consolidated results.
-    write_papercuts_log(log_path, modules, checked=True, final_runs=final_runs)
+    write_papercuts_log(
+        log_path, modules, checked=True, final_runs=final_runs, fv_gate=fv_gate_result
+    )
     status(f"Consolidated results written to {log_path}")
 
 

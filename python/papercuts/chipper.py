@@ -34,7 +34,7 @@ def concretized_definition_names(comp: Compilation) -> dict[str, str]:
 
     ``eval_modules`` names each concretized tree after the *instance path*
     (hierarchical path with ``.`` replaced by ``_``), so a module defined as
-    ``DW02_multp`` and instantiated as ``top.u_mul`` becomes ``top_u_mul``.
+    ``mul`` and instantiated as ``top.u_mul`` becomes ``top_u_mul``.
     This returns ``{concretized_name: definition_name}`` so callers can act on
     a module by its definition (e.g. skip every instance of a library
     primitive) rather than by each instance-path name.
@@ -82,6 +82,13 @@ def eval_modules(
     an individualized child by a name that no longer exists) -- that raises.
     """
     excluded_defs = set(excluded_defs or ())
+
+    # NARROW EDIT: skip parameter concretization and per-instance module
+    # renaming. Emit each module DEFINITION once, verbatim, under its original
+    # name. Cuts still run on these original (parameterized) trees downstream.
+    # The concretization + rename body below is left as dead code for easy revert.
+    return [(tree, name) for name, tree in collect_modules_cst(comp).items()]
+
     # The main point of this is to concretize any parameters that we can evaluate at compile time.
 
     cx = ast.ASTContext(comp.getRoot(), ast.LookupLocation.max)
