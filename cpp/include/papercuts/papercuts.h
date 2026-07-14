@@ -324,6 +324,30 @@ public:
     std::vector<const ConditionalStatementSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
+// MARK: Case
+class CaseRemover : public PapercutsRewriter<CaseRemover> {
+private:
+    std::vector<std::pair<const CaseStatementSyntax*, size_t>> caseNodes; // (case statement, prunable item index)
+    std::unordered_map<const CaseStatementSyntax*, std::unordered_set<size_t>> nodesToChange;
+    const std::shared_ptr<SyntaxTree> tree;
+    size_t cutCount;
+public:
+    CaseRemover(const::std::shared_ptr<SyntaxTree> tree);
+    void handle(const CaseStatementSyntax&);
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllCases();
+    std::shared_ptr<SyntaxTree> removeCaseIndex(const std::vector<size_t>& indicesToRemove);
+    size_t getCutCount() const { return cutCount; }
+};
+
+class CaseCollector : public SyntaxVisitor<CaseCollector> {
+private:
+    std::vector<std::pair<const CaseStatementSyntax*, size_t>> foundNodes; // Only for case statements with a default
+
+public:
+    void handle(const CaseStatementSyntax&);
+    std::vector<std::pair<const CaseStatementSyntax*, size_t>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+};
+
 // MARK: Papercutter
 
 class Papercutter: public PapercutsRewriter<Papercutter> {
@@ -333,6 +357,7 @@ private:
     size_t BSRCount = 0;
     size_t TRCount = 0;
     size_t IRCount = 0;
+    size_t CRCount = 0;
 
     // Bit-shrink strategy. When false (default), a shrink narrows the declaration
     // in place (e.g. `logic [7:0] x;` -> `logic [6:0] x;`). When true, it keeps
@@ -353,11 +378,16 @@ private:
     std::vector<const ConditionalStatementSyntax*> ifNodes;
     std::unordered_map<const ConditionalStatementSyntax*, bool> ifNodesToChange;
 
+    // Case remover variables
+    std::vector<std::pair<const CaseStatementSyntax*, size_t>> caseNodes;
+    std::unordered_map<const CaseStatementSyntax*, std::unordered_set<size_t>> caseNodesToChange;
+
     void clearState() {
         nodesToShrink.clear();
         runMap.clear();
         ternaryNodesToChange.clear();
         ifNodesToChange.clear();
+        caseNodesToChange.clear();
     }
 public:
     Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false);
@@ -370,6 +400,7 @@ public:
     std::vector<std::shared_ptr<SyntaxTree>> shrinkAllBits();
     std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();
     std::vector<std::shared_ptr<SyntaxTree>> removeAllIfs();
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllCases();
 
     void handle(const DataDeclarationSyntax& node);
     void handle(const DeclaratorSyntax& node);
@@ -378,6 +409,7 @@ public:
     void handle(const SyntaxNode& node);
     void handle(const ConditionalExpressionSyntax&);
     void handle(const ConditionalStatementSyntax&);
+    void handle(const CaseStatementSyntax&);
     void handle(const BinaryExpressionSyntax& node);
 
     size_t getCutCount() const { return cutCount; }

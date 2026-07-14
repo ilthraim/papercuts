@@ -586,6 +586,77 @@ std::vector<const ConditionalStatementSyntax*> IfCollector::getFoundNodes(const 
     return this->foundNodes;
 }
 
+// MARK: CaseRemover
+CaseRemover::CaseRemover(const ::std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+    CaseCollector collector;
+    caseNodes = collector.getFoundNodes(tree);
+    cutCount = caseNodes.size();
+}
+
+void CaseRemover::handle(const CaseStatementSyntax& node) {
+    if (nodesToChange.contains(&node)) {
+        for (size_t idx : nodesToChange[&node]) {
+            this->remove(*node.items[idx]);
+        }
+    }
+    visitDefault(node);
+}
+
+std::shared_ptr<SyntaxTree> CaseRemover::removeCaseIndex(const std::vector<size_t>& indicesToRemove) {
+    nodesToChange.clear();
+
+    for (size_t i : indicesToRemove) {
+        if (i >= cutCount) {
+            throw std::out_of_range("Index out of range for removeCaseIndex");
+        }
+        nodesToChange[caseNodes[i].first].insert(caseNodes[i].second);
+    }
+
+    return transform(tree);
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> CaseRemover::removeAllCases() {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    nodesToChange.clear();
+
+    for (const auto& node : caseNodes) {
+        nodesToChange.clear();
+        nodesToChange[node.first].insert(node.second);
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+    }
+
+    return newTrees;
+}
+
+void CaseCollector::handle(const CaseStatementSyntax& node) {
+    bool hasDefault = false;
+    for (auto item : node.items) {
+        if (item->kind == SyntaxKind::DefaultCaseItem) {
+            hasDefault = true;
+            break;
+        }
+    }
+
+    if (hasDefault) {
+        for (size_t i = 0; i < node.items.size(); i++) {
+            if (node.items[i]->kind != SyntaxKind::DefaultCaseItem) {
+                this->foundNodes.emplace_back(&node, i);
+            }
+        }
+    }
+
+    this->visitDefault(node);
+}
+
+std::vector<std::pair<const CaseStatementSyntax*, size_t>> CaseCollector::getFoundNodes(
+    const std::shared_ptr<SyntaxTree> tree) {
+    tree->root().visit(*this);
+
+    return this->foundNodes;
+}
+
 // MARK: Papercutter
 
 Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate)
@@ -606,6 +677,11 @@ Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWith
     ifNodes = IC.getFoundNodes(tree);
     cutCount += ifNodes.size() * 2;
     IRCount = ifNodes.size() * 2;
+
+    CaseCollector CC;
+    caseNodes = CC.getFoundNodes(tree);
+    cutCount += caseNodes.size();
+    CRCount = caseNodes.size();
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
@@ -619,6 +695,9 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
 
     auto bitShrinkTrees = shrinkAllBits();
     newTrees.insert(newTrees.end(), bitShrinkTrees.begin(), bitShrinkTrees.end());
+
+    auto caseRemoveTrees = removeAllCases();
+    newTrees.insert(newTrees.end(), caseRemoveTrees.begin(), caseRemoveTrees.end());
 
     return newTrees;
 }
@@ -642,11 +721,15 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
             bool removeTrueBranch = ((i - TRCount) % 2 != 0);
             ifNodesToChange.emplace(ifNodes[nodeIndex], removeTrueBranch);
         }
-        else {
+        else if (i < TRCount + IRCount + BSRCount) {
             size_t nodeIndex = i - TRCount - IRCount;
             nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
             std::cout << "Adding node to shrink: " << shrinkNodes[nodeIndex].first->name.valueText() << " with width " << shrinkNodes[nodeIndex].second << std::endl;
             runMap.emplace(shrinkNodes[nodeIndex]);
+        }
+        else {
+            size_t nodeIndex = i - TRCount - IRCount - BSRCount;
+            caseNodesToChange[caseNodes[nodeIndex].first].insert(caseNodes[nodeIndex].second);
         }
     }
 
@@ -719,6 +802,11 @@ std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
         info.emplace_back("bitshrink", sm.getLineNumber(pair.first->name.location()));
     }
 
+    // Cases: 1 cut per prunable item (prune the item, falling through to default).
+    for (const auto& pair : caseNodes) {
+        info.emplace_back("case(prune-item)", lineOf(*pair.first->items[pair.second]));
+    }
+
     return info;
 }
 
@@ -771,6 +859,21 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllIfs() {
         ifNodesToChange.clear();
         ifNodesToChange.emplace(node, true);
         newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+    }
+    clearState();
+    return newTrees;
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllCases() {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    caseNodesToChange.clear();
+
+    for (const auto& node : caseNodes) {
+        caseNodesToChange.clear();
+        caseNodesToChange[node.first].insert(node.second);
+        auto newTree = transform(tree);
         newTrees.emplace_back(newTree);
     }
     clearState();
@@ -991,6 +1094,15 @@ void Papercutter::handle(const ConditionalStatementSyntax& node) {
         else {
             auto replacement = node.statement;
             this->replace(node, *replacement);
+        }
+    }
+    this->visitDefault(node);
+}
+
+void Papercutter::handle(const CaseStatementSyntax& node) {
+    if (caseNodesToChange.contains(&node)) {
+        for (size_t idx : caseNodesToChange[&node]) {
+            this->remove(*node.items[idx]);
         }
     }
     this->visitDefault(node);
