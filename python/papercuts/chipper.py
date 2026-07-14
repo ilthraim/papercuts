@@ -266,7 +266,13 @@ def split_tree(tree: SyntaxTree) -> list[tuple[str, SyntaxTree]]:
     raw_modules = []
     info_trees = []
 
-    for st in tree.root[0]:
+    # A lone top-level module parses with the ModuleDeclaration as the root
+    # itself; multiple members parse under a CompilationUnit whose [0] is the
+    # member list. Normalize to a member iterable either way.
+    root = tree.root
+    members = [root] if isinstance(root, syntax.ModuleDeclarationSyntax) else root[0]
+
+    for st in members:
         if isinstance(st, syntax.ModuleDeclarationSyntax):
             raw_modules.append((st.header.name.valueText, st.__str__()))
         else:
