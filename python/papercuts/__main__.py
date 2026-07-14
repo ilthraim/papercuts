@@ -261,6 +261,32 @@ async def main():
     # The elaboration-vs-original FV verdict, recorded into papercuts.log below.
     fv_gate_result = None
 
+    # MARK: Phase -1 -- FV environment self-check (LOAD-BEARING).
+    # Prove the original design equivalent to itself before trusting the formal
+    # tool for anything real. A design is trivially equivalent to itself, so the
+    # ONLY way this fails is a broken FV setup (tool not on PATH, no license, or
+    # a misconfigured backend). Fail here with a clear, environment-focused
+    # message rather than letting the elaboration gate
+    # or the per-cut checks below misreport a setup problem as a design or
+    # elaboration failure. spec == impl == the original design top, so the verdict
+    # depends only on the formal environment, not on the design or elaboration.
+    if backend is not None:
+        status("FV self-check: verifying original design == itself...")
+        selfcheck_dir = f"{output_dir}/fv_selfcheck"
+        os.makedirs(selfcheck_dir, exist_ok=True)
+        selfcheck_run = Run(
+            top_module_path=f"{orig_dir}/{top_name}.sv",
+            spec_lib_path=orig_dir,
+            impl_module_path=f"{orig_dir}/{top_name}.sv",  # same source both sides
+            impl_module_folder=selfcheck_dir,
+            is_top=True,
+            index=0,
+        )
+        await backend.check(selfcheck_run)
+        if not selfcheck_run.valid:
+            raise SystemExit("Formal verification setup failed, check FV environment.")
+        status("FV self-check passed: formal environment is working.")
+
     # MARK: Phase 0 -- elaboration-equivalence gate (LOAD-BEARING).
     # Prove the elaborated whole design is equivalent to the original before it is
     # trusted as canonical. Reuses the existing SEC infrastructure: a single
