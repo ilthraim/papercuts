@@ -48,5 +48,6 @@ PYBIND11_MODULE(pypercuts, m) {
         .def("remove_all_ternaries", &papercuts::Papercutter::removeAllTernaries)
         .def("remove_all_ifs", &papercuts::Papercutter::removeAllIfs)
         .def("remove_all_cases", &papercuts::Papercutter::removeAllCases)
+        .def("remove_all_binops", &papercuts::Papercutter::removeAllBinops)
         .def("get_cut_count", &papercuts::Papercutter::getCutCount);
 }

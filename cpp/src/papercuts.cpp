@@ -657,6 +657,109 @@ std::vector<std::pair<const CaseStatementSyntax*, size_t>> CaseCollector::getFou
     return this->foundNodes;
 }
 
+// MARK: BinopRemover
+
+// Operators whose operands can be dropped to test for a dead operand. Excludes
+// assignments (left is an lvalue), comparisons/equality (1-bit result), and the
+// property operators (->, <->). mul/div/mod stay in: even when the backend
+// blackboxes wide ones, the reduction is still a decidable check.
+static bool isReducibleBinop(SyntaxKind kind) {
+    switch (kind) {
+        case SyntaxKind::AddExpression:
+        case SyntaxKind::SubtractExpression:
+        case SyntaxKind::MultiplyExpression:
+        case SyntaxKind::DivideExpression:
+        case SyntaxKind::ModExpression:
+        case SyntaxKind::PowerExpression:
+        case SyntaxKind::BinaryAndExpression:
+        case SyntaxKind::BinaryOrExpression:
+        case SyntaxKind::BinaryXorExpression:
+        case SyntaxKind::BinaryXnorExpression:
+        case SyntaxKind::LogicalAndExpression:
+        case SyntaxKind::LogicalOrExpression:
+        case SyntaxKind::LogicalShiftLeftExpression:
+        case SyntaxKind::LogicalShiftRightExpression:
+        case SyntaxKind::ArithmeticShiftLeftExpression:
+        case SyntaxKind::ArithmeticShiftRightExpression:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Shifts only get a keep-left cut (a<<b -> a, i.e. shift amount was 0); keeping
+// the right operand makes the result the shift count and near-always falsifies.
+static bool isShiftBinop(SyntaxKind kind) {
+    switch (kind) {
+        case SyntaxKind::LogicalShiftLeftExpression:
+        case SyntaxKind::LogicalShiftRightExpression:
+        case SyntaxKind::ArithmeticShiftLeftExpression:
+        case SyntaxKind::ArithmeticShiftRightExpression:
+            return true;
+        default:
+            return false;
+    }
+}
+
+BinopRemover::BinopRemover(const ::std::shared_ptr<SyntaxTree> tree) : tree(tree) {
+    BinopCollector collector;
+    binopNodes = collector.getFoundNodes(tree);
+    cutCount = binopNodes.size();
+}
+
+void BinopRemover::handle(const BinaryExpressionSyntax& node) {
+    if (nodesToChange.contains(&node)) {
+        auto replacement = nodesToChange[&node] ? node.left : node.right;
+        this->replace(node, *replacement);
+    }
+    visitDefault(node);
+}
+
+std::shared_ptr<SyntaxTree> BinopRemover::removeBinopIndex(const std::vector<size_t>& indicesToRemove) {
+    nodesToChange.clear();
+
+    for (size_t i : indicesToRemove) {
+        if (i >= cutCount) {
+            throw std::out_of_range("Index out of range for removeBinopIndex");
+        }
+        nodesToChange.emplace(binopNodes[i].first, binopNodes[i].second);
+    }
+
+    return transform(tree);
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> BinopRemover::removeAllBinops() {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    nodesToChange.clear();
+
+    for (const auto& node : binopNodes) {
+        nodesToChange.clear();
+        nodesToChange.emplace(node.first, node.second);
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+    }
+
+    return newTrees;
+}
+
+void BinopCollector::handle(const BinaryExpressionSyntax& node) {
+    if (isReducibleBinop(node.kind)) {
+        this->foundNodes.emplace_back(&node, true); // keep-left
+        if (!isShiftBinop(node.kind)) {
+            this->foundNodes.emplace_back(&node, false); // keep-right
+        }
+    }
+    this->visitDefault(node);
+}
+
+std::vector<std::pair<const BinaryExpressionSyntax*, bool>> BinopCollector::getFoundNodes(
+    const std::shared_ptr<SyntaxTree> tree) {
+    tree->root().visit(*this);
+
+    return this->foundNodes;
+}
+
 // MARK: Papercutter
 
 Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate)
@@ -682,6 +785,11 @@ Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWith
     caseNodes = CC.getFoundNodes(tree);
     cutCount += caseNodes.size();
     CRCount = caseNodes.size();
+
+    BinopCollector BC;
+    binopNodes = BC.getFoundNodes(tree);
+    cutCount += binopNodes.size();
+    BRCount = binopNodes.size();
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
@@ -698,6 +806,9 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
 
     auto caseRemoveTrees = removeAllCases();
     newTrees.insert(newTrees.end(), caseRemoveTrees.begin(), caseRemoveTrees.end());
+
+    auto binopRemoveTrees = removeAllBinops();
+    newTrees.insert(newTrees.end(), binopRemoveTrees.begin(), binopRemoveTrees.end());
 
     return newTrees;
 }
@@ -727,9 +838,13 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
             std::cout << "Adding node to shrink: " << shrinkNodes[nodeIndex].first->name.valueText() << " with width " << shrinkNodes[nodeIndex].second << std::endl;
             runMap.emplace(shrinkNodes[nodeIndex]);
         }
-        else {
+        else if (i < TRCount + IRCount + BSRCount + CRCount) {
             size_t nodeIndex = i - TRCount - IRCount - BSRCount;
             caseNodesToChange[caseNodes[nodeIndex].first].insert(caseNodes[nodeIndex].second);
+        }
+        else {
+            size_t nodeIndex = i - TRCount - IRCount - BSRCount - CRCount;
+            binopNodesToChange.emplace(binopNodes[nodeIndex].first, binopNodes[nodeIndex].second);
         }
     }
 
@@ -807,6 +922,11 @@ std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
         info.emplace_back("case(prune-item)", lineOf(*pair.first->items[pair.second]));
     }
 
+    // Binops: keep one operand (shifts keep-left only).
+    for (const auto& pair : binopNodes) {
+        info.emplace_back(pair.second ? "binop(keep-left)" : "binop(keep-right)", lineOf(*pair.first));
+    }
+
     return info;
 }
 
@@ -873,6 +993,21 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllCases() {
     for (const auto& node : caseNodes) {
         caseNodesToChange.clear();
         caseNodesToChange[node.first].insert(node.second);
+        auto newTree = transform(tree);
+        newTrees.emplace_back(newTree);
+    }
+    clearState();
+    return newTrees;
+}
+
+std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllBinops() {
+    std::vector<std::shared_ptr<SyntaxTree>> newTrees;
+
+    binopNodesToChange.clear();
+
+    for (const auto& node : binopNodes) {
+        binopNodesToChange.clear();
+        binopNodesToChange.emplace(node.first, node.second);
         auto newTree = transform(tree);
         newTrees.emplace_back(newTree);
     }
@@ -1011,6 +1146,10 @@ void Papercutter::handle(const DeclaratorSyntax& node) {
 }
 
 void Papercutter::handle(const BinaryExpressionSyntax& node) {
+    if (binopNodesToChange.contains(&node)) {
+        auto replacement = binopNodesToChange[&node] ? node.left : node.right;
+        this->replace(node, *replacement);
+    }
     // we don't want to replace the assignment of a node we're shrinking
     if (auto leftNode = node.left->as_if<IdentifierNameSyntax>()) {
         if (std::string(leftNode->identifier.valueText()).find("_papercuts") != std::string::npos) {

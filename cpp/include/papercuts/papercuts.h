@@ -348,6 +348,30 @@ public:
     std::vector<std::pair<const CaseStatementSyntax*, size_t>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
+// MARK: Binop
+class BinopRemover : public PapercutsRewriter<BinopRemover> {
+private:
+    std::vector<std::pair<const BinaryExpressionSyntax*, bool>> binopNodes; // (binary expr, keepLeft)
+    std::unordered_map<const BinaryExpressionSyntax*, bool> nodesToChange;
+    const std::shared_ptr<SyntaxTree> tree;
+    size_t cutCount;
+public:
+    BinopRemover(const::std::shared_ptr<SyntaxTree> tree);
+    void handle(const BinaryExpressionSyntax&);
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllBinops();
+    std::shared_ptr<SyntaxTree> removeBinopIndex(const std::vector<size_t>& indicesToRemove);
+    size_t getCutCount() const { return cutCount; }
+};
+
+class BinopCollector : public SyntaxVisitor<BinopCollector> {
+private:
+    std::vector<std::pair<const BinaryExpressionSyntax*, bool>> foundNodes; // (binary expr, keepLeft); shifts keep-left only
+
+public:
+    void handle(const BinaryExpressionSyntax&);
+    std::vector<std::pair<const BinaryExpressionSyntax*, bool>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+};
+
 // MARK: Papercutter
 
 class Papercutter: public PapercutsRewriter<Papercutter> {
@@ -358,6 +382,7 @@ private:
     size_t TRCount = 0;
     size_t IRCount = 0;
     size_t CRCount = 0;
+    size_t BRCount = 0;
 
     // Bit-shrink strategy. When false (default), a shrink narrows the declaration
     // in place (e.g. `logic [7:0] x;` -> `logic [6:0] x;`). When true, it keeps
@@ -382,12 +407,17 @@ private:
     std::vector<std::pair<const CaseStatementSyntax*, size_t>> caseNodes;
     std::unordered_map<const CaseStatementSyntax*, std::unordered_set<size_t>> caseNodesToChange;
 
+    // Binop remover variables
+    std::vector<std::pair<const BinaryExpressionSyntax*, bool>> binopNodes; // (binary expr, keepLeft)
+    std::unordered_map<const BinaryExpressionSyntax*, bool> binopNodesToChange;
+
     void clearState() {
         nodesToShrink.clear();
         runMap.clear();
         ternaryNodesToChange.clear();
         ifNodesToChange.clear();
         caseNodesToChange.clear();
+        binopNodesToChange.clear();
     }
 public:
     Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false);
@@ -401,6 +431,7 @@ public:
     std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();
     std::vector<std::shared_ptr<SyntaxTree>> removeAllIfs();
     std::vector<std::shared_ptr<SyntaxTree>> removeAllCases();
+    std::vector<std::shared_ptr<SyntaxTree>> removeAllBinops();
 
     void handle(const DataDeclarationSyntax& node);
     void handle(const DeclaratorSyntax& node);
