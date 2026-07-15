@@ -1106,10 +1106,17 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
 }
 
 void Papercutter::handle(const DeclaratorSyntax& node) {
-    // Narrow (default) shrink is done at the DataDeclaration level in
-    // handle(DataDeclarationSyntax); this per-declarator handler only builds the
-    // legacy intermediate-wire form.
+    // This per-declarator handler exists only to build the legacy intermediate-wire
+    // bit-shrink form; narrow (default) shrink is done at the DataDeclaration level
+    // in handle(DataDeclarationSyntax). Regardless of mode we MUST still descend
+    // into the declarator's children (via visitDefault) so that expression cuts
+    // living inside an initializer -- e.g. the `sel ? a : b` in `wire w = sel ? a : b;`
+    // or the `a & b` in `wire v = a & b;` -- are reached and actually applied.
+    // Overriding handle() takes over dispatch for this node, so without an explicit
+    // visitDefault the initializer subtree is never visited: such cuts were collected
+    // (they show up in cut_info) but silently applied to nothing.
     if (!shrinkWithIntermediate) {
+        visitDefault(node);
         return;
     }
     if (runMap.contains(&node)) {
@@ -1143,6 +1150,9 @@ void Papercutter::handle(const DeclaratorSyntax& node) {
 
         insertAfter(*parentDecl, newAssign);
     }
+    // Descend so initializer cuts inside this declarator are still applied in
+    // wire mode (the original declaration is retained alongside the new wire).
+    visitDefault(node);
 }
 
 void Papercutter::handle(const BinaryExpressionSyntax& node) {
