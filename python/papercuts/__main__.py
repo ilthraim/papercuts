@@ -33,6 +33,7 @@ class ModuleCuts:
     cur_dir: str
     runs: list[Run] = field(default_factory=list)
     excluded: bool = False     # kept in the golden source but never cut
+    noops: list[int] = field(default_factory=list)  # cut indices identical to source (never FVed)
 
 
 # MARK: papercuts.log
@@ -54,6 +55,7 @@ def write_papercuts_log(
     """
     total = sum(len(m.runs) for m in modules)
     valid = sum(1 for m in modules for r in m.runs if r.valid)
+    noop = sum(len(m.noops) for m in modules)
 
     rows = []
     for m in modules:
@@ -68,6 +70,12 @@ def write_papercuts_log(
             else:
                 v = "Y" if run.valid else "N"
             rows.append((m.name, run.index, ctype, line, v))
+        # No-op cuts: generated but byte-identical to the elaborated source, so
+        # never sent to FV. Flagged as errors here (a cut that changes nothing is
+        # a cut-generation bug) rather than silently dropped.
+        for idx in m.noops:
+            ctype, line = m.cut_infos[idx]
+            rows.append((m.name, idx, ctype, line, "ERR"))
 
     # Column widths for aligned output (account for both sections' module names).
     mod_names = [r[0] for r in rows] + (
@@ -77,7 +85,10 @@ def write_papercuts_log(
     w_type = max([len("type")] + [len(r[2]) for r in rows], default=len("type"))
 
     with open(log_path, "w") as f:
-        f.write(f"# papercuts summary: {total} cuts tried, {valid} valid\n")
+        f.write(
+            f"# papercuts summary: {total} cuts tried, {valid} valid, "
+            f"{noop} no-op errors\n"
+        )
         if fv_gate is not None:
             f.write(f"# elaboration-vs-original FV gate: {fv_gate}\n")
         f.write(
@@ -374,7 +385,22 @@ async def main():
             cut_infos=cut_infos,
             cur_dir=cur_dir,
         )
+        # Baseline every cut is compared against: the elaborated per-module source
+        # (the same text written to ctree_dir and used as the FV spec). A cut whose
+        # serialized form is byte-identical to this changed nothing -- a
+        # cut-generation bug -- and must never reach FV, where it would trivially
+        # "prove" and masquerade as a valid, removable cut. Skip it and flag it as
+        # an error in the log instead.
+        baseline = print_tree(ntree)
         for idx, rewrite in enumerate(rewrites):
+            if print_tree(rewrite) == baseline:
+                ctype, line = cut_infos[idx]
+                mod.noops.append(idx)
+                status(
+                    f"WARNING: {name} idx={idx} {ctype} L{line} is a NO-OP "
+                    f"(identical to elaborated source); excluded from FV"
+                )
+                continue
             run = Run(
                 top_module_path=f"{ctree_dir}/{top_name}.sv",
                 spec_lib_path=ctree_dir,
@@ -392,6 +418,13 @@ async def main():
     status(f"{len(all_runs)} cuts across {len(modules)} modules")
 
     log_path = f"{output_dir}/papercuts.log"
+
+    n_noop = sum(len(m.noops) for m in modules)
+    if n_noop:
+        status(
+            f"WARNING: {n_noop} no-op cut(s) detected (identical to elaborated "
+            f"source); excluded from FV. See {log_path}"
+        )
 
     if not args.check_equivalence:
         write_papercuts_log(log_path, modules, checked=False, fv_gate=fv_gate_result)
