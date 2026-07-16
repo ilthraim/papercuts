@@ -18,6 +18,7 @@ from papercuts.utils import print_tree, status, set_verbose, Run
 from papercuts.ec import generate_jasper_tcl_script
 from papercuts.backends import discover_backends, get_backend
 from papercuts.pypercuts import Papercutter, insert_muxes
+from papercuts.status import StatusWriter
 
 
 # MARK: Module context
@@ -200,6 +201,12 @@ async def main():
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Live status for an external viewer (`python -m papercuts.status --watch`).
+    # Records each equivalence check's lifecycle to outputs/status.json so the
+    # user can watch which FV checks are running, and for how long, from a second
+    # terminal. Only meaningful when checks actually run (a backend is selected).
+    tracker = StatusWriter(output_dir) if backend is not None else None
+
     # MARK: Elaboration -- the canonical front end.
     # Unroll generates, resolve parameters, and flatten hierarchy up front by
     # re-emitting the whole design from a live slang elaboration. Excluded
@@ -293,7 +300,16 @@ async def main():
             is_top=True,
             index=0,
         )
-        await backend.check(selfcheck_run)
+        tracker.set_phase("selfcheck")
+        tracker.start(id(selfcheck_run), "selfcheck", "self-check")
+        try:
+            await backend.check(selfcheck_run)
+        finally:
+            tracker.finish(
+                id(selfcheck_run),
+                getattr(selfcheck_run, "verdict", None),
+                selfcheck_run.valid,
+            )
         if not selfcheck_run.valid:
             raise SystemExit("Formal verification setup failed, check FV environment.")
         status("FV self-check passed: formal environment is working.")
@@ -318,7 +334,16 @@ async def main():
             is_top=True,
             index=0,
         )
-        await backend.check(gate_run)
+        tracker.set_phase("gate")
+        tracker.start(id(gate_run), "gate", "elab-gate")
+        try:
+            await backend.check(gate_run)
+        finally:
+            tracker.finish(
+                id(gate_run),
+                getattr(gate_run, "verdict", None),
+                gate_run.valid,
+            )
         if not gate_run.valid:
             verdict = getattr(gate_run, "verdict", "not-proven")
             raise SystemExit(
@@ -438,6 +463,13 @@ async def main():
             ctype, line = mod.cut_infos[run.index]
             labels[id(run)] = (mod.name, ctype, line)
 
+    # Register every cut as pending so the status viewer shows the full backlog
+    # before the checks start dispatching.
+    tracker.set_phase("cuts")
+    for mod in modules:
+        for run in mod.runs:
+            tracker.register(id(run), "cuts", f"{mod.name}_pc{run.index}")
+
     # MARK: Phase 2 -- check every cut in parallel under one global limit.
     status(f"Checking equivalence ({len(all_runs)} cuts, max_jobs={args.max_jobs})...")
     semaphore = asyncio.Semaphore(args.max_jobs)
@@ -447,7 +479,11 @@ async def main():
     async def run_with_limit(run: Run):
         nonlocal done
         async with semaphore:
-            await backend.check(run)
+            tracker.start(id(run))
+            try:
+                await backend.check(run)
+            finally:
+                tracker.finish(id(run), getattr(run, "verdict", None), run.valid)
             done += 1
             mname, ctype, line = labels[id(run)]
             verdict = "PROVEN" if run.valid else "failed"
@@ -501,9 +537,22 @@ async def main():
             )
         )
 
+    # Register consolidated runs as pending, then check them (in parallel).
+    tracker.set_phase("consolidate")
+    for m, fr in final_runs:
+        tracker.register(id(fr), "consolidate", m.name)
+
     async def check_final(final_run: Run):
         async with semaphore:
-            return await backend.check(final_run)
+            tracker.start(id(final_run))
+            try:
+                return await backend.check(final_run)
+            finally:
+                tracker.finish(
+                    id(final_run),
+                    getattr(final_run, "verdict", None),
+                    final_run.valid,
+                )
 
     status(f"Verifying {len(final_runs)} consolidated module(s)...")
     await asyncio.gather(*(check_final(fr) for _, fr in final_runs))
@@ -517,6 +566,8 @@ async def main():
         log_path, modules, checked=True, final_runs=final_runs, fv_gate=fv_gate_result
     )
     status(f"Consolidated results written to {log_path}")
+
+    tracker.set_phase("done")
 
 
 if __name__ == "__main__":
