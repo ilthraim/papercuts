@@ -803,10 +803,15 @@ class Emitter:
     def _expr_UnaryOp(self, node):
         op = node.op.name
         operand = self.expr(node.operand)
+        # Increment/decrement require a bare variable_lvalue operand (IEEE 1800
+        # §11.4.2); a parenthesized "(i)++" is illegal. The slang operand is
+        # always an assignable lvalue, so no precedence parens are needed.
+        if op in ("Preincrement", "Predecrement"):
+            return f"{UNARY_PREFIX[op]}{operand}"
+        if op in UNARY_POSTFIX:
+            return f"{operand}{UNARY_POSTFIX[op]}"
         if op in UNARY_PREFIX:
             return f"{UNARY_PREFIX[op]}({operand})"
-        if op in UNARY_POSTFIX:
-            return f"({operand}){UNARY_POSTFIX[op]}"
         raise EmitError(f"unsupported unary op: {op!r}")
 
     def _expr_BinaryOp(self, node):
