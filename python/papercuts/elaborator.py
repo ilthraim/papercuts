@@ -5,8 +5,9 @@
 
 """Re-emit SystemVerilog from a live slang elaboration, via pyslang.
 
-Unrolls generate loops, resolves parameters, and makes conversions explicit by
-reconstructing source from the *elaborated* design. Works from a live slang
+Unrolls generate loops, resolves parameters, folds constant subexpressions, and
+makes conversions explicit by reconstructing source from the *elaborated*
+design. Works from a live slang
 elaboration (via pyslang) rather than a `slang --ast-json` dump: the live AST
 keeps every module instance's body individually walkable, whereas the JSON dump
 deduplicates identical instance bodies, so a hierarchical reference into the
@@ -26,6 +27,10 @@ Modes:
   --flatten generate blocks are dissolved into module scope with mangled names
             (stage[1].partial -> stage_1_partial); collisions are detected and
             refused.
+  fold      fully-constant subexpressions are resolved to their value, so a
+  (default) genvar folded into `i * 10` no longer emits `0 * 10` but `32'd0`;
+            references that survive in the output (module parameters, signals)
+            are left symbolic. Disable with --no-fold-constants.
 
 Any AST construct not handled raises EmitError (fail-hard) so that nothing is
 silently dropped.
@@ -37,7 +42,7 @@ import sys
 from dataclasses import dataclass
 
 import pyslang
-from pyslang.ast import Compilation, InstanceSymbol
+from pyslang.ast import ASTContext, Compilation, InstanceSymbol, LookupLocation
 from pyslang.syntax import SyntaxTree
 
 INDENT = "    "
@@ -45,6 +50,21 @@ INDENT = "    "
 
 class EmitError(Exception):
     """Raised when the emitter encounters an AST node it cannot handle."""
+
+
+class _LiveRef(Exception):
+    """Internal: short-circuits the constant-fold guard on the first live ref."""
+
+
+# Expression kinds worth attempting to constant-fold. These are the compound
+# forms where unrolling a generate loop leaves junk arithmetic (e.g. `0 * 10`)
+# once the genvar has been folded to a literal but the surrounding operator has
+# not. Leaf forms (literals, NamedValue) are deliberately excluded: literals are
+# already folded, and NamedValue is handled by its own inlining logic.
+FOLDABLE_KINDS = {
+    "BinaryOp", "UnaryOp", "ConditionalOp", "ElementSelect", "RangeSelect",
+    "Concatenation", "Replication",
+}
 
 
 UNARY_PREFIX = {
@@ -90,6 +110,14 @@ class Emitter:
         self.lines = []
         self.level = 0
         self.flatten = False
+        # When true, resolve fully-constant subexpressions to their folded value
+        # (via pyslang's constant evaluator) instead of re-emitting the raw
+        # arithmetic. Cleans up generate-loop junk like `0 * 10` -> `32'd0`.
+        self.fold_constants = True
+        # Scope used to build the EvalContext for constant folding; set per module
+        # in _emit_module (the instance body is a valid slang Scope). None outside
+        # a module, where folding is skipped.
+        self._eval_body = None
         # Definition names to emit verbatim (from original syntax) instead of
         # specializing per instance. Set from the --ignore CLI option.
         self.ignore = set()
@@ -275,6 +303,12 @@ class Emitter:
     def _emit_module(self, emitted_name, body):
         name = emitted_name
         members = list(body)
+
+        # The instance body is the scope for constant folding within this module.
+        # A fixed per-module scope suffices: expressions in nested generate blocks
+        # have already had their genvars folded to literals, so lookups never
+        # actually cross into the nested scope during evaluation.
+        self._eval_body = body
 
         self.path_map = {}
         gen_sep = "_" if self.flatten else "."
@@ -750,15 +784,87 @@ class Emitter:
     def expr(self, node):
         if node is None:
             raise EmitError("encountered null expression")
+        if self.fold_constants and kind(node) in FOLDABLE_KINDS:
+            folded = self._try_fold(node)
+            if folded is not None:
+                return folded
         handler = getattr(self, f"_expr_{kind(node)}", None)
         if handler is None:
             raise EmitError(f"unsupported expression kind: {kind(node)!r}")
         return handler(node)
 
+    # --- constant folding ----------------------------------------------------
+
+    def _has_live_ref(self, node):
+        """True if the subtree references a symbol that survives in the emitted
+        output as a runtime value -- i.e. a signal (net/variable/port). Literals,
+        genvars, in-generate localparams (present in ``param_subst``), and module
+        parameters are all resolved constants in the elaborated design and are
+        therefore foldable; a signal reference (``din + 0``) is not, so such a
+        subtree must stay symbolic."""
+        subst = self.param_subst
+
+        def check(n):
+            k = n.kind.name
+            if k in ("NamedValue", "HierarchicalValue"):
+                sym = n.symbol
+                if sym.hierarchicalPath in subst:
+                    return
+                # Genvars and parameters are resolved to concrete constants in
+                # the elaborated design (each instance is specialized to one
+                # parameter value), so they do not count as live references.
+                if sym.kind.name in ("Genvar", "Parameter"):
+                    return
+                raise _LiveRef
+            if k == "LValueReference":
+                raise _LiveRef
+
+        try:
+            node.visit(check)
+        except _LiveRef:
+            return True
+        return False
+
+    def _try_fold(self, node):
+        """Return the folded constant text for ``node`` if it is fully constant
+        (all leaves are literals / inlined genvars+localparams), else None.
+
+        Only invoked on ``FOLDABLE_KINDS``; the live-reference guard runs first so
+        the constant evaluator is only asked to fold subtrees that genuinely have
+        no surviving references (this also avoids a failed eval, which would
+        otherwise leave the EvalContext poisoned for later calls)."""
+        if self._eval_body is None:
+            return None
+        if self._has_live_ref(node):
+            return None
+        ctx = ASTContext(self._eval_body, LookupLocation.max)
+        value = ctx.tryEval(node)
+        if value is None or value.value is None:  # empty ConstantValue == failure
+            return None
+        return str(value)
+
+    def _const_param_text(self, sym):
+        """Rendered constant value of a parameter/localparam, or None if it has
+        no usable constant value (e.g. a type parameter). Every parameter in the
+        elaborated design is specialized to a single value, so a reference to one
+        is just that constant."""
+        try:
+            value = sym.value
+        except Exception:
+            return None  # e.g. a type parameter has no ConstantValue
+        if value is None:
+            return None
+        text = self._render_constant(value)
+        return None if text == "<unset>" else text
+
     def _value_ref(self, sym):
         hp = sym.hierarchicalPath
         if hp in self.param_subst:
             return self.param_subst[hp]
+        if self.fold_constants and kind(sym) == "Parameter":
+            val = self._const_param_text(sym)
+            if val is not None:
+                return val
         if self.flatten and hp in self.path_map:
             return self.path_map[hp]
         return sym.name
@@ -774,6 +880,12 @@ class Emitter:
         mapped = self.path_map.get(hp)
         if mapped is not None:
             return mapped
+        # A hierarchical reference to a parameter in another scope resolves to
+        # its concrete value (the target need not be inside the emitted module).
+        if self.fold_constants and kind(sym) == "Parameter":
+            val = self._const_param_text(sym)
+            if val is not None:
+                return val
         raise EmitError(
             f"cannot re-emit hierarchical reference to {sym.name!r} "
             f"({hp}): target outside emitted module scope"
@@ -961,13 +1073,18 @@ class ElaboratedDesign:
     verbatim: set          # module names emitted verbatim (the opaque/uncut region)
 
 
-def elaborate_design(files, *, flatten=True, ignore=(), allow_missing=False):
+def elaborate_design(files, *, flatten=True, ignore=(), allow_missing=False,
+                     fold_constants=True):
     """Elaborate ``files`` and re-emit the whole design as one source blob.
 
     ``ignore`` accepts fnmatch globs or bare names; matching module definitions
     are emitted verbatim (an opaque boundary) instead of specialized per
-    instance. Raises :class:`ElaborationError` on compilation errors and
-    ``EmitError`` on an unhandled construct -- callers gate on both.
+    instance. ``fold_constants`` (default on) collapses fully-constant
+    subexpressions -- e.g. the ``0 * 10`` junk left behind when a generate loop
+    is unrolled -- to their resolved value; references that survive in the output
+    (module parameters, signals) are left untouched. Raises
+    :class:`ElaborationError` on compilation errors and ``EmitError`` on an
+    unhandled construct -- callers gate on both.
 
     Returns an :class:`ElaboratedDesign` carrying the source and the top module
     name (the pipeline needs the top to wire the elaborated-vs-original gate)."""
@@ -977,6 +1094,7 @@ def elaborate_design(files, *, flatten=True, ignore=(), allow_missing=False):
 
     emitter = Emitter()
     emitter.flatten = flatten
+    emitter.fold_constants = fold_constants
     emitter.ignore = _resolve_ignore(comp, ignore)
     source = emitter.run(comp)
 
@@ -989,14 +1107,16 @@ def elaborate_design(files, *, flatten=True, ignore=(), allow_missing=False):
     )
 
 
-def elaborate(files, *, flatten=True, ignore=(), allow_missing=False) -> str:
+def elaborate(files, *, flatten=True, ignore=(), allow_missing=False,
+              fold_constants=True) -> str:
     """Elaborate ``files`` and return the re-emitted design as a string.
 
     Thin wrapper over :func:`elaborate_design` for callers that only need the
     source text (the CLI). Use ``elaborate_design`` when you also need the top
     module name (e.g. to wire the elaborated-vs-original equivalence gate)."""
     return elaborate_design(
-        files, flatten=flatten, ignore=ignore, allow_missing=allow_missing
+        files, flatten=flatten, ignore=ignore, allow_missing=allow_missing,
+        fold_constants=fold_constants,
     ).source
 
 
@@ -1022,6 +1142,12 @@ def main():
         help="treat instantiations of undefined modules as black boxes "
         "(re-emitted from source) instead of erroring",
     )
+    parser.add_argument(
+        "--fold-constants", action=argparse.BooleanOptionalAction, default=True,
+        help="resolve fully-constant subexpressions (e.g. generate-loop junk "
+        "like '0 * 10') to their folded value (default: on; use "
+        "--no-fold-constants to emit the raw arithmetic)",
+    )
     args = parser.parse_args()
 
     try:
@@ -1030,6 +1156,7 @@ def main():
             flatten=args.flatten,
             ignore=args.ignore,
             allow_missing=args.allow_missing_modules,
+            fold_constants=args.fold_constants,
         )
     except (ElaborationError, EmitError) as e:
         print(f"Error: {e}", file=sys.stderr)

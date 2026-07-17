@@ -165,6 +165,14 @@ async def main():
         action="store_true",
         help="Ignore the exclusions the selected backend recommends by default.",
     )
+    parser.add_argument(
+        "--fold-constants",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Resolve fully-constant subexpressions in the elaborated source "
+        "(e.g. generate-loop junk like '0 * 10') to their folded value "
+        "(default: on; use --no-fold-constants to emit the raw arithmetic).",
+    )
 
     # Two-phase parse: resolve the backend, let it add its own args, then parse.
     args, _ = parser.parse_known_args()
@@ -217,7 +225,8 @@ async def main():
     # concretization is no longer part of the flow.
     status("Elaborating design (unroll + flatten + concretize)...")
     try:
-        elab = elaborate_design(args.input_files, flatten=True, ignore=exclude_patterns)
+        elab = elaborate_design(args.input_files, flatten=True, ignore=exclude_patterns,
+                                fold_constants=args.fold_constants)
     except (ElaborationError, EmitError) as e:
         raise SystemExit(f"FATAL: elaboration failed: {e}")
 
