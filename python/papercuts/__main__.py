@@ -113,6 +113,48 @@ def write_papercuts_log(
                 f.write(f"  {m.name:<{w_mod}}  {applied:>7}  {result}\n")
 
 
+# MARK: cut plan
+def write_cut_plan(plan_path: str, modules: list[ModuleCuts]) -> None:
+    """Write the planned equivalence tests (one row per cut to be checked).
+
+    Emitted after enumeration but before any FV run, so the full test plan --
+    every cut and its type -- is visible up front, independent of whether -e is
+    used. No-op cuts (byte-identical to the elaborated source) are never checked,
+    so they are excluded from the rows and only counted in the header.
+    """
+    planned = [
+        (m.name, run.index, m.cut_infos[run.index][0], m.cut_infos[run.index][1])
+        for m in modules
+        for run in m.runs
+    ]
+    n_noop = sum(len(m.noops) for m in modules)
+    excluded = [m.name for m in modules if m.excluded]
+
+    # Per-type tally in first-seen order.
+    tally: dict[str, int] = {}
+    for _, _, ctype, _ in planned:
+        tally[ctype] = tally.get(ctype, 0) + 1
+
+    w_mod = max([len("module")] + [len(n) for n, *_ in planned], default=len("module"))
+    w_type = max([len("type")] + [len(t) for *_, t, _ in planned], default=len("type"))
+
+    with open(plan_path, "w") as f:
+        header = (
+            f"# papercuts cut plan: {len(planned)} planned tests across "
+            f"{len(modules)} modules"
+        )
+        if n_noop:
+            header += f" ({n_noop} no-op cut(s) excluded)"
+        f.write(header + "\n")
+        if tally:
+            f.write("# by type: " + ", ".join(f"{t} {c}" for t, c in tally.items()) + "\n")
+        if excluded:
+            f.write(f"# excluded modules (never cut): {', '.join(excluded)}\n")
+        f.write(f"# {'module':<{w_mod}}  {'idx':>4}  {'type':<{w_type}}  {'line':>6}\n")
+        for mod, idx, ctype, line in planned:
+            f.write(f"  {mod:<{w_mod}}  {idx:>4}  {ctype:<{w_type}}  {line:>6}\n")
+
+
 # MARK: Main
 async def main():
     parser = argparse.ArgumentParser(description="Process a SystemVerilog file.")
@@ -465,6 +507,11 @@ async def main():
             f"source); excluded from FV. See {log_path}"
         )
 
+    # Pre-cut test plan: every planned cut and its type, before any FV runs.
+    plan_path = f"{output_dir}/papercuts.plan.log"
+    write_cut_plan(plan_path, modules)
+    status(f"Cut plan ({len(all_runs)} planned tests) written to {plan_path}")
+
     if not args.check_equivalence:
         write_papercuts_log(log_path, modules, checked=False, fv_gate=fv_gate_result)
         status(f"Enumeration-only (no -e). Cut summary written to {log_path}")
@@ -482,7 +529,8 @@ async def main():
     tracker.set_phase("cuts")
     for mod in modules:
         for run in mod.runs:
-            tracker.register(id(run), "cuts", f"{mod.name}_pc{run.index}")
+            ctype = mod.cut_infos[run.index][0]
+            tracker.register(id(run), "cuts", f"{mod.name}_pc{run.index}", ctype)
 
     # MARK: Phase 2 -- check every cut in parallel under one global limit.
     status(f"Checking equivalence ({len(all_runs)} cuts, max_jobs={args.max_jobs})...")

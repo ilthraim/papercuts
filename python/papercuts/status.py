@@ -63,11 +63,16 @@ class StatusWriter:
         self._phase = phase
         self._flush()
 
-    def register(self, task_id, phase: str, label: str) -> None:
-        """Add a check as ``pending`` so the backlog is visible before dispatch."""
+    def register(self, task_id, phase: str, label: str, ctype: str = "") -> None:
+        """Add a check as ``pending`` so the backlog is visible before dispatch.
+
+        ``ctype`` is the kind of cut being checked (e.g. ``bitshrink``,
+        ``ternary(keep-true)``); empty for non-cut checks (self-check, gate).
+        """
         self._tasks[task_id] = {
             "phase": phase,
             "label": label,
+            "ctype": ctype,
             "state": PENDING,
             "start": None,
             "end": None,
@@ -76,15 +81,15 @@ class StatusWriter:
         }
         self._flush()
 
-    def start(self, task_id, phase: str = "", label: str = "") -> None:
+    def start(self, task_id, phase: str = "", label: str = "", ctype: str = "") -> None:
         """Mark a check ``running`` and stamp its start time.
 
         If the check was not pre-registered (e.g. the one-off self-check / gate),
-        it is registered on the fly from ``phase``/``label``.
+        it is registered on the fly from ``phase``/``label``/``ctype``.
         """
         t = self._tasks.get(task_id)
         if t is None:
-            self.register(task_id, phase, label)
+            self.register(task_id, phase, label, ctype)
             t = self._tasks[task_id]
         t["state"] = RUNNING
         t["start"] = time.time()
@@ -192,11 +197,15 @@ def render(snap: dict, show_all: bool, now: "float | None" = None) -> str:
 
     rows = sorted(rows, key=sort_key)
 
+    def type_of(t):
+        return t.get("ctype") or "-"
+
     w_phase = max([len("PHASE")] + [len(t["phase"]) for t in rows])
     w_label = max([len("LABEL")] + [len(t["label"]) for t in rows])
+    w_type = max([len("TYPE")] + [len(type_of(t)) for t in rows])
     lines.append(
         f"  {'PHASE':<{w_phase}}  {'LABEL':<{w_label}}  "
-        f"{'STATE':<7}  {'ELAPSED':>8}  RESULT"
+        f"{'TYPE':<{w_type}}  {'STATE':<7}  {'ELAPSED':>8}"
     )
     for t in rows:
         if t["state"] == RUNNING and t["start"]:
@@ -205,12 +214,9 @@ def render(snap: dict, show_all: bool, now: "float | None" = None) -> str:
             elapsed = _fmt_elapsed(t["end"] - t["start"])
         else:
             elapsed = "-"
-        result = ""
-        if t["state"] == DONE:
-            result = t["verdict"] or ("PROVEN" if t["valid"] else "failed")
         lines.append(
             f"  {t['phase']:<{w_phase}}  {t['label']:<{w_label}}  "
-            f"{t['state']:<7}  {elapsed:>8}  {result}"
+            f"{type_of(t):<{w_type}}  {t['state']:<7}  {elapsed:>8}"
         )
     return "\n".join(lines)
 
