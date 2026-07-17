@@ -272,6 +272,11 @@ async def main():
     consolidated_dir = f"{output_dir}/consolidated_sources"
     os.makedirs(consolidated_dir, exist_ok=True)
 
+    # Collects each individually-proven ("working") cut's source, populated after
+    # equivalence checking (only ever filled on an -e run, where validity is known).
+    working_dir = f"{output_dir}/working_cuts"
+    os.makedirs(working_dir, exist_ok=True)
+
     # write our tcl script for JasperGold equivalence checking
     with open("pcjg.tcl", "w") as f:
         f.write(generate_jasper_tcl_script())
@@ -498,6 +503,19 @@ async def main():
     # Persist the per-cut summary before consolidation.
     write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate_result)
     status(f"Cut summary written to {log_path}")
+
+    # Collect every individually-proven cut's source into working_cuts/ for easy
+    # access, alongside concrete_sources/ and consolidated_sources/. Each file is
+    # the module's source with exactly one valid cut applied (<module>_pc<idx>.sv,
+    # already written at enumeration); filenames are module-prefixed so a single
+    # flat directory never collides across modules.
+    n_working = 0
+    for mod in modules:
+        for run in mod.runs:
+            if run.valid:
+                shutil.copy2(run.impl_module_path, working_dir)
+                n_working += 1
+    status(f"{n_working} working cut source(s) copied to {working_dir}")
 
     # MARK: Phase 3 -- consolidate each module's valid cuts, then verify the
     # merged result. Each final run gets its own working dir so the checks can
