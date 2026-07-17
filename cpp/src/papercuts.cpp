@@ -364,53 +364,75 @@ void BitShrinker::handle(const SyntaxNode& node) {
 }
 
 void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
-    auto* dataDecl = node.parent->as_if<DataDeclarationSyntax>();
-    if (!dataDecl) {
-        return; // If the parent of this DeclaratorSyntax node is not a DataDeclarationSyntax node, we can skip it
+    // Pull the shared type off the declarator's parent. logic/reg/bit live in a
+    // DataDeclarationSyntax; wire/tri/... live in a NetDeclarationSyntax.
+    const DataTypeSyntax* type = nullptr;
+    if (auto* dataDecl = node.parent->as_if<DataDeclarationSyntax>()) {
+        auto kind = dataDecl->type->kind;
+        if (kind != SyntaxKind::LogicType && kind != SyntaxKind::RegType && kind != SyntaxKind::BitType) {
+            return; // Only the integer vector types carry a shrinkable packed range
+        }
+        type = dataDecl->type;
+    } else if (auto* netDecl = allowNets ? node.parent->as_if<NetDeclarationSyntax>() : nullptr) {
+        if (netDecl->strength || netDecl->delay) {
+            // Strength/delay can't be faithfully reproduced when we split and narrow, so skip.
+            std::cout << "Skipping net with strength/delay: " << node.name.valueText() << std::endl;
+            return;
+        }
+        type = netDecl->type;
+    } else {
+        return;
     }
-    auto& type = dataDecl->type;
 
-    if (type->kind == SyntaxKind::LogicType) {
-        auto& intType = type->as<IntegerTypeSyntax>();
-        if (!allowSigned && intType.signing && intType.signing.kind != TokenKind::UnsignedKeyword) {
-            // Zero-extending a signed value ({1'b0, ...}) corrupts its sign, so the
-            // intermediate-wire strategy must skip signed decls. Narrowing the
-            // declaration in place preserves signedness, so narrow mode allows them.
-            std::cout << "Skipping signed logic declaration: " << node.name.valueText() << std::endl;
-            return; // Skip this node if it's a signed logic declaration
-        }
-        auto& dims = intType.dimensions;
-        if (dims.size() == 0) {
-            std::cout << "Skipping single-bit logic declaration: " << node.name.valueText() << std::endl;
-            return; // Skip this node if it's a single-bit logic declaration
-        }
-        if (dims.size() > 1) {
-            std::cout << "Skipping multi-dimensional logic declaration: " << node.name.valueText() << std::endl;
-            return; // Skip this node if it's a multi-dimensional logic declaration
-        }
-        // We only want to look at one-dimensional logic decls, and no wildcard or queue dimensions
-        // (idk even what those are)
-        auto& dim = dims[0]->specifier->as<RangeDimensionSpecifierSyntax>();
-        // We shouldn't ever have bit selection here but in case we do throw an assert
-        auto& dimSelect = dim.selector->as<RangeSelectSyntax>();
-
-        // Get the left and right bounds of the range and calculate the width -> should be fine to
-        // cast here because (theoretically) concretization should have occurred already
-        auto& left = dimSelect.left->as<LiteralExpressionSyntax>();
-        auto& right = dimSelect.right->as<LiteralExpressionSyntax>();
-
-        int leftVal, rightVal;
-        leftVal = tokenToInt(left.literal);
-        rightVal = tokenToInt(right.literal);
-        int width = std::abs(leftVal - rightVal) + 1;
-
-        if (width <= 1) {
-            std::cout << "Skipping single-bit logic declaration: " << node.name.valueText() << std::endl;
-            return; // Skip this node if it's a single-bit logic declaration
-        }
-
-        shrinkNodes.emplace_back(&node, width); // Insert the node and its width into the vector
+    // logic/reg/bit (and `wire logic`) are IntegerTypeSyntax; a bare `wire [7:0]` is
+    // ImplicitTypeSyntax. Both expose signing and the packed dimensions.
+    Token signing;
+    const SyntaxList<VariableDimensionSyntax>* dims = nullptr;
+    if (auto* intType = type->as_if<IntegerTypeSyntax>()) {
+        signing = intType->signing;
+        dims = &intType->dimensions;
+    } else if (auto* impType = type->as_if<ImplicitTypeSyntax>()) {
+        signing = impType->signing;
+        dims = &impType->dimensions;
+    } else {
+        return; // e.g. a named/struct net type we don't shrink
     }
+
+    if (!allowSigned && signing && signing.kind != TokenKind::UnsignedKeyword) {
+        // Zero-extending a signed value ({1'b0, ...}) corrupts its sign, so the
+        // intermediate-wire strategy must skip signed decls. Narrowing in place
+        // preserves signedness, so narrow mode allows them.
+        std::cout << "Skipping signed declaration: " << node.name.valueText() << std::endl;
+        return;
+    }
+    if (dims->size() == 0) {
+        std::cout << "Skipping single-bit declaration: " << node.name.valueText() << std::endl;
+        return;
+    }
+    if (dims->size() > 1) {
+        std::cout << "Skipping multi-dimensional declaration: " << node.name.valueText() << std::endl;
+        return;
+    }
+    // We only want one packed dimension, and no wildcard or queue dimensions
+    auto& dim = (*dims)[0]->specifier->as<RangeDimensionSpecifierSyntax>();
+    // We shouldn't ever have bit selection here but in case we do throw an assert
+    auto& dimSelect = dim.selector->as<RangeSelectSyntax>();
+
+    // Get the left and right bounds of the range and calculate the width -> should be fine to
+    // cast here because (theoretically) concretization should have occurred already
+    auto& left = dimSelect.left->as<LiteralExpressionSyntax>();
+    auto& right = dimSelect.right->as<LiteralExpressionSyntax>();
+
+    int leftVal = tokenToInt(left.literal);
+    int rightVal = tokenToInt(right.literal);
+    int width = std::abs(leftVal - rightVal) + 1;
+
+    if (width <= 1) {
+        std::cout << "Skipping single-bit declaration: " << node.name.valueText() << std::endl;
+        return;
+    }
+
+    shrinkNodes.emplace_back(&node, width); // Insert the node and its width into the vector
 }
 
 std::vector<std::pair<const DeclaratorSyntax*, int>> BitShrinkCollector::getFoundNodes(
@@ -765,8 +787,8 @@ std::vector<std::pair<const BinaryExpressionSyntax*, bool>> BinopCollector::getF
 Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate)
     : tree(tree), shrinkWithIntermediate(shrinkWithIntermediate) {
 
-    // Narrow (default) mode can shrink signed decls; intermediate-wire mode cannot.
-    BitShrinkCollector BSC(!shrinkWithIntermediate);
+    // Narrow (default) mode can shrink signed decls and nets; intermediate-wire mode cannot.
+    BitShrinkCollector BSC(!shrinkWithIntermediate, !shrinkWithIntermediate);
     shrinkNodes = BSC.getFoundNodes(tree);
     cutCount += shrinkNodes.size();
     BSRCount = shrinkNodes.size();
@@ -1097,6 +1119,98 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
     }
     for (const auto* d : targeted) {
         repls.push_back(trivia + modsOut + typeHead + " " + newRange + " " +
+                        trim(std::string(d->toString())) + ";");
+    }
+
+    for (const auto& r : repls)
+        insertBefore(node, parse(r));
+    remove(node);
+}
+
+void Papercutter::handle(const NetDeclarationSyntax& node) {
+    // Nets are only collected in narrow (default) mode; the intermediate-wire path
+    // never targets them, so just descend so initializer expression cuts still fire.
+    if (shrinkWithIntermediate) {
+        visitDefault(node);
+        return;
+    }
+
+    // Same split-and-narrow rewrite as handle(DataDeclarationSyntax): kept
+    // declarators stay at the original width, each shrunk one becomes its own
+    // narrowed net declaration.
+    std::vector<const DeclaratorSyntax*> targeted;
+    std::vector<const DeclaratorSyntax*> kept;
+    for (const auto* decl : node.declarators) {
+        if (runMap.contains(decl))
+            targeted.push_back(decl);
+        else
+            kept.push_back(decl);
+    }
+
+    if (targeted.empty()) {
+        visitDefault(node);
+        return;
+    }
+
+    // Only narrow-able declarators reach runMap, so the range is a single packed
+    // dimension on an IntegerTypeSyntax (`wire logic [7:0]`) or ImplicitTypeSyntax
+    // (bare `wire [7:0]`). Nets with strength/delay were skipped by the collector.
+    Token keyword, signing;
+    const VariableDimensionSyntax* dimNode = nullptr;
+    if (auto* intType = node.type->as_if<IntegerTypeSyntax>()) {
+        keyword = intType->keyword;
+        signing = intType->signing;
+        dimNode = intType->dimensions[0];
+    } else {
+        auto& impType = node.type->as<ImplicitTypeSyntax>();
+        signing = impType.signing;
+        dimNode = impType.dimensions[0];
+    }
+    auto& rsel = dimNode->specifier->as<RangeDimensionSpecifierSyntax>().selector->as<RangeSelectSyntax>();
+    int leftVal = tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal);
+    int rightVal = tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal);
+
+    // Drop one bit off the high end: [7:0] -> [6:0], [0:7] -> [0:6].
+    int newLeft = leftVal, newRight = rightVal;
+    if (leftVal >= rightVal)
+        newLeft = leftVal - 1;
+    else
+        newRight = rightVal - 1;
+
+    std::string origRange = "[" + std::to_string(leftVal) + ":" + std::to_string(rightVal) + "]";
+    std::string newRange = "[" + std::to_string(newLeft) + ":" + std::to_string(newRight) + "]";
+
+    auto trim = [](std::string s) {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos)
+            return std::string();
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return s.substr(b, e - b + 1);
+    };
+
+    std::string trivia;
+    for (const auto& t : node.getFirstToken().trivia())
+        trivia += t.getRawText();
+
+    std::string typeHead = std::string(node.netType.valueText());
+    if (keyword)
+        typeHead += " " + std::string(keyword.valueText());
+    if (signing)
+        typeHead += " " + std::string(signing.valueText());
+
+    std::vector<std::string> repls;
+    if (!kept.empty()) {
+        std::string s = trivia + typeHead + " " + origRange + " ";
+        for (size_t i = 0; i < kept.size(); ++i) {
+            s += trim(std::string(kept[i]->toString()));
+            if (i + 1 < kept.size())
+                s += ", ";
+        }
+        s += ";";
+        repls.push_back(s);
+    }
+    for (const auto* d : targeted) {
+        repls.push_back(trivia + typeHead + " " + newRange + " " +
                         trim(std::string(d->toString())) + ";");
     }
 

@@ -250,8 +250,10 @@ class BitShrinkCollector : public SyntaxVisitor<BitShrinkCollector> {
 private:
     std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
     bool allowSigned; // Signed decls are only shrinkable when narrowing in place (not with intermediate wires)
+    bool allowNets;   // Net decls (wire/tri/...) are only shrinkable when narrowing in place
 public:
-    BitShrinkCollector(bool allowSigned = false) : allowSigned(allowSigned) {}
+    BitShrinkCollector(bool allowSigned = false, bool allowNets = false)
+        : allowSigned(allowSigned), allowNets(allowNets) {}
     void handle(const DeclaratorSyntax&);
     std::vector<std::pair<const DeclaratorSyntax*, int>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
@@ -434,6 +436,7 @@ public:
     std::vector<std::shared_ptr<SyntaxTree>> removeAllBinops();
 
     void handle(const DataDeclarationSyntax& node);
+    void handle(const NetDeclarationSyntax& node);
     void handle(const DeclaratorSyntax& node);
     void handle(const IdentifierNameSyntax& node);
     void handle(const IdentifierSelectNameSyntax& node);
