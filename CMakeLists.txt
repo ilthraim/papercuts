@@ -35,16 +35,10 @@ set(SLANG_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)    # don't need slang tests
 set(SLANG_INCLUDE_INSTALL OFF CACHE BOOL "" FORCE)  # we handle our own install
 set(SLANG_USE_MIMALLOC OFF CACHE BOOL "" FORCE)     # incompatible with python's global symbol visibility requirements
 
-# Pin slang to the commit that added SyntaxRewriter::removeToken/replaceToken
-# (PR #1736, 2026-03-17), which papercuts requires. This commit predates the
-# v11.0 breaking changes (2026-04-28) that moved SyntaxRewriter to its own
-# header and removed the SyntaxKind list enumerators (SyntaxList/TokenList/
-# SeparatedList) papercuts.h relies on. No release tag falls in this window,
-# so we pin to the exact SHA. (Shallow clone is disabled: FetchContent cannot
-# reliably shallow-fetch an arbitrary commit SHA.)
+# Pin slang to a fork that has some clone visitor changes
 FetchContent_Declare(slang
-    GIT_REPOSITORY https://github.com/MikePopoloski/slang.git
-    GIT_TAG        03153b5c6d58c263e1a177872ed40a410f007f9d
+    GIT_REPOSITORY https://github.com/ilthraim/slang.git
+    GIT_TAG        32180a2fc89a490a4f80f47dd2eca8377ccfe8e5
 )
 
 # GCC 13.2.0 hits an internal compiler error in LTO partitioning
