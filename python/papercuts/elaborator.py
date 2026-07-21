@@ -124,6 +124,11 @@ class Emitter:
         # Populated by run(): the module names actually emitted verbatim -- the
         # ignored definitions plus their whole subtree (the opaque region).
         self.verbatim = set()
+        # Populated during emission: definition names with no available body
+        # (only reachable under allow_missing). These become black boxes at the
+        # FV tool -- an opaque, unconstrained boundary on both the golden and
+        # elaborated sides (both derive from the same incomplete file list).
+        self.blackboxed = set()
         # symbol.hierarchicalPath -> flattened path ("stage_1.partial" scoped,
         # "stage_1_partial" flattened). Keyed by hierarchicalPath (not id()):
         # pyslang returns a fresh Python wrapper per access, so object identity
@@ -475,6 +480,7 @@ class Emitter:
         # are taken verbatim from source, so --flatten renaming is NOT applied to
         # them -- a black box wired to a hoisted/renamed generate signal would
         # need manual fixup (uncommon; black boxes usually sit at module scope).
+        self.blackboxed.add(u.definitionName)
         parts = [u.definitionName]
         params = self._uninst_params_text(u)
         if params:
@@ -1071,6 +1077,7 @@ class ElaboratedDesign:
     top: str               # top module name (empty if there is no top instance)
     tops: list             # all top-instance names (usually exactly one)
     verbatim: set          # module names emitted verbatim (the opaque/uncut region)
+    blackboxed: set        # missing-definition module names (opaque FV boundaries)
 
 
 def elaborate_design(files, *, flatten=True, ignore=(), allow_missing=False,
@@ -1104,6 +1111,7 @@ def elaborate_design(files, *, flatten=True, ignore=(), allow_missing=False,
         top=tops[0] if tops else "",
         tops=tops,
         verbatim=set(emitter.verbatim),
+        blackboxed=set(emitter.blackboxed),
     )
 
 

@@ -114,13 +114,19 @@ def write_papercuts_log(
 
 
 # MARK: cut plan
-def write_cut_plan(plan_path: str, modules: list[ModuleCuts]) -> None:
+def write_cut_plan(
+    plan_path: str, modules: list[ModuleCuts], blackboxed: "set[str] | None" = None
+) -> None:
     """Write the planned equivalence tests (one row per cut to be checked).
 
     Emitted after enumeration but before any FV run, so the full test plan --
     every cut and its type -- is visible up front, independent of whether -e is
     used. No-op cuts (byte-identical to the elaborated source) are never checked,
     so they are excluded from the rows and only counted in the header.
+
+    ``blackboxed`` (modules with no definition in the inputs, under
+    --allow-missing-modules) never appear as cut rows -- they have no body to cut
+    -- so they are recorded in a header comment for the permanent record.
     """
     planned = [
         (m.name, run.index, m.cut_infos[run.index][0], m.cut_infos[run.index][1])
@@ -150,6 +156,11 @@ def write_cut_plan(plan_path: str, modules: list[ModuleCuts]) -> None:
             f.write("# by type: " + ", ".join(f"{t} {c}" for t, c in tally.items()) + "\n")
         if excluded:
             f.write(f"# excluded modules (never cut): {', '.join(excluded)}\n")
+        if blackboxed:
+            f.write(
+                f"# black-boxed modules (no definition in inputs): "
+                f"{', '.join(sorted(blackboxed))}\n"
+            )
         f.write(f"# {'module':<{w_mod}}  {'idx':>4}  {'type':<{w_type}}  {'line':>6}\n")
         for mod, idx, ctype, line in planned:
             f.write(f"  {mod:<{w_mod}}  {idx:>4}  {ctype:<{w_type}}  {line:>6}\n")
@@ -206,6 +217,18 @@ async def main():
         "--no-default-excludes",
         action="store_true",
         help="Ignore the exclusions the selected backend recommends by default.",
+    )
+    parser.add_argument(
+        "--allow-missing-modules",
+        action="store_true",
+        help="Accept an incomplete file list: instantiations of modules with no "
+        "definition in the inputs become black boxes (opaque FV boundaries) "
+        "instead of aborting. The original golden and elaborated sides are both "
+        "built from the same inputs, so the missing module is absent from both "
+        "and the equivalence gate compares like-for-like. Verification is then "
+        "modulo those boundaries. NOTE: this suppresses undefined-module errors "
+        "design-wide, so a typo'd or forgotten module silently becomes a black "
+        "box -- check the reported black-box list.",
     )
     parser.add_argument(
         "--fold-constants",
@@ -268,9 +291,14 @@ async def main():
     status("Elaborating design (unroll + flatten + concretize)...")
     try:
         elab = elaborate_design(args.input_files, flatten=True, ignore=exclude_patterns,
-                                fold_constants=args.fold_constants)
+                                fold_constants=args.fold_constants,
+                                allow_missing=args.allow_missing_modules)
     except (ElaborationError, EmitError) as e:
-        raise SystemExit(f"FATAL: elaboration failed: {e}")
+        hint = ""
+        if not args.allow_missing_modules:
+            hint = (" If the file list is intentionally incomplete, re-run with "
+                    "--allow-missing-modules to black-box the absent modules.")
+        raise SystemExit(f"FATAL: elaboration failed: {e}{hint}")
 
     if len(elab.tops) != 1:
         raise SystemExit(
@@ -278,6 +306,16 @@ async def main():
         )
     top_name = elab.top
     status(f"Elaborated top: {top_name}")
+
+    # Surface black-boxed (missing-definition) modules. These are opaque FV
+    # boundaries on both sides of every check; listing them lets the user catch a
+    # typo'd/forgotten module that silently became a black box (see the
+    # --allow-missing-modules footgun note).
+    if elab.blackboxed:
+        status(
+            f"black-boxed {len(elab.blackboxed)} module(s) with no definition "
+            f"in the inputs: {', '.join(sorted(elab.blackboxed))}"
+        )
 
     # The elaborated whole-design source is a single self-contained blob (all
     # specialized submodules + verbatim boundaries in one file). Keep it in its
@@ -509,7 +547,7 @@ async def main():
 
     # Pre-cut test plan: every planned cut and its type, before any FV runs.
     plan_path = f"{output_dir}/papercuts.plan.log"
-    write_cut_plan(plan_path, modules)
+    write_cut_plan(plan_path, modules, blackboxed=elab.blackboxed)
     status(f"Cut plan ({len(all_runs)} planned tests) written to {plan_path}")
 
     if not args.check_equivalence:
