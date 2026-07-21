@@ -63,7 +63,7 @@ class _LiveRef(Exception):
 # already folded, and NamedValue is handled by its own inlining logic.
 FOLDABLE_KINDS = {
     "BinaryOp", "UnaryOp", "ConditionalOp", "ElementSelect", "RangeSelect",
-    "Concatenation", "Replication",
+    "Concatenation", "Replication", "MemberAccess",
 }
 
 
@@ -191,6 +191,14 @@ class Emitter:
             self._emit_package(pkg)
             self.emit()
 
+        # `$unit`-scope declarations (typedefs, params) declared at file scope
+        # rather than inside a package. These are referenced by the specialized
+        # modules (e.g. a struct type used as a parameter type), so they must be
+        # emitted before the modules that use them, or the output won't compile.
+        for cu in getattr(root, "compilationUnits", ()):
+            if self._emit_compilation_unit(cu):
+                self.emit()
+
         # One emission unit per instance -- no dedup by definition name. Two
         # instances of the same definition with different parameter values emit
         # two distinct, specialized modules. Each unit is either
@@ -302,6 +310,23 @@ class Emitter:
                 raise EmitError(f"unsupported package member kind: {k!r}")
         self.level -= 1
         self.emit("endpackage")
+
+    def _emit_compilation_unit(self, cu):
+        # Emit `$unit`-scope members at top level (no package wrapper). Handles the
+        # same declaration kinds as a package body; other members (imports, etc.)
+        # are dropped because elaboration has already resolved every reference to
+        # the emitted declaration. Returns True if anything was emitted.
+        emitted = False
+        for m in cu:
+            k = kind(m)
+            if k == "TypeAlias":
+                self._emit_typedef(m)
+                emitted = True
+            elif k == "Parameter":
+                self.emit(self._parameter_decl(m) + ";")
+                emitted = True
+            # TransparentMember (enum values), Genvar, imports, etc.: skip.
+        return emitted
 
     # --- modules -------------------------------------------------------------
 
@@ -431,16 +456,35 @@ class Emitter:
 
     def _emit_typedef(self, alias):
         canonical = alias.canonicalType
-        if kind(canonical) == "Enum" or type(canonical).__name__ == "EnumType":
+        ck = kind(canonical)
+        if ck == "Enum" or type(canonical).__name__ == "EnumType":
             base = tname(canonical.baseType) if hasattr(canonical, "baseType") else ""
             base_str = (" " + base) if base else ""
             values = []
             for ev in canonical:
                 values.append(f"{ev.name} = {self._render_constant(ev.value)}")
             self.emit(f"typedef enum{base_str} {{ {', '.join(values)} }} {alias.name};")
+        elif ck in ("PackedStructType", "UnpackedStructType"):
+            # Render the struct from its fields rather than string-munging slang's
+            # type repr: an unpacked-array member serializes as `logic[7:0]$[0:1]`,
+            # where the `$` separates the element type from the unpacked dimension,
+            # which belongs after the member name. decl() already relocates it.
+            self.emit(self._struct_typedef(alias.name, canonical))
         else:
-            target = self._simplify_typename(tname(canonical))
-            self.emit(f"typedef {target} {alias.name};")
+            target = tname(canonical)
+            if "}" in target:  # union / anonymous aggregate body: keep verbatim
+                self.emit(f"typedef {self._simplify_typename(target)} {alias.name};")
+            else:  # scalar or unpacked-array typedef -- move any `$` dims after name
+                prefix, suffix = self.split_type(target)
+                self.emit(f"typedef {prefix} {alias.name}{suffix};")
+
+    def _struct_typedef(self, name, canonical):
+        keyword = "struct packed" if kind(canonical) == "PackedStructType" else "struct"
+        if keyword == "struct packed" and getattr(canonical, "isSigned", False):
+            keyword += " signed"
+        fields = [self.decl(tname(f.type), f.name) + ";"
+                  for f in canonical if kind(f) == "Field"]
+        return f"typedef {keyword} {{ {' '.join(fields)} }} {name};"
 
     # --- instances -----------------------------------------------------------
 
@@ -847,7 +891,7 @@ class Emitter:
         value = ctx.tryEval(node)
         if value is None or value.value is None:  # empty ConstantValue == failure
             return None
-        return str(value)
+        return self._render_constant(value)
 
     def _const_param_text(self, sym):
         """Rendered constant value of a parameter/localparam, or None if it has
@@ -995,6 +1039,13 @@ class Emitter:
         return ""
 
     def _render_constant(self, value):
+        # Aggregate constants (structs, packed/unpacked arrays) stringify as
+        # `[a,b,c]` in pyslang, which is not legal SystemVerilog. Emit them as an
+        # assignment pattern `'{a, b, c}` instead, recursing so nested aggregates
+        # (arrays of structs, multi-dim arrays) each get their own pattern. Scalar
+        # values (SVInt, real, string) render fine via str().
+        if getattr(value, "isContainer", None) is not None and value.isContainer():
+            return "'{" + ", ".join(self._render_constant(e) for e in value.value) + "}"
         return str(value)
 
 
