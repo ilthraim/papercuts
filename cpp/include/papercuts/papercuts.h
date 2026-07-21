@@ -213,6 +213,18 @@ template<typename TDerived>
 const Trivia PapercutsRewriter<TDerived>::NewLine{TriviaKind::EndOfLine, "\n"sv};
 
 // MARK: BitShrink
+// One shrinkable packed dimension of a declarator. A multi-dimensional vector
+// like `logic [3:0][7:0] x;` yields one target per packed dimension (dimIndex 0
+// -> [3:0], dimIndex 1 -> [7:0]); a plain `logic [7:0] y;` yields a single
+// target with dimIndex 0. `width` is that dimension's bit count, kept for cut
+// reporting and the legacy intermediate-wire strategy. `dimIndex` is the index
+// into the type's packed dimension list (0 = leftmost/outermost).
+struct BitShrinkTarget {
+    const DeclaratorSyntax* decl;
+    int width;
+    int dimIndex;
+};
+
 class BitMuxer : public PapercutsRewriter<BitMuxer> {
 private:
     bool initialized = false;
@@ -230,7 +242,7 @@ public:
 
 class BitShrinker : public PapercutsRewriter<BitShrinker> {
 private:
-    std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
+    std::vector<BitShrinkTarget> shrinkNodes; // One entry per shrinkable declarator (legacy single-dim only)
     std::unordered_map<const DeclaratorSyntax*, int> runMap;
     std::unordered_set<std::string> nodesToShrink; // Set to store the names of the nodes we want to shrink bits in
     const std::shared_ptr<SyntaxTree> tree; // Store the current tree we're shrinking bits in
@@ -248,14 +260,15 @@ public:
 
 class BitShrinkCollector : public SyntaxVisitor<BitShrinkCollector> {
 private:
-    std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
-    bool allowSigned; // Signed decls are only shrinkable when narrowing in place (not with intermediate wires)
-    bool allowNets;   // Net decls (wire/tri/...) are only shrinkable when narrowing in place
+    std::vector<BitShrinkTarget> shrinkNodes; // One entry per shrinkable packed dimension
+    bool allowSigned;   // Signed decls are only shrinkable when narrowing in place (not with intermediate wires)
+    bool allowNets;     // Net decls (wire/tri/...) are only shrinkable when narrowing in place
+    bool allowMultiDim; // Multi-packed-dim vectors are only shrinkable when narrowing in place
 public:
-    BitShrinkCollector(bool allowSigned = false, bool allowNets = false)
-        : allowSigned(allowSigned), allowNets(allowNets) {}
+    BitShrinkCollector(bool allowSigned = false, bool allowNets = false, bool allowMultiDim = false)
+        : allowSigned(allowSigned), allowNets(allowNets), allowMultiDim(allowMultiDim) {}
     void handle(const DeclaratorSyntax&);
-    std::vector<std::pair<const DeclaratorSyntax*, int>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
+    std::vector<BitShrinkTarget> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
 // MARK: Ternary
@@ -393,8 +406,11 @@ private:
     bool shrinkWithIntermediate = false;
 
     // Bit shrinker variables
-    std::vector<std::pair<const DeclaratorSyntax*, int>> shrinkNodes; // Vector to store the width of each DeclaratorSyntax node
-    std::unordered_map<const DeclaratorSyntax*, int> runMap;
+    std::vector<BitShrinkTarget> shrinkNodes; // One entry per shrinkable packed dimension (order = cut order)
+    // Active cut(s), keyed by declarator -> the packed dimensions to narrow this
+    // run. A vector (not a single value) so several dimensions of one signal can
+    // be narrowed together, e.g. combining two dim-cuts of `logic [3:0][7:0] x`.
+    std::unordered_map<const DeclaratorSyntax*, std::vector<BitShrinkTarget>> runMap;
     std::unordered_set<std::string> nodesToShrink; // Set to store the names of the nodes we want to shrink bits in
 
     // Ternary remover variables

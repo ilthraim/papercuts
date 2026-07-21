@@ -186,8 +186,8 @@ void BitMuxer::initialize(const std::shared_ptr<SyntaxTree> tree) {
     widthMap.clear();
     BitShrinkCollector collector;
     auto widthMapNodes = collector.getFoundNodes(tree);
-    for (const auto& [node, width] : widthMapNodes) {
-        widthMap[std::string(node->name.valueText())] = width;
+    for (const auto& t : widthMapNodes) {
+        widthMap[std::string(t.decl->name.valueText())] = t.width;
     }
 
     initialized = true;
@@ -271,11 +271,11 @@ std::vector<std::shared_ptr<SyntaxTree>> BitShrinker::shrinkAllBits() {
     nodesToShrink.clear();
     runMap.clear();
 
-    for (const auto& pair : shrinkNodes) {
+    for (const auto& t : shrinkNodes) {
         nodesToShrink.clear();
         runMap.clear();
-        nodesToShrink.emplace(pair.first->name.valueText());
-        runMap.emplace(pair);
+        nodesToShrink.emplace(t.decl->name.valueText());
+        runMap.emplace(t.decl, t.width);
         auto newTree = transform(tree);
         newTrees.emplace_back(newTree);
     }
@@ -291,8 +291,8 @@ std::shared_ptr<SyntaxTree> BitShrinker::shrinkBitsIndex(const std::vector<size_
         if (i >= cutCount) {
             throw std::out_of_range("Index out of range for shrinkBitsIndex");
         }
-        nodesToShrink.emplace(shrinkNodes[i].first->name.valueText());
-        runMap.emplace(shrinkNodes[i]);
+        nodesToShrink.emplace(shrinkNodes[i].decl->name.valueText());
+        runMap.emplace(shrinkNodes[i].decl, shrinkNodes[i].width);
     }
 
     return transform(tree);
@@ -409,33 +409,45 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
         std::cout << "Skipping single-bit declaration: " << node.name.valueText() << std::endl;
         return;
     }
-    if (dims->size() > 1) {
+    if (!allowMultiDim && dims->size() > 1) {
+        // Only narrow mode knows how to rebuild a multi-packed-dim range in place;
+        // the intermediate-wire strategy can't, so it still skips these.
         std::cout << "Skipping multi-dimensional declaration: " << node.name.valueText() << std::endl;
         return;
     }
-    // We only want one packed dimension, and no wildcard or queue dimensions
-    auto& dim = (*dims)[0]->specifier->as<RangeDimensionSpecifierSyntax>();
-    // We shouldn't ever have bit selection here but in case we do throw an assert
-    auto& dimSelect = dim.selector->as<RangeSelectSyntax>();
 
-    // Get the left and right bounds of the range and calculate the width -> should be fine to
-    // cast here because (theoretically) concretization should have occurred already
-    auto& left = dimSelect.left->as<LiteralExpressionSyntax>();
-    auto& right = dimSelect.right->as<LiteralExpressionSyntax>();
+    // Emit one shrink target per packed dimension. Narrow mode shrinks each
+    // dimension independently ([3:0][7:0] -> a cut for [3:0] and a cut for [7:0]);
+    // single-dim mode only ever sees one dimension here.
+    for (size_t di = 0; di < dims->size(); ++di) {
+        // Only simple literal ranges are shrinkable. Anything else (wildcard/queue
+        // dimensions, or bounds concretization left non-literal) is skipped per
+        // dimension rather than throwing, so the other dimensions still yield cuts.
+        auto* dimSpec = (*dims)[di]->specifier->as_if<RangeDimensionSpecifierSyntax>();
+        if (!dimSpec)
+            continue;
+        auto* dimSelect = dimSpec->selector->as_if<RangeSelectSyntax>();
+        if (!dimSelect)
+            continue;
+        auto* left = dimSelect->left->as_if<LiteralExpressionSyntax>();
+        auto* right = dimSelect->right->as_if<LiteralExpressionSyntax>();
+        if (!left || !right)
+            continue;
 
-    int leftVal = tokenToInt(left.literal);
-    int rightVal = tokenToInt(right.literal);
-    int width = std::abs(leftVal - rightVal) + 1;
+        int leftVal = tokenToInt(left->literal);
+        int rightVal = tokenToInt(right->literal);
+        int width = std::abs(leftVal - rightVal) + 1;
 
-    if (width <= 1) {
-        std::cout << "Skipping single-bit declaration: " << node.name.valueText() << std::endl;
-        return;
+        if (width <= 1) {
+            std::cout << "Skipping single-bit dimension of declaration: " << node.name.valueText() << std::endl;
+            continue;
+        }
+
+        shrinkNodes.emplace_back(BitShrinkTarget{&node, width, static_cast<int>(di)});
     }
-
-    shrinkNodes.emplace_back(&node, width); // Insert the node and its width into the vector
 }
 
-std::vector<std::pair<const DeclaratorSyntax*, int>> BitShrinkCollector::getFoundNodes(
+std::vector<BitShrinkTarget> BitShrinkCollector::getFoundNodes(
     const std::shared_ptr<SyntaxTree> tree) {
     tree->root().visit(*this);
 
@@ -787,8 +799,9 @@ std::vector<std::pair<const BinaryExpressionSyntax*, bool>> BinopCollector::getF
 Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate)
     : tree(tree), shrinkWithIntermediate(shrinkWithIntermediate) {
 
-    // Narrow (default) mode can shrink signed decls and nets; intermediate-wire mode cannot.
-    BitShrinkCollector BSC(!shrinkWithIntermediate, !shrinkWithIntermediate);
+    // Narrow (default) mode can shrink signed decls, nets, and multi-packed-dim
+    // vectors; intermediate-wire mode cannot.
+    BitShrinkCollector BSC(!shrinkWithIntermediate, !shrinkWithIntermediate, !shrinkWithIntermediate);
     shrinkNodes = BSC.getFoundNodes(tree);
     cutCount += shrinkNodes.size();
     BSRCount = shrinkNodes.size();
@@ -856,9 +869,11 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
         }
         else if (i < TRCount + IRCount + BSRCount) {
             size_t nodeIndex = i - TRCount - IRCount;
-            nodesToShrink.emplace(shrinkNodes[nodeIndex].first->name.valueText());
-            std::cout << "Adding node to shrink: " << shrinkNodes[nodeIndex].first->name.valueText() << " with width " << shrinkNodes[nodeIndex].second << std::endl;
-            runMap.emplace(shrinkNodes[nodeIndex]);
+            const auto& t = shrinkNodes[nodeIndex];
+            nodesToShrink.emplace(t.decl->name.valueText());
+            std::cout << "Adding node to shrink: " << t.decl->name.valueText() << " dim " << t.dimIndex
+                      << " with width " << t.width << std::endl;
+            runMap[t.decl].push_back(t);
         }
         else if (i < TRCount + IRCount + BSRCount + CRCount) {
             size_t nodeIndex = i - TRCount - IRCount - BSRCount;
@@ -934,9 +949,10 @@ std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
         info.emplace_back("if(keep-false)", line);
     }
 
-    // Bit shrinks: 1 cut per declarator.
-    for (const auto& pair : shrinkNodes) {
-        info.emplace_back("bitshrink", sm.getLineNumber(pair.first->name.location()));
+    // Bit shrinks: 1 cut per shrinkable packed dimension (a multi-dim vector
+    // contributes one entry per dimension). Line is the declarator's name.
+    for (const auto& t : shrinkNodes) {
+        info.emplace_back("bitshrink", sm.getLineNumber(t.decl->name.location()));
     }
 
     // Cases: 1 cut per prunable item (prune the item, falling through to default).
@@ -957,11 +973,11 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::shrinkAllBits() {
     nodesToShrink.clear();
     runMap.clear();
 
-    for (const auto& pair : shrinkNodes) {
+    for (const auto& t : shrinkNodes) {
         nodesToShrink.clear();
         runMap.clear();
-        nodesToShrink.emplace(pair.first->name.valueText());
-        runMap.emplace(pair);
+        nodesToShrink.emplace(t.decl->name.valueText());
+        runMap[t.decl].push_back(t);
         auto newTree = transform(tree);
         newTrees.emplace_back(newTree);
     }
@@ -1037,6 +1053,44 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::removeAllBinops() {
     return newTrees;
 }
 
+namespace {
+// Trim ASCII whitespace off both ends of a string.
+std::string trimWs(std::string s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos)
+        return std::string();
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+// Build the packed-range string for a declaration's shared type, dropping one bit
+// off the high end of every dimension whose index is in `narrowIdx`. e.g. dims
+// [3:0][7:0] with narrowIdx={1} -> "[3:0][6:0]". Non-narrowed dimensions are
+// emitted verbatim (via toString) so any bound form survives untouched; narrowed
+// dimensions are recomputed from their literal bounds (the collector only ever
+// targets simple literal ranges, so the casts here are safe).
+std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
+                              const std::unordered_set<int>& narrowIdx) {
+    std::string out;
+    for (size_t di = 0; di < dims.size(); ++di) {
+        if (narrowIdx.contains(static_cast<int>(di))) {
+            auto& rsel = dims[di]->specifier->as<RangeDimensionSpecifierSyntax>().selector->as<RangeSelectSyntax>();
+            int leftVal = tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal);
+            int rightVal = tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal);
+            // Drop one bit off the high end: [7:0] -> [6:0], [0:7] -> [0:6].
+            if (leftVal >= rightVal)
+                leftVal -= 1;
+            else
+                rightVal -= 1;
+            out += "[" + std::to_string(leftVal) + ":" + std::to_string(rightVal) + "]";
+        } else {
+            out += trimWs(std::string(dims[di]->toString()));
+        }
+    }
+    return out;
+}
+} // namespace
+
 void Papercutter::handle(const DataDeclarationSyntax& node) {
     // In legacy intermediate-wire mode the per-declarator handler does all the
     // work; just descend so it fires.
@@ -1065,31 +1119,12 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
         return;
     }
 
-    // Only declarators the collector accepted (single packed dimension, unsigned
-    // logic) ever land in runMap, so the shared type is guaranteed narrow-able.
+    // Only declarators the collector accepted (unsigned logic/reg/bit) ever land
+    // in runMap, so the shared type is guaranteed narrow-able. It may carry more
+    // than one packed dimension (e.g. `logic [3:0][7:0] x;`); each targeted cut
+    // names the specific dimension to narrow via runMap.
     auto& intType = node.type->as<IntegerTypeSyntax>();
-    auto& dim0 = intType.dimensions[0]->specifier->as<RangeDimensionSpecifierSyntax>();
-    auto& rsel = dim0.selector->as<RangeSelectSyntax>();
-    int leftVal = tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal);
-    int rightVal = tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal);
-
-    // Drop one bit off the high end: [7:0] -> [6:0], [0:7] -> [0:6].
-    int newLeft = leftVal, newRight = rightVal;
-    if (leftVal >= rightVal)
-        newLeft = leftVal - 1;
-    else
-        newRight = rightVal - 1;
-
-    std::string origRange = "[" + std::to_string(leftVal) + ":" + std::to_string(rightVal) + "]";
-    std::string newRange = "[" + std::to_string(newLeft) + ":" + std::to_string(newRight) + "]";
-
-    auto trim = [](std::string s) {
-        size_t b = s.find_first_not_of(" \t\r\n");
-        if (b == std::string::npos)
-            return std::string();
-        size_t e = s.find_last_not_of(" \t\r\n");
-        return s.substr(b, e - b + 1);
-    };
+    auto& dims = intType.dimensions;
 
     // Leading trivia (newline + indentation) of the whole declaration, reused so
     // each emitted declaration lands on its own indented line.
@@ -1097,12 +1132,14 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
     for (const auto& t : node.getFirstToken().trivia())
         trivia += t.getRawText();
 
-    std::string mods = trim(std::string(node.modifiers.toString()));
+    std::string mods = trimWs(std::string(node.modifiers.toString()));
     std::string modsOut = mods.empty() ? "" : mods + " ";
 
     std::string typeHead = std::string(intType.keyword.valueText());
     if (intType.signing)
         typeHead += " " + std::string(intType.signing.valueText());
+
+    std::string origRange = buildPackedRanges(dims, {});
 
     // Preserve source order: kept declarators first (original width), then one
     // narrowed declaration per shrunk declarator.
@@ -1110,7 +1147,7 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
     if (!kept.empty()) {
         std::string s = trivia + modsOut + typeHead + " " + origRange + " ";
         for (size_t i = 0; i < kept.size(); ++i) {
-            s += trim(std::string(kept[i]->toString()));
+            s += trimWs(std::string(kept[i]->toString()));
             if (i + 1 < kept.size())
                 s += ", ";
         }
@@ -1118,8 +1155,13 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
         repls.push_back(s);
     }
     for (const auto* d : targeted) {
-        repls.push_back(trivia + modsOut + typeHead + " " + newRange + " " +
-                        trim(std::string(d->toString())) + ";");
+        // The dimensions to narrow for this declarator (usually one; more if the
+        // caller combined several dim-cuts of the same signal in one tree).
+        std::unordered_set<int> narrowIdx;
+        for (const auto& t : runMap[d])
+            narrowIdx.insert(t.dimIndex);
+        repls.push_back(trivia + modsOut + typeHead + " " + buildPackedRanges(dims, narrowIdx) + " " +
+                        trimWs(std::string(d->toString())) + ";");
     }
 
     for (const auto& r : repls)
@@ -1152,41 +1194,21 @@ void Papercutter::handle(const NetDeclarationSyntax& node) {
         return;
     }
 
-    // Only narrow-able declarators reach runMap, so the range is a single packed
-    // dimension on an IntegerTypeSyntax (`wire logic [7:0]`) or ImplicitTypeSyntax
-    // (bare `wire [7:0]`). Nets with strength/delay were skipped by the collector.
+    // Only narrow-able declarators reach runMap, so the packed dimensions live on
+    // an IntegerTypeSyntax (`wire logic [7:0]`) or ImplicitTypeSyntax (bare
+    // `wire [7:0]`), and there may be more than one (`wire [3:0][7:0]`). Nets with
+    // strength/delay were skipped by the collector.
     Token keyword, signing;
-    const VariableDimensionSyntax* dimNode = nullptr;
+    const SyntaxList<VariableDimensionSyntax>* dims = nullptr;
     if (auto* intType = node.type->as_if<IntegerTypeSyntax>()) {
         keyword = intType->keyword;
         signing = intType->signing;
-        dimNode = intType->dimensions[0];
+        dims = &intType->dimensions;
     } else {
         auto& impType = node.type->as<ImplicitTypeSyntax>();
         signing = impType.signing;
-        dimNode = impType.dimensions[0];
+        dims = &impType.dimensions;
     }
-    auto& rsel = dimNode->specifier->as<RangeDimensionSpecifierSyntax>().selector->as<RangeSelectSyntax>();
-    int leftVal = tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal);
-    int rightVal = tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal);
-
-    // Drop one bit off the high end: [7:0] -> [6:0], [0:7] -> [0:6].
-    int newLeft = leftVal, newRight = rightVal;
-    if (leftVal >= rightVal)
-        newLeft = leftVal - 1;
-    else
-        newRight = rightVal - 1;
-
-    std::string origRange = "[" + std::to_string(leftVal) + ":" + std::to_string(rightVal) + "]";
-    std::string newRange = "[" + std::to_string(newLeft) + ":" + std::to_string(newRight) + "]";
-
-    auto trim = [](std::string s) {
-        size_t b = s.find_first_not_of(" \t\r\n");
-        if (b == std::string::npos)
-            return std::string();
-        size_t e = s.find_last_not_of(" \t\r\n");
-        return s.substr(b, e - b + 1);
-    };
 
     std::string trivia;
     for (const auto& t : node.getFirstToken().trivia())
@@ -1198,11 +1220,13 @@ void Papercutter::handle(const NetDeclarationSyntax& node) {
     if (signing)
         typeHead += " " + std::string(signing.valueText());
 
+    std::string origRange = buildPackedRanges(*dims, {});
+
     std::vector<std::string> repls;
     if (!kept.empty()) {
         std::string s = trivia + typeHead + " " + origRange + " ";
         for (size_t i = 0; i < kept.size(); ++i) {
-            s += trim(std::string(kept[i]->toString()));
+            s += trimWs(std::string(kept[i]->toString()));
             if (i + 1 < kept.size())
                 s += ", ";
         }
@@ -1210,8 +1234,11 @@ void Papercutter::handle(const NetDeclarationSyntax& node) {
         repls.push_back(s);
     }
     for (const auto* d : targeted) {
-        repls.push_back(trivia + typeHead + " " + newRange + " " +
-                        trim(std::string(d->toString())) + ";");
+        std::unordered_set<int> narrowIdx;
+        for (const auto& t : runMap[d])
+            narrowIdx.insert(t.dimIndex);
+        repls.push_back(trivia + typeHead + " " + buildPackedRanges(*dims, narrowIdx) + " " +
+                        trimWs(std::string(d->toString())) + ";");
     }
 
     for (const auto& r : repls)
@@ -1235,7 +1262,8 @@ void Papercutter::handle(const DeclaratorSyntax& node) {
     }
     if (runMap.contains(&node)) {
         auto newName = std::string(node.name.valueText()) + "_papercuts";
-        int newWidth = runMap[&node] - 1; // Get the width of the node and calculate the new width after shrinking
+        // Wire mode is single-dim only, so this declarator has exactly one target.
+        int newWidth = runMap[&node].front().width - 1; // Calculate the new width after shrinking
         auto* parentDecl = node.parent->as_if<DataDeclarationSyntax>();
         if (!parentDecl) {
             return; // If the parent of this DeclaratorSyntax node is not a DataDeclarationSyntax node, we can skip it
