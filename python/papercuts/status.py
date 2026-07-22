@@ -28,10 +28,22 @@ import time
 #: File the pipeline writes and the viewer reads, inside the output directory.
 STATUS_FILENAME = "status.json"
 
+#: Human-readable, continuously-rewritten per-type stats (crash-survivable).
+STATS_FILENAME = "papercuts.stats.log"
+
 # Lifecycle a tracked equivalence check moves through.
 PENDING = "pending"
 RUNNING = "running"
 DONE = "done"
+
+
+def _family(ctype: str) -> str:
+    """Coarse cut family for roll-ups: the part before the first '('.
+
+    ``binop(mul,keep-left)`` -> ``binop``; ``ternary(keep-true)`` -> ``ternary``;
+    ``bitshrink`` -> ``bitshrink``.
+    """
+    return ctype.split("(", 1)[0] if ctype else "-"
 
 
 # MARK: Emitter
@@ -52,11 +64,26 @@ class StatusWriter:
     def __init__(self, out_dir: str) -> None:
         self._path = os.path.join(out_dir, STATUS_FILENAME)
         self._tmp = self._path + ".tmp"
+        self._stats_path = os.path.join(out_dir, STATS_FILENAME)
+        self._stats_tmp = self._stats_path + ".tmp"
         self._pid = os.getpid()
         self._started = time.time()
         self._phase = ""
         self._tasks: dict = {}  # task_id -> row dict (insertion-ordered)
+        # Per-type running aggregate, keyed by ctype (empty ctypes -- self-check,
+        # gate, consolidate -- are not counted here). Updated on register/finish
+        # and flushed with every snapshot so a killed run leaves current per-type
+        # success counts on disk. "pending" is derived (planned - proven - failed).
+        self._by_type: dict[str, dict] = {}  # ctype -> {planned, proven, failed, verdicts}
+        # Load-bearing gate verdicts, surfaced in the stats file for context.
+        self._gate: "tuple[str | None, bool] | None" = None
+        self._selfcheck: "tuple[str | None, bool] | None" = None
         self._flush()
+
+    def _bump_type(self, ctype: str) -> dict:
+        return self._by_type.setdefault(
+            ctype, {"planned": 0, "proven": 0, "failed": 0, "verdicts": {}}
+        )
 
     def set_phase(self, phase: str) -> None:
         """Record the pipeline's current high-level phase (for the header)."""
@@ -79,6 +106,8 @@ class StatusWriter:
             "verdict": None,
             "valid": False,
         }
+        if ctype:
+            self._bump_type(ctype)["planned"] += 1
         self._flush()
 
     def start(self, task_id, phase: str = "", label: str = "", ctype: str = "") -> None:
@@ -104,7 +133,43 @@ class StatusWriter:
         t["end"] = time.time()
         t["verdict"] = verdict
         t["valid"] = bool(valid)
+
+        # Fold into the per-type aggregate (cut checks only) and remember the
+        # load-bearing gate/self-check verdicts for the stats header.
+        ctype = t.get("ctype")
+        if ctype:
+            agg = self._bump_type(ctype)
+            if valid:
+                agg["proven"] += 1
+            else:
+                agg["failed"] += 1
+                # Bucket only failures by verdict, so "failed by verdict" (cex vs
+                # inconclusive vs error) stays a clean breakdown of the failures.
+                key = verdict or "unknown"
+                agg["verdicts"][key] = agg["verdicts"].get(key, 0) + 1
+        if t.get("phase") == "gate":
+            self._gate = (verdict, bool(valid))
+        elif t.get("phase") == "selfcheck":
+            self._selfcheck = (verdict, bool(valid))
+
         self._flush()
+
+    def _totals(self) -> dict:
+        """Grand totals across all counted (cut) types."""
+        planned = sum(a["planned"] for a in self._by_type.values())
+        proven = sum(a["proven"] for a in self._by_type.values())
+        failed = sum(a["failed"] for a in self._by_type.values())
+        verdicts: dict[str, int] = {}
+        for a in self._by_type.values():
+            for k, v in a["verdicts"].items():
+                verdicts[k] = verdicts.get(k, 0) + v
+        return {
+            "planned": planned,
+            "proven": proven,
+            "failed": failed,
+            "pending": planned - proven - failed,
+            "verdicts": verdicts,
+        }
 
     def _flush(self) -> None:
         snapshot = {
@@ -113,10 +178,83 @@ class StatusWriter:
             "updated_at": time.time(),
             "phase": self._phase,
             "tasks": list(self._tasks.values()),
+            "by_type": self._by_type,
+            "totals": self._totals(),
+            "gate": self._gate,
+            "selfcheck": self._selfcheck,
         }
         with open(self._tmp, "w") as f:
             json.dump(snapshot, f)
         os.replace(self._tmp, self._path)  # atomic on POSIX
+        self._write_stats_log()
+
+    def _write_stats_log(self) -> None:
+        """Rewrite the human-readable per-type stats file, atomically.
+
+        Bounded (one row per cut sub-type plus family/total roll-ups), so
+        rewriting it on every transition is cheap -- unlike the full per-cut log.
+        Always current on disk, so a run that is killed mid-check still leaves an
+        up-to-date success-per-type breakdown behind.
+        """
+        totals = self._totals()
+        complete = self._phase == "done"
+        updated = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+
+        def pending(a: dict) -> int:
+            return a["planned"] - a["proven"] - a["failed"]
+
+        # Family roll-up (binop/ternary/if/case/bitshrink).
+        fam: dict[str, dict] = {}
+        for ctype, a in self._by_type.items():
+            f = fam.setdefault(_family(ctype), {"planned": 0, "proven": 0, "failed": 0})
+            f["planned"] += a["planned"]
+            f["proven"] += a["proven"]
+            f["failed"] += a["failed"]
+
+        subtypes = sorted(self._by_type.items())
+        families = sorted(fam.items())
+        w_type = max([len("TYPE")] + [len(t) for t in self._by_type] + [len("TOTAL")])
+        w_fam = max([len("FAMILY")] + [len(f) for f in fam], default=len("FAMILY"))
+
+        def verdict_str(vd: dict) -> str:
+            return "  ".join(f"{k} {v}" for k, v in sorted(vd.items())) or "-"
+
+        lines = [
+            f"# papercuts stats — phase {self._phase or '-'} · pid {self._pid} · "
+            f"updated {updated} · STATUS: {'complete' if complete else 'running'}",
+        ]
+        gate = self._gate[0] if self._gate else "-"
+        selfc = self._selfcheck[0] if self._selfcheck else "-"
+        lines.append(f"# self-check: {selfc}   gate: {gate}")
+        lines.append(
+            f"# {'TYPE':<{w_type}}  {'planned':>7}  {'proven':>6}  "
+            f"{'failed':>6}  {'pending':>7}"
+        )
+        for ctype, a in subtypes:
+            lines.append(
+                f"  {ctype:<{w_type}}  {a['planned']:>7}  {a['proven']:>6}  "
+                f"{a['failed']:>6}  {pending(a):>7}"
+            )
+        lines.append("#")
+        lines.append(
+            f"# by family: {'FAMILY':<{w_fam}}  {'planned':>7}  {'proven':>6}  "
+            f"{'failed':>6}  {'pending':>7}"
+        )
+        for f, a in families:
+            lines.append(
+                f"  {f:<{w_fam}}  {a['planned']:>7}  {a['proven']:>6}  "
+                f"{a['failed']:>6}  {a['planned'] - a['proven'] - a['failed']:>7}"
+            )
+        lines.append("#")
+        lines.append(
+            f"  {'TOTAL':<{w_type}}  {totals['planned']:>7}  {totals['proven']:>6}  "
+            f"{totals['failed']:>6}  {totals['pending']:>7}"
+        )
+        lines.append(f"# failed by verdict: {verdict_str(totals['verdicts'])}")
+
+        with open(self._stats_tmp, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(self._stats_tmp, self._stats_path)  # atomic on POSIX
 
 
 # MARK: Viewer

@@ -8,8 +8,10 @@ from pyslang.syntax import SyntaxTree
 
 import argparse
 import fnmatch
+import json
 import os
 import shutil
+import time
 import subprocess
 import asyncio
 
@@ -36,6 +38,22 @@ class ModuleCuts:
     runs: list[Run] = field(default_factory=list)
     excluded: bool = False     # kept in the golden source but never cut
     noops: list[int] = field(default_factory=list)  # cut indices identical to source (never FVed)
+
+
+# MARK: results stream
+#: Append-only, one-JSON-object-per-line record of every finished check. Written
+#: incrementally (and flushed) as checks complete, so a run that is killed or
+#: crashes mid-flight still leaves a complete record of every check done so far --
+#: unlike papercuts.log, which is only written once at the end. Post-process into
+#: any table; the live per-type roll-up lives in papercuts.stats.json/.log.
+RESULTS_FILENAME = "papercuts.results.jsonl"
+
+
+def append_result(path: str, rec: dict) -> None:
+    """Append one result record as a JSON line and flush it to disk."""
+    with open(path, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
 
 
 # MARK: papercuts.log
@@ -100,6 +118,65 @@ def write_papercuts_log(
             f.write(
                 f"  {mod:<{w_mod}}  {idx:>4}  {ctype:<{w_type}}  {line:>6}  {v}\n"
             )
+
+        # Per-type success breakdown (only meaningful once checks have run). This
+        # is the final, authoritative version of the live papercuts.stats.log:
+        # planned/proven/failed per cut sub-type, then rolled up per family, with
+        # a failure-verdict tally so a disproven cut reads differently from an
+        # errored/timed-out one.
+        if checked:
+            by_type: dict[str, dict] = {}
+            for m in modules:
+                if m.excluded:
+                    continue
+                for run in m.runs:
+                    ct = m.cut_infos[run.index][0]
+                    a = by_type.setdefault(
+                        ct, {"planned": 0, "proven": 0, "failed": 0, "verdicts": {}}
+                    )
+                    a["planned"] += 1
+                    if run.valid:
+                        a["proven"] += 1
+                    else:
+                        a["failed"] += 1
+                        vd = run.verdict or "unknown"
+                        a["verdicts"][vd] = a["verdicts"].get(vd, 0) + 1
+
+            if by_type:
+                fam: dict[str, dict] = {}
+                verdicts: dict[str, int] = {}
+                for ct, a in by_type.items():
+                    fkey = ct.split("(", 1)[0]
+                    fa = fam.setdefault(fkey, {"planned": 0, "proven": 0, "failed": 0})
+                    fa["planned"] += a["planned"]
+                    fa["proven"] += a["proven"]
+                    fa["failed"] += a["failed"]
+                    for k, v in a["verdicts"].items():
+                        verdicts[k] = verdicts.get(k, 0) + v
+
+                wt = max([len("type")] + [len(t) for t in by_type])
+                wf = max([len("family")] + [len(t) for t in fam])
+                f.write("\n# success by type\n")
+                f.write(
+                    f"# {'type':<{wt}}  {'planned':>7}  {'proven':>6}  {'failed':>6}\n"
+                )
+                for ct, a in sorted(by_type.items()):
+                    f.write(
+                        f"  {ct:<{wt}}  {a['planned']:>7}  {a['proven']:>6}  "
+                        f"{a['failed']:>6}\n"
+                    )
+                f.write(f"# {'family':<{wf}}  {'planned':>7}  {'proven':>6}  {'failed':>6}\n")
+                for fkey, a in sorted(fam.items()):
+                    f.write(
+                        f"  {fkey:<{wf}}  {a['planned']:>7}  {a['proven']:>6}  "
+                        f"{a['failed']:>6}\n"
+                    )
+                if verdicts:
+                    f.write(
+                        "# failed by verdict: "
+                        + ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items()))
+                        + "\n"
+                    )
 
         if final_runs is not None:
             n_proven = sum(1 for _, fr in final_runs if fr.valid)
@@ -289,6 +366,10 @@ async def main():
     # terminal. Only meaningful when checks actually run (a backend is selected).
     tracker = StatusWriter(output_dir) if backend is not None else None
 
+    # Append-only durable record of every finished check (see append_result). The
+    # output dir was just recreated, so this always starts empty.
+    results_path = f"{output_dir}/{RESULTS_FILENAME}"
+
     # MARK: Elaboration -- the canonical front end.
     # Unroll generates, resolve parameters, and flatten hierarchy up front by
     # re-emitting the whole design from a live slang elaboration. Excluded
@@ -413,6 +494,12 @@ async def main():
                 getattr(selfcheck_run, "verdict", None),
                 selfcheck_run.valid,
             )
+            append_result(results_path, {
+                "ts": time.time(), "phase": "selfcheck", "module": top_name,
+                "idx": None, "type": "self-check", "line": None,
+                "valid": selfcheck_run.valid,
+                "verdict": getattr(selfcheck_run, "verdict", None),
+            })
         if not selfcheck_run.valid:
             raise SystemExit("Formal verification setup failed, check FV environment.")
         status("FV self-check passed: formal environment is working.")
@@ -447,6 +534,12 @@ async def main():
                 getattr(gate_run, "verdict", None),
                 gate_run.valid,
             )
+            append_result(results_path, {
+                "ts": time.time(), "phase": "gate", "module": top_name,
+                "idx": None, "type": "elab-gate", "line": None,
+                "valid": gate_run.valid,
+                "verdict": getattr(gate_run, "verdict", None),
+            })
         if not gate_run.valid:
             verdict = getattr(gate_run, "verdict", "not-proven")
             raise SystemExit(
@@ -609,13 +702,21 @@ async def main():
     async def run_with_limit(run: Run):
         nonlocal done
         async with semaphore:
+            mname, ctype, line = labels[id(run)]
             tracker.start(id(run))
+            t0 = time.time()
             try:
                 await backend.check(run)
             finally:
                 tracker.finish(id(run), getattr(run, "verdict", None), run.valid)
+                # Durable per-cut record, appended the moment the check finishes.
+                append_result(results_path, {
+                    "ts": time.time(), "phase": "cuts", "module": mname,
+                    "idx": run.index, "type": ctype, "line": line,
+                    "valid": run.valid, "verdict": getattr(run, "verdict", None),
+                    "elapsed": round(time.time() - t0, 3),
+                })
             done += 1
-            mname, ctype, line = labels[id(run)]
             verdict = "PROVEN" if run.valid else "failed"
             status(f"EC {done}/{total}  {mname} idx={run.index} {ctype} L{line}  {verdict}")
             return run
@@ -685,9 +786,10 @@ async def main():
     for m, fr in final_runs:
         tracker.register(id(fr), "consolidate", m.name)
 
-    async def check_final(final_run: Run):
+    async def check_final(mod: ModuleCuts, final_run: Run):
         async with semaphore:
             tracker.start(id(final_run))
+            t0 = time.time()
             try:
                 return await backend.check(final_run)
             finally:
@@ -696,9 +798,17 @@ async def main():
                     getattr(final_run, "verdict", None),
                     final_run.valid,
                 )
+                append_result(results_path, {
+                    "ts": time.time(), "phase": "consolidate", "module": mod.name,
+                    "idx": -1, "type": "consolidated", "line": None,
+                    "valid": final_run.valid,
+                    "verdict": getattr(final_run, "verdict", None),
+                    "applied": sum(1 for r in mod.runs if r.valid),
+                    "elapsed": round(time.time() - t0, 3),
+                })
 
     status(f"Verifying {len(final_runs)} consolidated module(s)...")
-    await asyncio.gather(*(check_final(fr) for _, fr in final_runs))
+    await asyncio.gather(*(check_final(m, fr) for m, fr in final_runs))
 
     for mod, fr in final_runs:
         status(f"consolidated {mod.name}: {'PROVEN' if fr.valid else 'FAILED'}")

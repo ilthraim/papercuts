@@ -718,6 +718,32 @@ static bool isReducibleBinop(SyntaxKind kind) {
     }
 }
 
+// Short, stable operator tag for a reducible binary expression, embedded in the
+// cut type string (e.g. "binop(mul,keep-left)") so per-type logging can tell
+// which operator a cut tried to prune. Kept terse and vendor-neutral; anything
+// not in the reducible set collapses to the generic "binop".
+static std::string_view binopName(SyntaxKind kind) {
+    switch (kind) {
+        case SyntaxKind::AddExpression: return "add";
+        case SyntaxKind::SubtractExpression: return "sub";
+        case SyntaxKind::MultiplyExpression: return "mul";
+        case SyntaxKind::DivideExpression: return "div";
+        case SyntaxKind::ModExpression: return "mod";
+        case SyntaxKind::PowerExpression: return "pow";
+        case SyntaxKind::BinaryAndExpression: return "and";
+        case SyntaxKind::BinaryOrExpression: return "or";
+        case SyntaxKind::BinaryXorExpression: return "xor";
+        case SyntaxKind::BinaryXnorExpression: return "xnor";
+        case SyntaxKind::LogicalAndExpression: return "land";
+        case SyntaxKind::LogicalOrExpression: return "lor";
+        case SyntaxKind::LogicalShiftLeftExpression: return "shl";
+        case SyntaxKind::LogicalShiftRightExpression: return "shr";
+        case SyntaxKind::ArithmeticShiftLeftExpression: return "ashl";
+        case SyntaxKind::ArithmeticShiftRightExpression: return "ashr";
+        default: return "binop";
+    }
+}
+
 // Shifts only get a keep-left cut (a<<b -> a, i.e. shift amount was 0); keeping
 // the right operand makes the result the shift count and near-always falsifies.
 static bool isShiftBinop(SyntaxKind kind) {
@@ -980,9 +1006,13 @@ std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
         info.emplace_back("case(prune-item)", lineOf(*pair.first->items[pair.second]));
     }
 
-    // Binops: keep one operand (shifts keep-left only).
+    // Binops: keep one operand (shifts keep-left only). The operator is tagged
+    // (e.g. "binop(mul,keep-left)") so logging can split successes by which
+    // operator was pruned, not just which side was kept.
     for (const auto& pair : binopNodes) {
-        info.emplace_back(pair.second ? "binop(keep-left)" : "binop(keep-right)", lineOf(*pair.first));
+        std::string op(binopName(pair.first->kind));
+        std::string side = pair.second ? "keep-left" : "keep-right";
+        info.emplace_back("binop(" + op + "," + side + ")", lineOf(*pair.first));
     }
 
     return info;

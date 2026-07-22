@@ -288,6 +288,11 @@ if {[catch {
     # Run proof and check results
     set res [check_sec -prove -silent]
 
+    # Emit a machine-readable verdict marker so the runner can record WHY a check
+    # failed (disproven vs. inconclusive), not just pass/fail. $res is whatever
+    # check_sec reports (e.g. proven / cex / inconclusive); the runner normalizes it.
+    puts "__PC_VERDICT__:$res"
+
     if {$res eq "proven"} {
             exit 0
         } else {
@@ -295,11 +300,39 @@ if {[catch {
         }
 
 } err]} {
+    puts "__PC_VERDICT__:error"
     puts "Error during formal verification: $err"
     exit 1
 }"""
 
     return tcl_script
+
+# Verdict marker printed by the generated TCL; see generate_jasper_tcl_script.
+_VERDICT_MARKER = "__PC_VERDICT__:"
+
+
+def _parse_verdict(output: str, returncode: int) -> str:
+    """Normalize the tool's proof verdict into a small, stable vocabulary.
+
+    Returns one of "proven" | "cex" | "inconclusive" | "error". The TCL prints
+    ``__PC_VERDICT__:<res>`` (or ``:error`` on a caught exception); if the marker
+    is absent (e.g. the tool was killed before it printed), fall back to the exit
+    code so a crashed/aborted run is still recorded as an error rather than lost.
+    """
+    raw = None
+    for line in output.splitlines():
+        if line.startswith(_VERDICT_MARKER):
+            raw = line[len(_VERDICT_MARKER):].strip().lower()
+    if raw is None:
+        return "proven" if returncode == 0 else "error"
+    if raw == "proven":
+        return "proven"
+    if raw in ("cex", "falsified", "disproven", "not_proven", "not-proven"):
+        return "cex"
+    if raw in ("inconclusive", "undetermined", "unknown"):
+        return "inconclusive"
+    return "error"
+
 
 # MARK: Jasper Runner
 async def run_jasper(run: pc_core.Run, print_output: bool = False):
@@ -325,6 +358,7 @@ async def run_jasper(run: pc_core.Run, print_output: bool = False):
 
     run.valid = process.returncode == 0
     run.output = output
+    run.verdict = _parse_verdict(output, process.returncode)
     return
 
 async def run_jasper_old(run: pc_core.Run, print_output: bool = False):

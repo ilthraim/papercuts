@@ -62,3 +62,7 @@ class Run:
     index: int = 0
     valid: bool = False
     output: str = ""
+    #: Normalized formal verdict for this run, when the backend can report one:
+    #: "proven" | "cex" | "inconclusive" | "error". None until a check runs (or
+    #: if the backend never sets it). "error" also covers a killed/aborted tool.
+    verdict: "str | None" = None
