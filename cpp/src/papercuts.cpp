@@ -406,7 +406,6 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
         return;
     }
     if (dims->size() == 0) {
-        std::cout << "Skipping single-bit declaration: " << node.name.valueText() << std::endl;
         return;
     }
     if (!allowMultiDim && dims->size() > 1) {
@@ -439,7 +438,6 @@ void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
         int width = std::abs(leftVal - rightVal) + 1;
 
         if (width <= 1) {
-            std::cout << "Skipping single-bit dimension of declaration: " << node.name.valueText() << std::endl;
             continue;
         }
 
@@ -560,7 +558,6 @@ void IfRemover::handle(const ConditionalStatementSyntax& node) {
     if (nodesToChange.contains(&node)) {
         if (nodesToChange[&node]) { // If true, replace with the true branch of the if statement
             if (node.elseClause == nullptr) {
-                std::cout << "If statement has no else clause, replacing with empty statement" << std::endl;
                 this->remove(node);
             }
             else {
@@ -871,8 +868,6 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
             size_t nodeIndex = i - TRCount - IRCount;
             const auto& t = shrinkNodes[nodeIndex];
             nodesToShrink.emplace(t.decl->name.valueText());
-            std::cout << "Adding node to shrink: " << t.decl->name.valueText() << " dim " << t.dimIndex
-                      << " with width " << t.width << std::endl;
             runMap[t.decl].push_back(t);
         }
         else if (i < TRCount + IRCount + BSRCount + CRCount) {
@@ -1374,7 +1369,6 @@ void Papercutter::handle(const ConditionalStatementSyntax& node) {
     if (ifNodesToChange.contains(&node)) {
         if (!ifNodesToChange[&node]) {
             if (node.elseClause == nullptr) {
-                std::cout << "If statement has no else clause, replacing with empty statement" << std::endl;
                 this->remove(node);
             }
             else {
