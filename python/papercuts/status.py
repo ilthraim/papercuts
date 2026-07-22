@@ -121,11 +121,19 @@ class StatusWriter:
 
 # MARK: Viewer
 def _load(path: str):
-    """Read status.json, tolerating absence or a mid-write partial read."""
+    """Read status.json, tolerating absence or a mid-write partial read.
+
+    On NFS the writer's atomic ``os.replace`` swaps the inode out from under a
+    reader that has already opened the path, so a read can fail with
+    ``ESTALE`` ("Stale file handle"); ``json.load`` can also raise
+    ``ValueError`` on a truncated snapshot. All of these are transient — the
+    next poll re-opens the freshly replaced file — so treat them as "no
+    snapshot this tick" rather than crashing the viewer.
+    """
     try:
         with open(path) as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
 
 
