@@ -493,8 +493,7 @@ async def main():
 
         ntree = SyntaxTree.fromText(print_tree(tree))
         pc = Papercutter(ntree, shrink_with_intermediate=args.shrink_with_intermediate)
-        rewrites = pc.cut_all()
-        cut_infos = list(pc.cut_info())  # (type, line) aligned 1:1 with rewrites
+        cut_infos = list(pc.cut_info())  # (type, line) aligned 1:1 with cut indices
 
         mod = ModuleCuts(
             name=name,
@@ -510,8 +509,16 @@ async def main():
         # cut-generation bug -- and must never reach FV, where it would trivially
         # "prove" and masquerade as a valid, removable cut. Skip it and flag it as
         # an error in the log instead.
+        #
+        # Cuts are enumerated one at a time via cut_index([idx]) (1:1 with the
+        # cut_info() ordering) rather than materializing them all up front with
+        # cut_all(). Holding every cut's full syntax tree alive at once made peak
+        # memory scale as O(num_cuts x module_size), which OOM'd on large designs
+        # right here while writing the per-cut sources. Streaming keeps only one
+        # cut tree live at a time.
         baseline = print_tree(ntree)
-        for idx, rewrite in enumerate(rewrites):
+        for idx in range(len(cut_infos)):
+            rewrite = pc.cut_index([idx])
             if print_tree(rewrite) == baseline:
                 ctype, line = cut_infos[idx]
                 mod.noops.append(idx)
@@ -519,6 +526,7 @@ async def main():
                     f"WARNING: {name} idx={idx} {ctype} L{line} is a NO-OP "
                     f"(identical to elaborated source); excluded from FV"
                 )
+                del rewrite
                 continue
             run = Run(
                 top_module_path=f"{ctree_dir}/{top_name}.sv",
@@ -532,6 +540,7 @@ async def main():
                 f.write(print_tree(rewrite))
             mod.runs.append(run)
             all_runs.append(run)
+            del rewrite  # release this cut's tree before building the next
         modules.append(mod)
 
     status(f"{len(all_runs)} cuts across {len(modules)} modules")
