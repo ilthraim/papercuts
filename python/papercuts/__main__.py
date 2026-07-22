@@ -10,6 +10,7 @@ import argparse
 import fnmatch
 import os
 import shutil
+import subprocess
 import asyncio
 
 import papercuts.chipper as chipper
@@ -270,7 +271,15 @@ async def main():
     output_dir = "./outputs"
 
     if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
+        # A blocking shutil.rmtree here can cost minutes on NFS: a previous run
+        # leaves one folder per module, 10k+ cut sources, and -- after an -e run
+        # -- a jgproject tree per cut, each unlink a network round-trip. Rename
+        # the stale tree aside (one metadata op) and delete it in a detached
+        # background process so enumeration starts immediately. start_new_session
+        # detaches the rm so it outlives this (possibly short) run.
+        stale = f"{output_dir}.stale.{os.getpid()}"
+        os.rename(output_dir, stale)
+        subprocess.Popen(["rm", "-rf", stale], start_new_session=True)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -470,7 +479,11 @@ async def main():
     all_runs: list[Run] = []
     for tree, name in conc_trees:
         cur_dir = f"{output_dir}/{name}"
-        os.makedirs(cur_dir, exist_ok=True)
+        # The per-module folder is created lazily, only when the first cut source
+        # is actually written into it (see below). Creating it here for every
+        # module -- one NFS mkdir each -- wasted a metadata round-trip on excluded
+        # and all-no-op modules that never get a file, and folder count scales
+        # with instance count on a flattened design.
         is_top = name == top_name
 
         if is_excluded(name):
@@ -522,6 +535,7 @@ async def main():
         # a steady grower of the shared SourceManager) and the Python-side
         # print_tree() serialization. Only the text is needed here.
         baseline = print_tree(ntree)
+        made_dir = False
         for idx in range(len(cut_infos)):
             cut_src = pc.cut_index_text([idx])
             if cut_src == baseline:
@@ -532,6 +546,10 @@ async def main():
                     f"(identical to elaborated source); excluded from FV"
                 )
                 continue
+            if not made_dir:
+                # Created only now -- the module has at least one real cut to write.
+                os.makedirs(cur_dir, exist_ok=True)
+                made_dir = True
             run = Run(
                 top_module_path=f"{ctree_dir}/{top_name}.sv",
                 spec_lib_path=ctree_dir,
