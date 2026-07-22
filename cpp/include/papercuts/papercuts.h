@@ -437,10 +437,16 @@ private:
         caseNodesToChange.clear();
         binopNodesToChange.clear();
     }
+
+    // Populate the *NodesToChange maps for the given global cut indices
+    void selectCuts(const std::vector<size_t>& indicesToCut);
 public:
     Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false);
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
     std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut);
+    // Like cutIndex(...) followed by print_tree, but skips the re-parse: returns
+    // the cut source directly for fast printing on the python side
+    std::string cutIndexText(std::vector<size_t> indicesToCut);
     // Per-cut (type, line) aligned 1:1 with cutAll() indices. Line numbers are
     // relative to the source tree this Papercutter was constructed from.
     std::vector<std::pair<std::string, size_t>> cutInfo();

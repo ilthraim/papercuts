@@ -43,6 +43,7 @@ PYBIND11_MODULE(pypercuts, m) {
              py::arg("shrink_with_intermediate") = false)
         .def("cut_all", &papercuts::Papercutter::cutAll)
         .def("cut_index", &papercuts::Papercutter::cutIndex)
+        .def("cut_index_text", &papercuts::Papercutter::cutIndexText)
         .def("cut_info", &papercuts::Papercutter::cutInfo)
         .def("shrink_all_bits", &papercuts::Papercutter::shrinkAllBits)
         .def("remove_all_ternaries", &papercuts::Papercutter::removeAllTernaries)

@@ -510,23 +510,27 @@ async def main():
         # "prove" and masquerade as a valid, removable cut. Skip it and flag it as
         # an error in the log instead.
         #
-        # Cuts are enumerated one at a time via cut_index([idx]) (1:1 with the
-        # cut_info() ordering) rather than materializing them all up front with
-        # cut_all(). Holding every cut's full syntax tree alive at once made peak
-        # memory scale as O(num_cuts x module_size), which OOM'd on large designs
-        # right here while writing the per-cut sources. Streaming keeps only one
-        # cut tree live at a time.
+        # Cuts are enumerated one at a time via cut_index_text([idx]) (1:1 with
+        # the cut_info() ordering) rather than materializing them all up front
+        # with cut_all(). Holding every cut's full syntax tree alive at once made
+        # peak memory scale as O(num_cuts x module_size), which OOM'd on large
+        # designs right here while writing the per-cut sources.
+        #
+        # cut_index_text() returns the cut source as a string directly, skipping
+        # both the per-cut re-parse that cut_index() does (a full re-lex/parse of
+        # the whole module -- the dominant enumeration cost on large modules, and
+        # a steady grower of the shared SourceManager) and the Python-side
+        # print_tree() serialization. Only the text is needed here.
         baseline = print_tree(ntree)
         for idx in range(len(cut_infos)):
-            rewrite = pc.cut_index([idx])
-            if print_tree(rewrite) == baseline:
+            cut_src = pc.cut_index_text([idx])
+            if cut_src == baseline:
                 ctype, line = cut_infos[idx]
                 mod.noops.append(idx)
                 status(
                     f"WARNING: {name} idx={idx} {ctype} L{line} is a NO-OP "
                     f"(identical to elaborated source); excluded from FV"
                 )
-                del rewrite
                 continue
             run = Run(
                 top_module_path=f"{ctree_dir}/{top_name}.sv",
@@ -537,10 +541,9 @@ async def main():
                 index=idx,
             )
             with open(run.impl_module_path, "w") as f:
-                f.write(print_tree(rewrite))
+                f.write(cut_src)
             mod.runs.append(run)
             all_runs.append(run)
-            del rewrite  # release this cut's tree before building the next
         modules.append(mod)
 
     status(f"{len(all_runs)} cuts across {len(modules)} modules")

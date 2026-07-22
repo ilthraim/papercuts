@@ -845,10 +845,7 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
     return newTrees;
 }
 
-std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
-
-    clearState(); 
-
+void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut) {
     for (size_t i : indicesToCut) {
         if (i >= cutCount) {
             throw std::out_of_range("Index out of range for cutIndex");
@@ -879,17 +876,17 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
             binopNodesToChange.emplace(binopNodes[nodeIndex].first, binopNodes[nodeIndex].second);
         }
     }
+}
+
+std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
+
+    clearState();
+
+    selectCuts(indicesToCut);
 
     auto newTree = transform(tree);
 
-    // Stabilize before the finishing pass. Pass 1 produces a tree whose nodes
-    // span multiple source buffers (spliced ternary/if branches from the original
-    // tree, freshly parsed bit-shrink assigns, and stolen temp-tree allocators).
-    // Running a second transform directly on that mixed tree corrupts output:
-    // replaceToken(preserveTrivia=true) clones trivia whose rawText string_views
-    // are no longer valid, splicing unrelated source text into the result.
-    // Serializing and re-parsing collapses everything into one clean buffer, the
-    // same technique insertMuxes uses after chaining sub-rewriters.
+    // Stabilize before the finishing pass
     auto stabilized = SyntaxPrinter::printFile(*newTree);
     newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
 
@@ -911,6 +908,34 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
     }
 
     return newTree;
+}
+
+// Serialize a single cut (or set of cuts) straight to text. This is the fast
+// path for cut enumeration: it returns the same string a caller would get from
+// print_tree(cutIndex(indices)), but skips the intermediate re-parse that
+// cutIndex performs to hand back a live SyntaxTree cause we only need the text.
+std::string Papercutter::cutIndexText(std::vector<size_t> indicesToCut) {
+
+    clearState();
+
+    selectCuts(indicesToCut);
+
+    auto newTree = transform(tree);
+
+    auto stabilized = SyntaxPrinter::printFile(*newTree);
+
+    if (shrinkWithIntermediate) {
+        newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
+        auto finalNodesToShrink = nodesToShrink;
+        clearState();
+        auto parentSetter = ParentSetter();
+        parentSetter.visit(newTree->root());
+        nodesToShrink = finalNodesToShrink;
+        newTree = transform(newTree);
+        stabilized = SyntaxPrinter::printFile(*newTree);
+    }
+
+    return stabilized;
 }
 
 std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
