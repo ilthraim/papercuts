@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -223,6 +224,10 @@ struct BitShrinkTarget {
     const DeclaratorSyntax* decl;
     int width;
     int dimIndex;
+    // Bits to drop off the high end of this packed dimension. Default 1 (the
+    // classic one-bit shrink); the iterative shrink path sets it higher to
+    // narrow the same dimension by several bits at once.
+    int amount = 1;
 };
 
 class BitMuxer : public PapercutsRewriter<BitMuxer> {
@@ -452,19 +457,32 @@ private:
         binopNodesToChange.clear();
     }
 
-    // Populate the *NodesToChange maps for the given global cut indices
-    void selectCuts(const std::vector<size_t>& indicesToCut);
+    // Populate the *NodesToChange maps for the given global cut indices.
+    // `amounts` optionally overrides the shrink amount (bits to drop) for any
+    // bitshrink index; indices absent from the map default to 1 bit. Non-bitshrink
+    // indices ignore it.
+    void selectCuts(const std::vector<size_t>& indicesToCut,
+                    const std::unordered_map<size_t, int>& amounts = {});
 public:
     Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false,
                 bool binopsInConditionsOnly = false);
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
-    std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut);
+    // `amounts`: optional per-bitshrink-index override of the number of bits to
+    // drop (default 1). Enables iterative multi-bit shrinking; other cut families
+    // and unlisted bitshrink indices are unaffected.
+    std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut,
+                                         std::unordered_map<size_t, int> amounts = {});
     // Like cutIndex(...) followed by print_tree, but skips the re-parse: returns
     // the cut source directly for fast printing on the python side
-    std::string cutIndexText(std::vector<size_t> indicesToCut);
+    std::string cutIndexText(std::vector<size_t> indicesToCut,
+                             std::unordered_map<size_t, int> amounts = {});
     // Per-cut (type, line) aligned 1:1 with cutAll() indices. Line numbers are
     // relative to the source tree this Papercutter was constructed from.
     std::vector<std::pair<std::string, size_t>> cutInfo();
+    // Per-cut shrinkable width aligned 1:1 with cutAll() indices: for a bitshrink
+    // cut, the current bit width of the targeted packed dimension (so the caller
+    // can bound an iterative shrink at width-1); 0 for every non-bitshrink cut.
+    std::vector<size_t> cutShrinkWidths();
 
     std::vector<std::shared_ptr<SyntaxTree>> shrinkAllBits();
     std::vector<std::shared_ptr<SyntaxTree>> removeAllTernaries();

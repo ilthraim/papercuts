@@ -43,9 +43,14 @@ PYBIND11_MODULE(pypercuts, m) {
              py::arg("shrink_with_intermediate") = false,
              py::arg("binops_in_conditions_only") = false)
         .def("cut_all", &papercuts::Papercutter::cutAll)
-        .def("cut_index", &papercuts::Papercutter::cutIndex)
-        .def("cut_index_text", &papercuts::Papercutter::cutIndexText)
+        .def("cut_index", &papercuts::Papercutter::cutIndex,
+             py::arg("indices"),
+             py::arg("amounts") = std::unordered_map<size_t, int>{})
+        .def("cut_index_text", &papercuts::Papercutter::cutIndexText,
+             py::arg("indices"),
+             py::arg("amounts") = std::unordered_map<size_t, int>{})
         .def("cut_info", &papercuts::Papercutter::cutInfo)
+        .def("cut_shrink_widths", &papercuts::Papercutter::cutShrinkWidths)
         .def("shrink_all_bits", &papercuts::Papercutter::shrinkAllBits)
         .def("remove_all_ternaries", &papercuts::Papercutter::removeAllTernaries)
         .def("remove_all_ifs", &papercuts::Papercutter::removeAllIfs)

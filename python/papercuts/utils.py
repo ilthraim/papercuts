@@ -66,3 +66,7 @@ class Run:
     #: "proven" | "cex" | "inconclusive" | "error". None until a check runs (or
     #: if the backend never sets it). "error" also covers a killed/aborted tool.
     verdict: "str | None" = None
+    #: For a bit-shrink cut, the number of bits actually removed from the targeted
+    #: dimension. 1 for a plain single-bit shrink; higher when --iterative-bitshrink
+    #: greedily removes several bits. Meaningless (stays 1) for non-bitshrink cuts.
+    shrink_amount: int = 1

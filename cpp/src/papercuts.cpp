@@ -886,7 +886,8 @@ std::vector<std::shared_ptr<SyntaxTree>> Papercutter::cutAll() {
     return newTrees;
 }
 
-void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut) {
+void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut,
+                             const std::unordered_map<size_t, int>& amounts) {
     for (size_t i : indicesToCut) {
         if (i >= cutCount) {
             throw std::out_of_range("Index out of range for cutIndex");
@@ -904,7 +905,10 @@ void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut) {
         }
         else if (i < TRCount + IRCount + BSRCount) {
             size_t nodeIndex = i - TRCount - IRCount;
-            const auto& t = shrinkNodes[nodeIndex];
+            BitShrinkTarget t = shrinkNodes[nodeIndex];  // copy so we can set the amount
+            auto ai = amounts.find(i);
+            if (ai != amounts.end())
+                t.amount = ai->second;
             nodesToShrink.emplace(t.decl->name.valueText());
             runMap[t.decl].push_back(t);
         }
@@ -919,11 +923,12 @@ void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut) {
     }
 }
 
-std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut) {
+std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut,
+                                                  std::unordered_map<size_t, int> amounts) {
 
     clearState();
 
-    selectCuts(indicesToCut);
+    selectCuts(indicesToCut, amounts);
 
     auto newTree = transform(tree);
 
@@ -955,11 +960,12 @@ std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToC
 // path for cut enumeration: it returns the same string a caller would get from
 // print_tree(cutIndex(indices)), but skips the intermediate re-parse that
 // cutIndex performs to hand back a live SyntaxTree cause we only need the text.
-std::string Papercutter::cutIndexText(std::vector<size_t> indicesToCut) {
+std::string Papercutter::cutIndexText(std::vector<size_t> indicesToCut,
+                                      std::unordered_map<size_t, int> amounts) {
 
     clearState();
 
-    selectCuts(indicesToCut);
+    selectCuts(indicesToCut, amounts);
 
     auto newTree = transform(tree);
 
@@ -1031,6 +1037,21 @@ std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
     }
 
     return info;
+}
+
+std::vector<size_t> Papercutter::cutShrinkWidths() {
+    // Aligned 1:1 with cutInfo()/cutAll() indices. Only bitshrink cuts carry a
+    // meaningful width (the current bit width of their targeted packed dimension);
+    // every other cut type reports 0. Callers use width-1 as the upper bound for
+    // an iterative multi-bit shrink of that dimension.
+    std::vector<size_t> widths(cutCount, 0);
+    // The bitshrink band sits after ternaries and ifs (see selectCuts), one entry
+    // per shrinkNodes target.
+    for (size_t j = 0; j < shrinkNodes.size(); ++j) {
+        size_t globalIdx = TRCount + IRCount + j;
+        widths[globalIdx] = static_cast<size_t>(shrinkNodes[j].width);
+    }
+    return widths;
 }
 
 std::vector<std::shared_ptr<SyntaxTree>> Papercutter::shrinkAllBits() {
@@ -1135,18 +1156,27 @@ std::string trimWs(std::string s) {
 // dimensions are recomputed from their literal bounds (the collector only ever
 // targets simple literal ranges, so the casts here are safe).
 std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
-                              const std::unordered_set<int>& narrowIdx) {
+                              const std::unordered_map<int, int>& narrowAmt) {
     std::string out;
     for (size_t di = 0; di < dims.size(); ++di) {
-        if (narrowIdx.contains(static_cast<int>(di))) {
+        auto it = narrowAmt.find(static_cast<int>(di));
+        if (it != narrowAmt.end()) {
             auto& rsel = dims[di]->specifier->as<RangeDimensionSpecifierSyntax>().selector->as<RangeSelectSyntax>();
             int leftVal = tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal);
             int rightVal = tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal);
-            // Drop one bit off the high end: [7:0] -> [6:0], [0:7] -> [0:6].
+            // Drop `amount` bits off the high end: [7:0] -amount=2-> [5:0],
+            // [0:7] -amount=2-> [0:5]. Clamp so the dimension keeps at least one
+            // bit (never shrink to a zero-width or reversed range).
+            int width = std::abs(leftVal - rightVal) + 1;
+            int drop = it->second;
+            if (drop < 1)
+                drop = 1;
+            if (drop > width - 1)
+                drop = width - 1;
             if (leftVal >= rightVal)
-                leftVal -= 1;
+                leftVal -= drop;
             else
-                rightVal -= 1;
+                rightVal -= drop;
             out += "[" + std::to_string(leftVal) + ":" + std::to_string(rightVal) + "]";
         } else {
             out += trimWs(std::string(dims[di]->toString()));
@@ -1221,11 +1251,12 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
     }
     for (const auto* d : targeted) {
         // The dimensions to narrow for this declarator (usually one; more if the
-        // caller combined several dim-cuts of the same signal in one tree).
-        std::unordered_set<int> narrowIdx;
+        // caller combined several dim-cuts of the same signal in one tree), each
+        // with the number of bits to drop.
+        std::unordered_map<int, int> narrowAmt;
         for (const auto& t : runMap[d])
-            narrowIdx.insert(t.dimIndex);
-        repls.push_back(trivia + modsOut + typeHead + " " + buildPackedRanges(dims, narrowIdx) + " " +
+            narrowAmt[t.dimIndex] = t.amount;
+        repls.push_back(trivia + modsOut + typeHead + " " + buildPackedRanges(dims, narrowAmt) + " " +
                         trimWs(std::string(d->toString())) + ";");
     }
 
@@ -1299,10 +1330,10 @@ void Papercutter::handle(const NetDeclarationSyntax& node) {
         repls.push_back(s);
     }
     for (const auto* d : targeted) {
-        std::unordered_set<int> narrowIdx;
+        std::unordered_map<int, int> narrowAmt;
         for (const auto& t : runMap[d])
-            narrowIdx.insert(t.dimIndex);
-        repls.push_back(trivia + typeHead + " " + buildPackedRanges(*dims, narrowIdx) + " " +
+            narrowAmt[t.dimIndex] = t.amount;
+        repls.push_back(trivia + typeHead + " " + buildPackedRanges(*dims, narrowAmt) + " " +
                         trimWs(std::string(d->toString())) + ";");
     }
 

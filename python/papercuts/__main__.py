@@ -35,6 +35,7 @@ class ModuleCuts:
     is_top: bool
     cut_infos: list            # per-index (type, line) from pc.cut_info()
     cur_dir: str
+    shrink_widths: list = field(default_factory=list)  # per-index dim width (0 if not a bitshrink cut)
     baseline: str = ""         # serialized pre-cut source; a cut equal to it is a no-op
     runs: list[Run] = field(default_factory=list)
     excluded: bool = False     # kept in the golden source but never cut
@@ -90,6 +91,10 @@ def write_papercuts_log(
                 v = "-"
             else:
                 v = "Y" if run.valid else "N"
+                # For a greedily-shrunk bitshrink cut, annotate how many bits were
+                # removed (e.g. "Y(-3b)"); a plain 1-bit shrink stays "Y".
+                if run.valid and ctype.startswith("bitshrink") and run.shrink_amount > 1:
+                    v = f"Y(-{run.shrink_amount}b)"
             rows.append((m.name, run.index, ctype, line, v))
         # No-op cuts: generated but byte-identical to the elaborated source, so
         # never sent to FV. Flagged as errors here (a cut that changes nothing is
@@ -280,6 +285,24 @@ async def main():
         "'if (x | y)' or the 'x | z' in 'x | z ? b : c'. Binops elsewhere "
         "(branch bodies, assignment RHSs, etc.) are not cut. Other cut "
         "families are unaffected.",
+    )
+    parser.add_argument(
+        "--iterative-bitshrink",
+        action="store_true",
+        help="After a bit-shrink cut is proven equivalent, keep removing bits "
+        "from that same signal/dimension one at a time until a shrink fails, "
+        "keeping the last passing width (greedy maximal shrink). Requires -e. "
+        "Costs up to (width-1) extra checks per shrinkable dimension; the "
+        "consolidated design reflects each signal's maximal proven width.",
+    )
+    parser.add_argument(
+        "--max-bitshrink-bits",
+        type=int,
+        default=0,
+        metavar="N",
+        help="With --iterative-bitshrink, cap how many bits may be removed from "
+        "any one dimension (default 0 = unlimited, bounded only by the "
+        "dimension's width-1).",
     )
     parser.add_argument(
         "--backend",
@@ -630,6 +653,7 @@ async def main():
             is_top=is_top,
             cut_infos=cut_infos,
             cur_dir=cur_dir,
+            shrink_widths=list(pc.cut_shrink_widths()),  # per-index dim width (0 if not bitshrink)
             baseline=print_tree(ntree),
         )
         for idx in range(len(cut_infos)):
@@ -763,6 +787,38 @@ async def main():
             t0 = time.time()
             try:
                 await backend.check(run)
+                # Iterative bit-shrink: once one bit is proven removable, greedily
+                # remove more from the same dimension (2, 3, ...) until a check
+                # fails, keeping the last passing width. Each probe re-verifies the
+                # k-bit-narrower source against the golden original, so it is a
+                # standalone proof (probes do not chain). Sequential within this
+                # run (reuses its jgproject dir); other runs still parallel.
+                if (
+                    args.iterative_bitshrink
+                    and run.valid
+                    and ctype.startswith("bitshrink")
+                ):
+                    cap = mod.shrink_widths[run.index] - 1  # keep >= 1 bit
+                    if args.max_bitshrink_bits > 0:
+                        cap = min(cap, args.max_bitshrink_bits)
+                    best = 1
+                    k = 2
+                    while k <= cap:
+                        cand = mod.pc.cut_index_text([run.index], {run.index: k})
+                        with open(run.impl_module_path, "w") as f:
+                            f.write(cand)
+                        await backend.check(run)
+                        if run.valid:
+                            best = k
+                            k += 1
+                        else:
+                            break
+                    # Restore the maximal proven shrink as this run's result.
+                    run.shrink_amount = best
+                    run.valid = True
+                    run.verdict = "proven"
+                    with open(run.impl_module_path, "w") as f:
+                        f.write(mod.pc.cut_index_text([run.index], {run.index: best}))
             finally:
                 tracker.finish(id(run), getattr(run, "verdict", None), run.valid)
                 # Durable per-cut record, appended the moment the check finishes.
@@ -770,11 +826,13 @@ async def main():
                     "ts": time.time(), "phase": "cuts", "module": mname,
                     "idx": run.index, "type": ctype, "line": line,
                     "valid": run.valid, "verdict": getattr(run, "verdict", None),
+                    "shrink_amount": run.shrink_amount,
                     "elapsed": round(time.time() - t0, 3),
                 })
             done += 1
             verdict = "PROVEN" if run.valid else "failed"
-            status(f"EC {done}/{total}  {mname} idx={run.index} {ctype} L{line}  {verdict}")
+            bits = f" -{run.shrink_amount}bit" if ctype.startswith("bitshrink") and run.valid else ""
+            status(f"EC {done}/{total}  {mname} idx={run.index} {ctype} L{line}  {verdict}{bits}")
             return run
 
     await asyncio.gather(*(run_with_limit(run) for run in all_runs))
@@ -827,9 +885,13 @@ async def main():
             continue
 
         working = [run.index for run in mod.runs if run.valid]
+        # Per-index shrink amounts so a bitshrink cut that was greedily narrowed to
+        # N bits merges at N bits (not 1). cut_index ignores amounts for non-bitshrink
+        # indices, so passing every valid run's amount is safe.
+        amounts = {run.index: run.shrink_amount for run in mod.runs if run.valid}
         with open(out_path, "w") as f:
             if working:
-                f.write(print_tree(mod.pc.cut_index(working)))
+                f.write(print_tree(mod.pc.cut_index(working, amounts)))
             else:
                 f.write(print_tree(mod.tree))
 
