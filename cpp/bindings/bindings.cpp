@@ -38,9 +38,10 @@ PYBIND11_MODULE(pypercuts, m) {
     );
 
     py::classh<papercuts::Papercutter>(m, "Papercutter")
-        .def(py::init<const std::shared_ptr<slang::syntax::SyntaxTree>, bool>(),
+        .def(py::init<const std::shared_ptr<slang::syntax::SyntaxTree>, bool, bool>(),
              py::arg("tree"),
-             py::arg("shrink_with_intermediate") = false)
+             py::arg("shrink_with_intermediate") = false,
+             py::arg("binops_in_conditions_only") = false)
         .def("cut_all", &papercuts::Papercutter::cutAll)
         .def("cut_index", &papercuts::Papercutter::cutIndex)
         .def("cut_index_text", &papercuts::Papercutter::cutIndexText)

@@ -273,6 +273,15 @@ async def main():
         "(e.g. 'logic [7:0] x;' -> 'logic [6:0] x;').",
     )
     parser.add_argument(
+        "--binops-in-conditions-only",
+        action="store_true",
+        help="Restrict the binop cut family to binops inside the condition of "
+        "an 'if' statement or a ternary ('?:') -- e.g. the 'x | y' in "
+        "'if (x | y)' or the 'x | z' in 'x | z ? b : c'. Binops elsewhere "
+        "(branch bodies, assignment RHSs, etc.) are not cut. Other cut "
+        "families are unaffected.",
+    )
+    parser.add_argument(
         "--backend",
         default="jg",
         choices=sorted(discover_backends()),
@@ -607,7 +616,11 @@ async def main():
             continue
 
         ntree = SyntaxTree.fromText(print_tree(tree))
-        pc = Papercutter(ntree, shrink_with_intermediate=args.shrink_with_intermediate)
+        pc = Papercutter(
+            ntree,
+            shrink_with_intermediate=args.shrink_with_intermediate,
+            binops_in_conditions_only=args.binops_in_conditions_only,
+        )
         cut_infos = list(pc.cut_info())  # (type, line) aligned 1:1 with cut indices
 
         mod = ModuleCuts(

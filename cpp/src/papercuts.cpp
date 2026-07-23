@@ -801,13 +801,26 @@ std::vector<std::shared_ptr<SyntaxTree>> BinopRemover::removeAllBinops() {
 }
 
 void BinopCollector::handle(const BinaryExpressionSyntax& node) {
-    if (isReducibleBinop(node.kind)) {
+    // In conditions-only mode, skip binops that aren't inside a conditional's
+    // predicate (predicateDepth tracks ConditionalPredicateSyntax nesting). We
+    // still descend so nested binops -- including those deeper in a condition,
+    // e.g. the `a & b` in `if ((a & b) | c)` -- are reached.
+    if (isReducibleBinop(node.kind) && (!conditionsOnly || predicateDepth > 0)) {
         this->foundNodes.emplace_back(&node, true); // keep-left
         if (!isShiftBinop(node.kind)) {
             this->foundNodes.emplace_back(&node, false); // keep-right
         }
     }
     this->visitDefault(node);
+}
+
+// A ConditionalPredicateSyntax is the condition of an `if` statement or a
+// ternary (`?:`) -- the only two grammar nodes that own one. Mark its whole
+// subtree as "inside a condition" so conditions-only mode can gate on it.
+void BinopCollector::handle(const ConditionalPredicateSyntax& node) {
+    predicateDepth++;
+    this->visitDefault(node);
+    predicateDepth--;
 }
 
 std::vector<std::pair<const BinaryExpressionSyntax*, bool>> BinopCollector::getFoundNodes(
@@ -819,8 +832,10 @@ std::vector<std::pair<const BinaryExpressionSyntax*, bool>> BinopCollector::getF
 
 // MARK: Papercutter
 
-Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate)
-    : tree(tree), shrinkWithIntermediate(shrinkWithIntermediate) {
+Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate,
+                         bool binopsInConditionsOnly)
+    : tree(tree), shrinkWithIntermediate(shrinkWithIntermediate),
+      binopsInConditionsOnly(binopsInConditionsOnly) {
 
     // Narrow (default) mode can shrink signed decls, nets, and multi-packed-dim
     // vectors; intermediate-wire mode cannot.
@@ -844,7 +859,7 @@ Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWith
     cutCount += caseNodes.size();
     CRCount = caseNodes.size();
 
-    BinopCollector BC;
+    BinopCollector BC(binopsInConditionsOnly);
     binopNodes = BC.getFoundNodes(tree);
     cutCount += binopNodes.size();
     BRCount = binopNodes.size();

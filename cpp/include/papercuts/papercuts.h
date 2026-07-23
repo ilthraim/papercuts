@@ -381,9 +381,18 @@ public:
 class BinopCollector : public SyntaxVisitor<BinopCollector> {
 private:
     std::vector<std::pair<const BinaryExpressionSyntax*, bool>> foundNodes; // (binary expr, keepLeft); shifts keep-left only
+    // When true, only collect binops that sit inside the condition of an `if`
+    // statement or ternary (`?:`) -- i.e. within a ConditionalPredicateSyntax.
+    // Binops in branch bodies, assignment RHSs, etc. are skipped.
+    bool conditionsOnly = false;
+    // Nesting depth of ConditionalPredicateSyntax around the node being visited.
+    // >0 means "currently inside a conditional's condition expression".
+    int predicateDepth = 0;
 
 public:
+    explicit BinopCollector(bool conditionsOnly = false) : conditionsOnly(conditionsOnly) {}
     void handle(const BinaryExpressionSyntax&);
+    void handle(const ConditionalPredicateSyntax&);
     std::vector<std::pair<const BinaryExpressionSyntax*, bool>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
@@ -404,6 +413,11 @@ private:
     // the legacy behavior: introduce an intermediate `x_papercuts` wire with its
     // MSB forced to 0 and redirect all reads to it.
     bool shrinkWithIntermediate = false;
+
+    // When true, the binop cut family only targets binops inside the condition
+    // of an `if` statement or ternary (`?:`); binops elsewhere are not collected.
+    // Other cut families are unaffected.
+    bool binopsInConditionsOnly = false;
 
     // Bit shrinker variables
     std::vector<BitShrinkTarget> shrinkNodes; // One entry per shrinkable packed dimension (order = cut order)
@@ -441,7 +455,8 @@ private:
     // Populate the *NodesToChange maps for the given global cut indices
     void selectCuts(const std::vector<size_t>& indicesToCut);
 public:
-    Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false);
+    Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false,
+                bool binopsInConditionsOnly = false);
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
     std::shared_ptr<SyntaxTree> cutIndex(std::vector<size_t> indicesToCut);
     // Like cutIndex(...) followed by print_tree, but skips the re-parse: returns
