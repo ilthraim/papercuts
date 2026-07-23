@@ -288,10 +288,12 @@ async def main():
     )
     parser.add_argument(
         "--iterative-bitshrink",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="After a bit-shrink cut is proven equivalent, keep removing bits "
         "from that same signal/dimension one at a time until a shrink fails, "
-        "keeping the last passing width (greedy maximal shrink). Requires -e. "
+        "keeping the last passing width (greedy maximal shrink). On by default; "
+        "pass --no-iterative-bitshrink to disable. Only has an effect with -e. "
         "Costs up to (width-1) extra checks per shrinkable dimension; the "
         "consolidated design reflects each signal's maximal proven width.",
     )

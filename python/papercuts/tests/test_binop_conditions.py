@@ -18,10 +18,10 @@ module cond_binops (
     );
     always_comb begin
         if (a & b) begin
-            y = c + d;
+            y = c | d;
         end
         else begin
-            y = e - f;
+            y = e ^ f;
         end
         z = (g ^ h) ? a[0] : b[0];
     end
@@ -47,7 +47,7 @@ def _nonbinop_count(pc):
 
 def run():
     cond_lines = {_line_of("if (a & b)"), _line_of("(g ^ h) ?")}  # if- + ternary-predicate
-    body_lines = {_line_of("y = c + d;"), _line_of("y = e - f;")}  # branch-body RHS binops
+    body_lines = {_line_of("y = c | d;"), _line_of("y = e ^ f;")}  # branch-body RHS binops
 
     # Default: the binop family sees condition binops AND body binops.
     tree = SyntaxTree.fromText(SRC)

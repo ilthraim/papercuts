@@ -690,18 +690,13 @@ std::vector<std::pair<const CaseStatementSyntax*, size_t>> CaseCollector::getFou
 
 // MARK: BinopRemover
 
-// Operators whose operands can be dropped to test for a dead operand. Excludes
+// Operators whose operands can be dropped to test for a dead operand: bitwise
+// (&, |, ^, ~^), logical (&&, ||), and shifts (<<, >>, <<<, >>>). Excludes
 // assignments (left is an lvalue), comparisons/equality (1-bit result), and the
-// property operators (->, <->). mul/div/mod stay in: even when the backend
-// blackboxes wide ones, the reduction is still a decidable check.
+// property operators (->, <->). Arithmetic (+, -, *, /, %, **) is deliberately
+// excluded: reducing an arithmetic operand rarely isolates dead logic.
 static bool isReducibleBinop(SyntaxKind kind) {
     switch (kind) {
-        case SyntaxKind::AddExpression:
-        case SyntaxKind::SubtractExpression:
-        case SyntaxKind::MultiplyExpression:
-        case SyntaxKind::DivideExpression:
-        case SyntaxKind::ModExpression:
-        case SyntaxKind::PowerExpression:
         case SyntaxKind::BinaryAndExpression:
         case SyntaxKind::BinaryOrExpression:
         case SyntaxKind::BinaryXorExpression:
@@ -724,12 +719,6 @@ static bool isReducibleBinop(SyntaxKind kind) {
 // not in the reducible set collapses to the generic "binop".
 static std::string_view binopName(SyntaxKind kind) {
     switch (kind) {
-        case SyntaxKind::AddExpression: return "add";
-        case SyntaxKind::SubtractExpression: return "sub";
-        case SyntaxKind::MultiplyExpression: return "mul";
-        case SyntaxKind::DivideExpression: return "div";
-        case SyntaxKind::ModExpression: return "mod";
-        case SyntaxKind::PowerExpression: return "pow";
         case SyntaxKind::BinaryAndExpression: return "and";
         case SyntaxKind::BinaryOrExpression: return "or";
         case SyntaxKind::BinaryXorExpression: return "xor";
