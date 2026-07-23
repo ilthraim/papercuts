@@ -78,7 +78,15 @@ class StatusWriter:
         # Load-bearing gate verdicts, surfaced in the stats file for context.
         self._gate: "tuple[str | None, bool] | None" = None
         self._selfcheck: "tuple[str | None, bool] | None" = None
-        self._flush()
+        # status.json/stats.log feed a viewer that polls ~every 2s, so writing on
+        # every lifecycle transition -- each rewrite re-serializes ALL tasks, so
+        # the cost is O(checks^2) -- does not scale past a few thousand cuts (an
+        # 11k-cut register loop alone took >2 min). Coalesce: an unforced _flush()
+        # writes at most once per _min_flush_interval; forced flushes (phase
+        # changes, the batch register() below, terminal verdicts) always write.
+        self._min_flush_interval = 0.25
+        self._last_flush = 0.0
+        self._flush(force=True)
 
     def _bump_type(self, ctype: str) -> dict:
         return self._by_type.setdefault(
@@ -88,13 +96,27 @@ class StatusWriter:
     def set_phase(self, phase: str) -> None:
         """Record the pipeline's current high-level phase (for the header)."""
         self._phase = phase
-        self._flush()
+        self._flush(force=True)
 
-    def register(self, task_id, phase: str, label: str, ctype: str = "") -> None:
+    def flush(self) -> None:
+        """Force a snapshot write now.
+
+        Public counterpart to the internal throttled flush: call after a batch of
+        ``register(..., flush=False)`` to publish the whole backlog in one write.
+        """
+        self._flush(force=True)
+
+    def register(
+        self, task_id, phase: str, label: str, ctype: str = "", flush: bool = True
+    ) -> None:
         """Add a check as ``pending`` so the backlog is visible before dispatch.
 
         ``ctype`` is the kind of cut being checked (e.g. ``bitshrink``,
         ``ternary(keep-true)``); empty for non-cut checks (self-check, gate).
+
+        Pass ``flush=False`` when registering many checks in a loop, then call
+        :meth:`flush` once -- otherwise each register re-serializes the growing
+        task list to disk (O(n^2), the 11k-cut startup stall).
         """
         self._tasks[task_id] = {
             "phase": phase,
@@ -108,7 +130,8 @@ class StatusWriter:
         }
         if ctype:
             self._bump_type(ctype)["planned"] += 1
-        self._flush()
+        if flush:
+            self._flush()
 
     def start(self, task_id, phase: str = "", label: str = "", ctype: str = "") -> None:
         """Mark a check ``running`` and stamp its start time.
@@ -122,7 +145,8 @@ class StatusWriter:
             t = self._tasks[task_id]
         t["state"] = RUNNING
         t["start"] = time.time()
-        self._flush()
+        # Force for the one-off load-bearing checks; throttle the many cut checks.
+        self._flush(force=t.get("phase") in ("selfcheck", "gate"))
 
     def finish(self, task_id, verdict, valid: bool) -> None:
         """Mark a check ``done`` with its verdict and validity."""
@@ -147,12 +171,14 @@ class StatusWriter:
                 # inconclusive vs error) stays a clean breakdown of the failures.
                 key = verdict or "unknown"
                 agg["verdicts"][key] = agg["verdicts"].get(key, 0) + 1
+        is_load_bearing = t.get("phase") in ("gate", "selfcheck")
         if t.get("phase") == "gate":
             self._gate = (verdict, bool(valid))
         elif t.get("phase") == "selfcheck":
             self._selfcheck = (verdict, bool(valid))
 
-        self._flush()
+        # Force for the one-off load-bearing checks; throttle the many cut checks.
+        self._flush(force=is_load_bearing)
 
     def _totals(self) -> dict:
         """Grand totals across all counted (cut) types."""
@@ -171,7 +197,14 @@ class StatusWriter:
             "verdicts": verdicts,
         }
 
-    def _flush(self) -> None:
+    def _flush(self, force: bool = False) -> None:
+        # Coalesce high-frequency unforced flushes (start/finish of many cuts) so
+        # the write rate -- and the O(n) per-write serialization -- stays bounded
+        # regardless of cut count. Forced flushes always write.
+        now = time.time()
+        if not force and (now - self._last_flush) < self._min_flush_interval:
+            return
+        self._last_flush = now
         snapshot = {
             "pid": self._pid,
             "started": self._started,

@@ -31,10 +31,11 @@ class ModuleCuts:
 
     name: str
     tree: SyntaxTree           # concretized source tree (pre-cut)
-    pc: Papercutter | None     # cutter for later cut_index() consolidation (None if excluded)
+    pc: Papercutter | None     # cutter used to generate each cut on demand + consolidate (None if excluded)
     is_top: bool
     cut_infos: list            # per-index (type, line) from pc.cut_info()
     cur_dir: str
+    baseline: str = ""         # serialized pre-cut source; a cut equal to it is a no-op
     runs: list[Run] = field(default_factory=list)
     excluded: bool = False     # kept in the golden source but never cut
     noops: list[int] = field(default_factory=list)  # cut indices identical to source (never FVed)
@@ -562,21 +563,29 @@ async def main():
                 f.write(print_tree(rewrite))
         status("Mux rewrites complete.")
 
-    # MARK: Phase 1 -- enumerate every cut across every module up front.
-    # Every candidate rewrite for every module is written to disk and collected
-    # into a single flat list, so the equivalence checks can later run in
-    # parallel across module boundaries (up to --max-jobs) instead of one module
-    # at a time.
+    # MARK: Phase 1 -- enumerate every cut across every module.
+    # Enumeration only reads the cut PLAN (pc.cut_info(): type + line per cut,
+    # cheap) and records one Run per candidate cut. It does NOT generate cut
+    # sources, write files, or create folders here. Generating a cut is the
+    # expensive step (a full CST clone + serialize, O(module_size) each), so
+    # doing it up front for every cut is what made this phase slow and I/O-heavy.
+    # Instead each source is produced just-in-time: in the -e path by the check
+    # task that consumes it (so generation overlaps jg latency and only checked
+    # cuts ever hit disk); in the no-e path by the writer loop below (the cut
+    # sources are that path's deliverable).
+    #
+    # A cut whose serialized form is byte-identical to the baseline changed
+    # nothing -- a cut-generation bug -- and must never reach FV, where it would
+    # trivially "prove". Detecting a no-op requires generating the cut, so no-ops
+    # are discovered at generation time (in-task for -e, in the writer loop for
+    # no-e), not here. Consequently the pre-run plan below is a superset that
+    # includes any would-be no-ops; the authoritative no-op accounting lands in
+    # papercuts.log (and results.jsonl) once generation has happened.
     status("Enumerating cuts...")
     modules: list[ModuleCuts] = []
     all_runs: list[Run] = []
     for tree, name in conc_trees:
-        cur_dir = f"{output_dir}/{name}"
-        # The per-module folder is created lazily, only when the first cut source
-        # is actually written into it (see below). Creating it here for every
-        # module -- one NFS mkdir each -- wasted a metadata round-trip on excluded
-        # and all-no-op modules that never get a file, and folder count scales
-        # with instance count on a flattened design.
+        cur_dir = f"{output_dir}/{name}"  # created lazily, only when a cut is written
         is_top = name == top_name
 
         if is_excluded(name):
@@ -608,41 +617,9 @@ async def main():
             is_top=is_top,
             cut_infos=cut_infos,
             cur_dir=cur_dir,
+            baseline=print_tree(ntree),
         )
-        # Baseline every cut is compared against: the elaborated per-module source
-        # (the same text written to ctree_dir and used as the FV spec). A cut whose
-        # serialized form is byte-identical to this changed nothing -- a
-        # cut-generation bug -- and must never reach FV, where it would trivially
-        # "prove" and masquerade as a valid, removable cut. Skip it and flag it as
-        # an error in the log instead.
-        #
-        # Cuts are enumerated one at a time via cut_index_text([idx]) (1:1 with
-        # the cut_info() ordering) rather than materializing them all up front
-        # with cut_all(). Holding every cut's full syntax tree alive at once made
-        # peak memory scale as O(num_cuts x module_size), which OOM'd on large
-        # designs right here while writing the per-cut sources.
-        #
-        # cut_index_text() returns the cut source as a string directly, skipping
-        # both the per-cut re-parse that cut_index() does (a full re-lex/parse of
-        # the whole module -- the dominant enumeration cost on large modules, and
-        # a steady grower of the shared SourceManager) and the Python-side
-        # print_tree() serialization. Only the text is needed here.
-        baseline = print_tree(ntree)
-        made_dir = False
         for idx in range(len(cut_infos)):
-            cut_src = pc.cut_index_text([idx])
-            if cut_src == baseline:
-                ctype, line = cut_infos[idx]
-                mod.noops.append(idx)
-                status(
-                    f"WARNING: {name} idx={idx} {ctype} L{line} is a NO-OP "
-                    f"(identical to elaborated source); excluded from FV"
-                )
-                continue
-            if not made_dir:
-                # Created only now -- the module has at least one real cut to write.
-                os.makedirs(cur_dir, exist_ok=True)
-                made_dir = True
             run = Run(
                 top_module_path=f"{ctree_dir}/{top_name}.sv",
                 spec_lib_path=ctree_dir,
@@ -651,49 +628,93 @@ async def main():
                 is_top=is_top,
                 index=idx,
             )
-            with open(run.impl_module_path, "w") as f:
-                f.write(cut_src)
             mod.runs.append(run)
             all_runs.append(run)
         modules.append(mod)
 
-    status(f"{len(all_runs)} cuts across {len(modules)} modules")
+    status(f"{len(all_runs)} candidate cuts across {len(modules)} modules")
 
     log_path = f"{output_dir}/papercuts.log"
-
-    n_noop = sum(len(m.noops) for m in modules)
-    if n_noop:
-        status(
-            f"WARNING: {n_noop} no-op cut(s) detected (identical to elaborated "
-            f"source); excluded from FV. See {log_path}"
-        )
-
-    # Pre-cut test plan: every planned cut and its type, before any FV runs.
     plan_path = f"{output_dir}/papercuts.plan.log"
-    write_cut_plan(plan_path, modules, blackboxed=elab.blackboxed)
-    status(f"Cut plan ({len(all_runs)} planned tests) written to {plan_path}")
 
     if not args.check_equivalence:
+        # Enumeration-only: the cut sources ARE the deliverable, so generate and
+        # write them now (folders created lazily). No-ops are detected here, so
+        # this path's plan is exact.
+        status("Writing cut sources...")
+        for mod in modules:
+            if mod.excluded:
+                continue
+            made_dir = False
+            kept: list[Run] = []
+            for run in mod.runs:
+                cut_src = mod.pc.cut_index_text([run.index])
+                if cut_src == mod.baseline:
+                    mod.noops.append(run.index)
+                    ctype, line = mod.cut_infos[run.index]
+                    status(
+                        f"WARNING: {mod.name} idx={run.index} {ctype} L{line} is a "
+                        f"NO-OP (identical to elaborated source); excluded from FV"
+                    )
+                    continue
+                if not made_dir:
+                    os.makedirs(mod.cur_dir, exist_ok=True)
+                    made_dir = True
+                with open(run.impl_module_path, "w") as f:
+                    f.write(cut_src)
+                kept.append(run)
+            mod.runs = kept
+
+        n_noop = sum(len(m.noops) for m in modules)
+        if n_noop:
+            status(
+                f"WARNING: {n_noop} no-op cut(s) detected (identical to elaborated "
+                f"source); excluded from FV. See {log_path}"
+            )
+        write_cut_plan(plan_path, modules, blackboxed=elab.blackboxed)
         write_papercuts_log(log_path, modules, checked=False, fv_gate=fv_gate_result)
         status(f"Enumeration-only (no -e). Cut summary written to {log_path}")
         return
 
-    # Label lookup for progress lines, keyed by run identity.
+    # -e path: the plan is written before any FV run, so it is a pre-run superset
+    # (no-ops are only discovered as each cut is generated during checking).
+    write_cut_plan(plan_path, modules, blackboxed=elab.blackboxed)
+    status(
+        f"Cut plan ({len(all_runs)} planned tests; no-ops detected during "
+        f"checking) written to {plan_path}"
+    )
+
+    # Label lookup + owning module for progress lines and just-in-time cut
+    # generation, keyed by run identity.
     labels = {}
+    owner: dict[int, ModuleCuts] = {}
     for mod in modules:
         for run in mod.runs:
             ctype, line = mod.cut_infos[run.index]
             labels[id(run)] = (mod.name, ctype, line)
+            owner[id(run)] = mod
 
     # Register every cut as pending so the status viewer shows the full backlog
-    # before the checks start dispatching.
+    # before the checks start dispatching. Batch: register without flushing, then
+    # publish the whole backlog in one write -- flushing per cut re-serializes the
+    # growing task list each time (O(n^2)), which stalled startup for minutes on
+    # an 11k-cut design.
     tracker.set_phase("cuts")
     for mod in modules:
         for run in mod.runs:
             ctype = mod.cut_infos[run.index][0]
-            tracker.register(id(run), "cuts", f"{mod.name}_pc{run.index}", ctype)
+            tracker.register(
+                id(run), "cuts", f"{mod.name}_pc{run.index}", ctype, flush=False
+            )
+    tracker.flush()
 
     # MARK: Phase 2 -- check every cut in parallel under one global limit.
+    # Each task generates its own cut source, writes its file (creating the
+    # module folder on demand), then runs the check -- all inside the semaphore,
+    # so generation overlaps other checks' jg latency and at most --max-jobs cut
+    # sources are ever live at once (keeps the memory bound). A cut that
+    # serializes to the baseline is a no-op: recorded and skipped, never sent to
+    # FV.
     status(f"Checking equivalence ({len(all_runs)} cuts, max_jobs={args.max_jobs})...")
     semaphore = asyncio.Semaphore(args.max_jobs)
     total = len(all_runs)
@@ -702,7 +723,29 @@ async def main():
     async def run_with_limit(run: Run):
         nonlocal done
         async with semaphore:
+            mod = owner[id(run)]
             mname, ctype, line = labels[id(run)]
+
+            # Generate this cut just-in-time (CPU-bound C++, runs to completion
+            # before the loop yields -- safe to call on the shared Papercutter).
+            cut_src = mod.pc.cut_index_text([run.index])
+            if cut_src == mod.baseline:
+                run.noop = True
+                mod.noops.append(run.index)
+                tracker.finish(id(run), "noop", False)
+                append_result(results_path, {
+                    "ts": time.time(), "phase": "cuts", "module": mname,
+                    "idx": run.index, "type": ctype, "line": line,
+                    "valid": False, "verdict": "noop", "elapsed": 0.0,
+                })
+                done += 1
+                status(f"EC {done}/{total}  {mname} idx={run.index} {ctype} L{line}  NO-OP")
+                return run
+
+            os.makedirs(mod.cur_dir, exist_ok=True)
+            with open(run.impl_module_path, "w") as f:
+                f.write(cut_src)
+
             tracker.start(id(run))
             t0 = time.time()
             try:
@@ -723,8 +766,20 @@ async def main():
 
     await asyncio.gather(*(run_with_limit(run) for run in all_runs))
 
+    # Relocate no-ops discovered during checking out of runs so the log and stats
+    # treat them as no-ops (ERR rows), not as failed checks.
+    for mod in modules:
+        if any(getattr(r, "noop", False) for r in mod.runs):
+            mod.runs = [r for r in mod.runs if not getattr(r, "noop", False)]
+
+    n_noop = sum(len(m.noops) for m in modules)
+    if n_noop:
+        status(
+            f"WARNING: {n_noop} no-op cut(s) detected (identical to elaborated "
+            f"source); excluded from FV. See {log_path}"
+        )
     n_valid = sum(1 for run in all_runs if run.valid)
-    status(f"done: {n_valid}/{total} cuts valid")
+    status(f"done: {n_valid}/{total - n_noop} cuts valid")
 
     # Persist the per-cut summary before consolidation.
     write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate_result)
@@ -733,8 +788,8 @@ async def main():
     # Collect every individually-proven cut's source into working_cuts/ for easy
     # access, alongside concrete_sources/ and consolidated_sources/. Each file is
     # the module's source with exactly one valid cut applied (<module>_pc<idx>.sv,
-    # already written at enumeration); filenames are module-prefixed so a single
-    # flat directory never collides across modules.
+    # written by its check task); filenames are module-prefixed so a single flat
+    # directory never collides across modules.
     n_working = 0
     for mod in modules:
         for run in mod.runs:
