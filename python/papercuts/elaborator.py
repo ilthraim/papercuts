@@ -140,6 +140,16 @@ class Emitter:
         # Rendered text of the current compound-assignment target, used to emit
         # an LValueReference (slang's stand-in for the lvalue inside "x OP= y").
         self._lvalue = None
+        # Dead-code pruning: hierarchicalPaths of symbols to omit from emission
+        # (dead nets/vars + their sole-target drivers, plus declarations that
+        # became unused). Populated by the deadcode prune pass; empty => emit
+        # everything unchanged.
+        self.prune_paths = set()
+        # Bit-level dead-code pruning: hierarchicalPath -> set of dead bit indices
+        # for PARTIALLY-dead signals (some bits read, some not). An assignment
+        # whose whole written bit-range lies inside the dead set is dropped; the
+        # declaration is kept (live bits remain). Empty => no bit-level pruning.
+        self.prune_bits = {}
 
     # --- output helpers ------------------------------------------------------
 
@@ -431,8 +441,127 @@ class Emitter:
                 continue
             self._emit_member(m)
 
+    # --- dead-code pruning helpers -------------------------------------------
+
+    def _lvalue_root_symbol(self, expr):
+        """Root symbol written by an lvalue expression, climbing selects /
+        member-access / conversions to the base reference. Returns None for
+        anything without a single root (e.g. a concatenation lvalue), so such
+        targets are never treated as prunable."""
+        k = kind(expr)
+        while k in ("ElementSelect", "RangeSelect", "MemberAccess", "Conversion"):
+            expr = expr.operand if k == "Conversion" else expr.value
+            if expr is None:
+                return None
+            k = kind(expr)
+        return getattr(expr, "symbol", None)
+
+    def _is_pruned_target(self, assignment):
+        """True if this assignment's sole lvalue is a pruned (dead) signal."""
+        if not self.prune_paths:
+            return False
+        sym = self._lvalue_root_symbol(assignment.left)
+        if sym is None:
+            return False
+        return getattr(sym, "hierarchicalPath", None) in self.prune_paths
+
+    def _const_index(self, expr):
+        """Constant integer value of a bit/range-select index expression, or
+        None if it is not a compile-time constant (folded constants expose
+        ``.constant``; a bare index literal carries its value in ``.value``)."""
+        c = getattr(expr, "constant", None)
+        if c is not None:
+            try:
+                return int(str(c))
+            except Exception:
+                pass
+        if kind(expr) == "IntegerLiteral":
+            try:
+                return int(str(expr.value))
+            except Exception:
+                pass
+        return None
+
+    def _lvalue_written_bits(self, left):
+        """(root symbol, set of written bit indices) for a constant bit/range
+        select over a plain signal; (symbol, None) when the written range can't
+        be pinned to constant bits (whole signal, variable/part-select index);
+        (None, None) if not a simple signal lvalue. Only a definite constant
+        bit set is ever eligible for bit-level pruning."""
+        k = kind(left)
+        if k == "ElementSelect" and kind(left.value) == "NamedValue":
+            idx = self._const_index(left.selector)
+            return left.value.symbol, ({idx} if idx is not None else None)
+        if k == "RangeSelect" and kind(left.value) == "NamedValue":
+            lo = self._const_index(left.left)
+            hi = self._const_index(left.right)
+            if lo is not None and hi is not None and left.selectionKind.name == "Simple":
+                return left.value.symbol, set(range(min(lo, hi), max(lo, hi) + 1))
+            return left.value.symbol, None
+        if k == "NamedValue":
+            return left.symbol, None
+        return None, None
+
+    def _is_bit_pruned(self, assignment):
+        """True if this assignment writes ONLY dead bits of a partially-dead
+        signal (so it can be dropped while the declaration and live-bit drivers
+        stay)."""
+        if not self.prune_bits:
+            return False
+        sym, bits = self._lvalue_written_bits(assignment.left)
+        if sym is None or bits is None:
+            return False
+        dead = self.prune_bits.get(getattr(sym, "hierarchicalPath", None))
+        return dead is not None and bits <= dead
+
+    def _stmt_all_dead(self, stmt):
+        """True if emitting ``stmt`` would produce only assignments to pruned
+        (dead) signals -- i.e. it can be dropped without losing any live logic.
+        Conservative: unknown / side-effecting statements (calls, ``$display``,
+        etc.) return False so they are always kept."""
+        if (not self.prune_paths and not self.prune_bits) or stmt is None:
+            return False
+        k = kind(stmt)
+        if k == "ExpressionStatement":
+            e = stmt.expr
+            return kind(e) == "Assignment" and (
+                self._is_pruned_target(e) or self._is_bit_pruned(e)
+            )
+        if k == "List":
+            subs = list(stmt.list)
+            return bool(subs) and all(self._stmt_all_dead(s) for s in subs)
+        if k == "Block":
+            body = getattr(stmt, "body", None)
+            return self._stmt_all_dead(body) if body is not None else False
+        if k == "Timed":
+            return self._stmt_all_dead(stmt.stmt)
+        if k == "Conditional":
+            ift = self._stmt_all_dead(stmt.ifTrue)
+            iff = getattr(stmt, "ifFalse", None)
+            return ift and (iff is None or self._stmt_all_dead(iff))
+        if k == "Case":
+            items_dead = all(self._stmt_all_dead(it.stmt) for it in stmt.items)
+            dflt = getattr(stmt, "defaultCase", None)
+            return items_dead and (dflt is None or self._stmt_all_dead(dflt))
+        if k == "ForLoop":
+            return self._stmt_all_dead(stmt.body)
+        return False
+
     def _emit_member(self, m):
         k = kind(m)
+        # Dead-code pruning: drop dead signal declarations, their sole-target
+        # continuous-assign drivers, and declarations that became unused. Port
+        # params never reach here (emitted in the header) and are excluded from
+        # the prune set anyway, so a matching Parameter is always a localparam.
+        if self.prune_paths or self.prune_bits:
+            if k in ("Net", "Variable", "Parameter", "TypeAlias") and \
+                    getattr(m, "hierarchicalPath", None) in self.prune_paths:
+                return
+            if k == "ContinuousAssign" and (
+                self._is_pruned_target(m.assignment)
+                or self._is_bit_pruned(m.assignment)
+            ):
+                return
         if k == "Parameter":
             self.emit(self._parameter_decl(m) + ";")
         elif k == "Net":
@@ -694,6 +823,12 @@ class Emitter:
         if keyword is None:
             raise EmitError(f"unsupported procedure kind: {node.procedureKind.name!r}")
         body = node.body
+        # Drop a block that, after pruning, drives only dead signals (its whole
+        # body would render empty). _stmt_all_dead is conservative -- a block
+        # with any live assignment or side effect ($display, etc.) is kept.
+        inner = body.stmt if kind(body) == "Timed" else body
+        if self._stmt_all_dead(inner):
+            return
         if kind(body) == "Timed":
             timing = self.timing(body.timing)
             self._emit_statement_open(body.stmt, prefix=f"{keyword} {timing} ")
@@ -701,6 +836,13 @@ class Emitter:
             self._emit_statement_open(body, prefix=f"{keyword} ")
 
     def _emit_statement_open(self, stmt, prefix=""):
+        # A sub-statement that prunes to nothing: keep syntax valid where a
+        # statement is required after a prefix (if/else/case-item/for), emit
+        # nothing otherwise.
+        if self._stmt_all_dead(stmt):
+            if prefix:
+                self.emit(prefix + ";")
+            return
         if kind(stmt) in ("Block", "List"):
             self.emit(prefix + "begin")
             self.level += 1
@@ -722,10 +864,12 @@ class Emitter:
         k = kind(stmt)
         if k == "List":
             for s in stmt.list:
+                if self._stmt_all_dead(s):
+                    continue
                 self.statement(s)
         elif k == "Block":
             self._emit_stmt_body(stmt.body)
-        else:
+        elif not self._stmt_all_dead(stmt):
             self.statement(stmt)
 
     def statement(self, stmt):
@@ -743,12 +887,19 @@ class Emitter:
 
     def _stmt_List(self, stmt):
         for s in stmt.list:
+            if self._stmt_all_dead(s):
+                continue
             self.statement(s)
 
     def _stmt_Empty(self, stmt):
         self.emit(";")
 
     def _stmt_ExpressionStatement(self, stmt):
+        # Belt-and-braces: a dead-target assignment reached directly (not via the
+        # list/branch filters) still emits nothing.
+        if kind(stmt.expr) == "Assignment" \
+                and (self._is_pruned_target(stmt.expr) or self._is_bit_pruned(stmt.expr)):
+            return
         self.emit(self.expr(stmt.expr) + ";")
 
     def _stmt_VariableDeclaration(self, stmt):

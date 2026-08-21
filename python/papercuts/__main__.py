@@ -19,6 +19,7 @@ import papercuts.chipper as chipper
 from papercuts.elaborator import (
     elaborate_design, build_compilation_from, ElaborationError, EmitError, make_parse_env,
 )
+from papercuts.deadcode import prune_dead_source
 from papercuts.utils import print_tree, status, set_verbose, Run
 from papercuts.ec import generate_jasper_tcl_script
 from papercuts.backends import discover_backends, get_backend
@@ -80,6 +81,7 @@ def write_papercuts_log(
     checked: bool,
     final_runs: "list[tuple[ModuleCuts, Run]] | None" = None,
     fv_gate: "str | None" = None,
+    prune_stats=None,
 ) -> None:
     """Write a text summary of every papercut that was tried.
 
@@ -132,6 +134,12 @@ def write_papercuts_log(
         )
         if fv_gate is not None:
             f.write(f"# elaboration-vs-original FV gate: {fv_gate}\n")
+        if prune_stats is not None:
+            f.write(
+                f"# dead-code prune: removed {prune_stats.signals} signal(s), "
+                f"{prune_stats.bits} dead bit(s), {prune_stats.decls} decl(s) "
+                f"in {prune_stats.iters} iteration(s)\n"
+            )
         f.write(
             f"# {'module':<{w_mod}}  {'idx':>4}  {'type':<{w_type}}  {'line':>6}  valid\n"
         )
@@ -394,6 +402,21 @@ async def main():
         "(default: on; use --no-fold-constants to emit the raw arithmetic).",
     )
     parser.add_argument(
+        "--prune-dead",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Before enumerating cuts, remove dead code from the elaborated "
+        "source -- signals that are never read or never driven, the logic that "
+        "solely drives them, and declarations (localparams/typedefs) that become "
+        "unused -- iterating to a fixpoint. Also re-prunes each consolidated "
+        "module after cutting. Cuts on dead logic would just burn FV checks "
+        "proving that deleting something no output reads changes nothing, so "
+        "this cuts both enumeration and FV time; pruning only removes "
+        "unobservable logic, and the elaboration-vs-original FV gate backstops "
+        "it. On by default; --no-prune-dead disables. No effect under --in-situ "
+        "(no elaboration/emit step).",
+    )
+    parser.add_argument(
         "--only-families",
         metavar="LIST",
         default=None,
@@ -511,6 +534,9 @@ async def main():
     # those of multi-packed-dim vectors. Empty => those stay uncut.
     symbolic_ranges: dict[str, dict[str, list[tuple[int, int]]]] = {}
     elab_blob_path = None
+    # Dead-code prune summary for the elaborated blob (None => pruning not run,
+    # e.g. --no-prune-dead or --in-situ). Recorded into papercuts.log.
+    prune_stats = None
 
     if args.in_situ:
         # MARK: In-situ front end -- no elaboration, no rewriting.
@@ -550,6 +576,9 @@ async def main():
         }
         status(f"In-situ top: {top_name} ({len(conc_trees)} module definitions, "
                f"not elaborated)")
+        if args.prune_dead:
+            status("note: --prune-dead has no effect under --in-situ "
+                   "(no elaboration/emit step to prune); original source is cut as-is")
     else:
         # MARK: Elaboration -- the canonical front end.
         # Unroll generates, resolve parameters, and flatten hierarchy up front by
@@ -574,6 +603,26 @@ async def main():
         top_name = elab.top
         status(f"Elaborated top: {top_name}")
 
+        # Dead-code prune (on by default): drop signals nothing reads or drives,
+        # the logic that solely drives them, and now-unused localparams/typedefs,
+        # so no cut or FV check is ever spent on logic no output can observe. Only
+        # unobservable logic is removed, and the Phase-0 gate below re-proves the
+        # pruned blob == original, so an over-prune fails loudly rather than
+        # silently. Verbatim/excluded modules are protected (left untouched).
+        elab_source = elab.source
+        if args.prune_dead:
+            status("Pruning dead code (unread/undriven signals)...")
+            elab_source, prune_stats = prune_dead_source(
+                elab_source, top_name,
+                protect_modules=elab.verbatim,
+                fold_constants=args.fold_constants,
+            )
+            status(
+                f"Dead-code prune: removed {prune_stats.signals} signal(s), "
+                f"{prune_stats.bits} dead bit(s), and {prune_stats.decls} decl(s) "
+                f"over {prune_stats.iters} iteration(s)"
+            )
+
         # The elaborated whole-design source is a single self-contained blob (all
         # specialized submodules + verbatim boundaries in one file). Keep it in its
         # own dir so it never pollutes the original-source library used by the gate.
@@ -581,12 +630,12 @@ async def main():
         os.makedirs(elab_dir, exist_ok=True)
         elab_blob_path = f"{elab_dir}/{top_name}_elaborated.sv"
         with open(elab_blob_path, "w") as f:
-            f.write(elab.source)
+            f.write(elab_source)
 
         # Canonical per-module sources = the elaborated blob, split one module per
         # file. This replaces the old concretized-tree list and becomes the cut spec
         # lib. split_tree yields (name, tree); the pipeline consumes (tree, name).
-        blob_tree = SyntaxTree.fromText(elab.source)
+        blob_tree = SyntaxTree.fromText(elab_source)
         conc_trees = [(tree, name) for name, tree in chipper.split_tree(blob_tree)]
 
         # The elaborator emits an excluded module AND its whole subtree verbatim
@@ -855,7 +904,8 @@ async def main():
                 f"source); excluded from FV. See {log_path}"
             )
         write_cut_plan(plan_path, modules)
-        write_papercuts_log(log_path, modules, checked=False, fv_gate=fv_gate_result)
+        write_papercuts_log(log_path, modules, checked=False, fv_gate=fv_gate_result,
+                            prune_stats=prune_stats)
         status(f"Enumeration-only (no -e). Cut summary written to {log_path}")
         return
 
@@ -999,7 +1049,8 @@ async def main():
     status(f"done: {n_valid}/{total - n_noop} cuts valid")
 
     # Persist the per-cut summary before consolidation.
-    write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate_result)
+    write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate_result,
+                        prune_stats=prune_stats)
     status(f"Cut summary written to {log_path}")
 
     # Collect every individually-proven cut's source into working_cuts/ for easy
@@ -1035,11 +1086,20 @@ async def main():
         # N bits merges at N bits (not 1). cut_index ignores amounts for non-bitshrink
         # indices, so passing every valid run's amount is safe.
         amounts = {run.index: run.shrink_amount for run in mod.runs if run.valid}
+        consolidated_text = (
+            print_tree(mod.pc.cut_index(working, amounts)) if working
+            else print_tree(mod.tree)
+        )
+        # Re-prune after cutting: a cut can leave logic that now feeds nothing.
+        # Skipped under --in-situ (pruning re-emits, which would defeat in-situ's
+        # cut-original-source premise). The consolidated FV check below verifies
+        # this pruned source against the golden, so the prune is proven too.
+        if args.prune_dead and not args.in_situ:
+            consolidated_text, _ = prune_dead_source(
+                consolidated_text, mod.name, fold_constants=args.fold_constants
+            )
         with open(out_path, "w") as f:
-            if working:
-                f.write(print_tree(mod.pc.cut_index(working, amounts)))
-            else:
-                f.write(print_tree(mod.tree))
+            f.write(consolidated_text)
 
         work_dir = f"{consolidated_dir}/{mod.name}"
         os.makedirs(work_dir, exist_ok=True)
@@ -1092,7 +1152,8 @@ async def main():
     # Rewrite the log now that consolidation verdicts are known, so the final
     # papercuts.log includes both the per-cut table and the consolidated results.
     write_papercuts_log(
-        log_path, modules, checked=True, final_runs=final_runs, fv_gate=fv_gate_result
+        log_path, modules, checked=True, final_runs=final_runs, fv_gate=fv_gate_result,
+        prune_stats=prune_stats,
     )
     status(f"Consolidated results written to {log_path}")
 
