@@ -226,6 +226,11 @@ def generate_jasper_wrapper(
 
 
 # MARK: Jasper TCL
+#: Filename of the TCL script the Jasper backend writes and `jg` is pointed at.
+#: Written to (and invoked from) the current working directory.
+TCL_SCRIPT_NAME = "pcjg.tcl"
+
+
 def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
     """
     Generate a TCL script for formal verification of the wrapper module.
@@ -261,7 +266,18 @@ def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
 
     return tcl_script
 
-def generate_jasper_tcl_script() -> str:
+def generate_jasper_tcl_script(clock: "str | None" = None,
+                               reset: "str | None" = None) -> str:
+    """Render the SEC script, optionally declaring a clock and a reset.
+
+    ``clock`` is a top-level signal name and ``reset`` a top-level expression,
+    emitted verbatim as Jasper's ``clock``/``reset`` commands. Both default to
+    None, which keeps the clock-free ``clock -none`` / ``reset -none`` setup.
+
+    Every check elaborates at the design top in both compile contexts (see the
+    ``is_top`` branch below), so a single pair of top-level names is correct for
+    every run -- per-cut, consolidated, and the two load-bearing gates alike.
+    """
     tcl_script = "# TCL script for formal verification of wrapper module\n"
     tcl_script += """\n
 #Arguments are : (5) top_module_path, (6) spec_lib_path, (7) imp_module_path, (8) is_top
@@ -283,9 +299,14 @@ if {[catch {
     analyze -sv -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     # Setup verification environment
-    reset -none
-    clock -none
-    check_sec -setup
+"""
+    # A reset expression routinely contains spaces (e.g. "rst == 1'b1"), which
+    # TCL would otherwise split into separate arguments; braces make it one
+    # argument and suppress TCL substitution of any $ or [ inside the SV
+    # expression. A bare signal name is unaffected by the bracing.
+    tcl_script += f"    reset {'{' + reset + '}' if reset else '-none'}\n"
+    tcl_script += f"    clock {clock if clock else '-none'}\n"
+    tcl_script += """    check_sec -setup
     check_sec -auto_map_reset_x_values on
     report -summary
     check_sec -interface
@@ -363,7 +384,7 @@ async def run_jasper(run: pc_core.Run, print_output: bool = False):
     # the inherited tty into raw mode (ONLCR off) and doesn't restore it, making
     # subsequent status prints "stairstep" across the screen.
     process = await asyncio.create_subprocess_shell(
-        f"csh -c 'jg -no_gui -proj {run.impl_module_folder}/jgproject{run.index} pcjg.tcl --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
+        f"csh -c 'jg -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {TCL_SCRIPT_NAME} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

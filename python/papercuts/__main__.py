@@ -21,7 +21,6 @@ from papercuts.elaborator import (
 )
 from papercuts.deadcode import prune_dead_source
 from papercuts.utils import print_tree, status, set_verbose, Run
-from papercuts.ec import generate_jasper_tcl_script
 from papercuts.backends import discover_backends, get_backend
 from papercuts.pypercuts import Papercutter, insert_muxes
 from papercuts.status import StatusWriter
@@ -428,8 +427,14 @@ async def main():
     )
 
     # Two-phase parse: resolve the backend, let it add its own args, then parse.
-    args, _ = parser.parse_known_args()
-    backend_cls = get_backend(args.backend)
+    # Phase 1 runs on a throwaway parser that knows only --backend and has no
+    # -h/--help of its own: parsing with the real parser here would make --help
+    # exit before the backend has registered its arguments, so they would never
+    # appear in the help text.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--backend", default="jg")
+    pre_args, _ = pre.parse_known_args()
+    backend_cls = get_backend(pre_args.backend)
     backend_cls.add_cli_args(parser)
     args = parser.parse_args()
 
@@ -671,9 +676,11 @@ async def main():
     working_dir = f"{output_dir}/working_cuts"
     os.makedirs(working_dir, exist_ok=True)
 
-    # write our tcl script for JasperGold equivalence checking
-    with open("pcjg.tcl", "w") as f:
-        f.write(generate_jasper_tcl_script())
+    # Let the backend write whatever tool scripts it needs (for jg, the SEC
+    # TCL, with any --clock/--reset declarations baked in). Only runs when a
+    # backend was selected, i.e. on an -e run.
+    if backend is not None:
+        backend.prepare()
 
     # The elaboration-vs-original FV verdict, recorded into papercuts.log below.
     fv_gate_result = None
