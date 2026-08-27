@@ -269,12 +269,13 @@ def generate_jasper_tcl_script() -> str:
 set is_top [lindex $argv 8]
 
 if {[catch {
+    clear -all
 
     check_sec -compile_context spec
     if {$is_top eq "True"} {
-        analyze -sv -y [lindex $argv 6] [lindex $argv 7] +libext+.sv
+        analyze -sv17 -y [lindex $argv 6] [lindex $argv 7] +libext+.sv
     } else {
-        analyze -sv -v [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
+        analyze -sv17 -v [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     }
     elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     # Analyze and elaborate the implementation design
@@ -282,11 +283,17 @@ if {[catch {
     analyze -sv -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     # Setup verification environment
-    check_sec -setup
     reset -none
     clock -none
+    check_sec -setup
+    check_sec -auto_map_reset_x_values on
+    report -summary
+    check_sec -interface
     # Run proof and check results
-    set res [check_sec -prove -silent]
+    set res [check_sec -prove -strategy proof]
+    report -summary
+    #do_sum
+    # prove -wait
 
     # Emit a machine-readable verdict marker so the runner can record WHY a check
     # failed (disproven vs. inconclusive), not just pass/fail. $res is whatever
