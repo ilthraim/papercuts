@@ -16,7 +16,23 @@ PYBIND11_MODULE(pypercuts, m) {
         py::arg("bitMux") = false,
         py::arg("ternaryMux") = false,
         py::arg("ifMux") = false,
+        py::arg("caseMux") = false,
+        py::arg("binopMux") = false,
+        py::arg("constForceMux") = false,
+        py::arg("binopsInConditionsOnly") = false,
         "Insert muxes into a SyntaxTree"
+    );
+
+    m.def("get_instantiated_modules", &papercuts::getInstantiatedModules,
+        py::arg("tree"),
+        "Names of the modules instantiated in a SyntaxTree, in source order"
+    );
+
+    m.def("wire_mux_hierarchy", &papercuts::wireMuxHierarchy,
+        py::arg("tree"),
+        py::arg("extraPorts"),
+        py::arg("conns"),
+        "Append forwarded pc_sel ports and connect them through to child instances"
     );
 
     m.def("rename_module", &papercuts::renameModule,

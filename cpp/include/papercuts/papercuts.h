@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -17,6 +18,8 @@
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/syntax/SyntaxTree.h"
 #include "slang/syntax/SyntaxVisitor.h"
+
+#include "papercuts/utils.h"
 
 using namespace slang::syntax;
 using namespace slang::parsing;
@@ -130,8 +133,21 @@ public:
 
 // MARK: Base functions
 
+// `caseMux` and `binopMux` do not insert controls yet -- they only reserve their
+// families' select numbers, so that the families after them stay aligned with cut
+// indices and stay aligned once those muxers land. See insertMuxes' definition.
+// Names of the modules instantiated inside `tree`, in source order, deduplicated.
+std::vector<std::string> getInstantiatedModules(const std::shared_ptr<SyntaxTree> tree);
+
+// See MuxWirer.
+std::shared_ptr<SyntaxTree> wireMuxHierarchy(
+    const std::shared_ptr<SyntaxTree> tree, const std::vector<std::string>& extraPorts,
+    const std::map<std::string, std::vector<std::pair<std::string, std::string>>>& conns);
+
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
-                                        bool ifMux);
+                                        bool ifMux, bool caseMux = false, bool binopMux = false,
+                                        bool constForceMux = false,
+                                        bool binopsInConditionsOnly = false);
 
 std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName);
 
@@ -196,6 +212,57 @@ protected:
         return SyntaxList<TNode>(buffer.copy(this->alloc));
     }
 
+    // MARK: expression construction
+    //
+    // These build replacements out of EXISTING nodes rather than re-parsed text.
+    // That distinction is load-bearing: slang's CloneVisitor resolves a replacement
+    // by visiting it (resolveReplacement), so a pending change *inside* a reused
+    // operand still gets applied. Building the same expression by parsing
+    // `node->toString()` produces a fresh subtree instead, and every nested
+    // replacement under it is silently dropped.
+
+    /// A single leading space, so generated operators don't jam against operands.
+    std::span<const Trivia> spaced() { return {&SyntaxRewriter<TDerived>::SingleSpace, 1}; }
+
+    IdentifierNameSyntax& makeIdentExpr(const std::string& name, bool leadingSpace = false) {
+        return factory.identifierName(
+            this->makeId(persistString(this->alloc, name), leadingSpace ? spaced() : std::span<const Trivia>{}));
+    }
+
+    ParenthesizedExpressionSyntax& makeParen(ExpressionSyntax& expr, bool leadingSpace = false) {
+        return factory.parenthesizedExpression(
+            makeToken(TokenKind::OpenParenthesis, "(", leadingSpace ? spaced() : std::span<const Trivia>{}),
+            expr, makeToken(TokenKind::CloseParenthesis, ")"));
+    }
+
+    ExpressionSyntax& makeNot(ExpressionSyntax& operand) {
+        return factory.prefixUnaryExpression(SyntaxKind::UnaryLogicalNotExpression,
+                                             makeToken(TokenKind::Exclamation, "!"),
+                                             std::span<AttributeInstanceSyntax*>{}, operand);
+    }
+
+    ExpressionSyntax& makeBinary(SyntaxKind kind, ExpressionSyntax& left, TokenKind opKind,
+                                 std::string_view opText, ExpressionSyntax& right) {
+        return factory.binaryExpression(kind, left, makeToken(opKind, opText, spaced()),
+                                        std::span<AttributeInstanceSyntax*>{}, right);
+    }
+
+    /// Rebuild a binary expression around its original operator token (and so its
+    /// original spacing), reusing both operand nodes.
+    ExpressionSyntax& makeBinary(SyntaxKind kind, ExpressionSyntax& left, Token operatorToken,
+                                 ExpressionSyntax& right) {
+        return factory.binaryExpression(kind, left, operatorToken,
+                                        std::span<AttributeInstanceSyntax*>{}, right);
+    }
+
+    ExpressionSyntax& makeTernary(ExpressionSyntax& predicate, ExpressionSyntax& whenTrue,
+                                  ExpressionSyntax& whenFalse) {
+        return factory.conditionalExpression(makeConditionalPredicate(predicate),
+                                             makeToken(TokenKind::Question, "?", spaced()),
+                                             std::span<AttributeInstanceSyntax*>{}, whenTrue,
+                                             makeColon(spaced()), whenFalse);
+    }
+
     // Helper function to wrap an expression in a conditional pattern -> conditional predidate
     // When inserting muxes, the parser will spit out an arbitrary parenthesized expression, but we need to convert
     // that to a conditional predicate in order to replace the predicate of an if statement or ternary operator
@@ -215,6 +282,15 @@ const Trivia PapercutsRewriter<TDerived>::NewLine{TriviaKind::EndOfLine, "\n"sv}
 
 // MARK: BitShrink
 // One shrinkable packed dimension of a declarator. A multi-dimensional vector
+// The declared type of a variable or net declaration, spelled back out so a
+// companion signal can be declared to match it exactly -- signing, net type and
+// every packed dimension included.
+struct DeclShape {
+    std::string typeHead;
+    const SyntaxList<VariableDimensionSyntax>* dims = nullptr;
+    bool isSigned = false;
+};
+
 // like `logic [3:0][7:0] x;` yields one target per packed dimension (dimIndex 0
 // -> [3:0], dimIndex 1 -> [7:0]); a plain `logic [7:0] y;` yields a single
 // target with dimIndex 0. `width` is that dimension's bit count, kept for cut
@@ -230,16 +306,52 @@ struct BitShrinkTarget {
     int amount = 1;
 };
 
+// Adds forwarded select ports to a module and connects them through to the
+// instances that need them. Cuts belong to a module DEFINITION, so every instance
+// of a module shares one set of selects: a parent forwards one signal per
+// (module, cut index) rather than one per instance.
+class MuxWirer : public PapercutsRewriter<MuxWirer> {
+private:
+    // Ports to append, already named.
+    const std::vector<std::string>* extraPorts = nullptr;
+    // Instantiated module name -> the (child port, parent signal) pairs to add to
+    // each of its instances.
+    const std::map<std::string, std::vector<std::pair<std::string, std::string>>>* conns = nullptr;
+
+public:
+    std::shared_ptr<SyntaxTree> wire(
+        const std::shared_ptr<SyntaxTree> tree, const std::vector<std::string>& extraPorts,
+        const std::map<std::string, std::vector<std::pair<std::string, std::string>>>& conns);
+    void handle(const PortListSyntax& node);
+    void handle(const HierarchyInstantiationSyntax& node);
+};
+
 class BitMuxer : public PapercutsRewriter<BitMuxer> {
 private:
     bool initialized = false;
     MuxContext& context;
-    std::unordered_map<std::string, int> widthMap;
+    // The same targets, in the same order, that Papercutter enumerates as bit-shrink
+    // cuts. A select is allocated per target rather than per declarator, so a
+    // multi-packed-dim signal gets one per dimension exactly as it gets one cut per
+    // dimension.
+    std::vector<BitShrinkTarget> shrinkNodes;
+    // Declarator -> its indices into shrinkNodes. Keyed by pointer, so initialize()
+    // must run on the tree that will be transformed.
+    std::unordered_map<const DeclaratorSyntax*, std::vector<size_t>> targetsByDecl;
+    // Names that got a companion signal, for redirecting reads onto it.
+    std::unordered_set<std::string> muxedNames;
+    // context.muxCount when the bit pass began; select for shrinkNodes[i] is
+    // baseSel + i, which keeps selects aligned with cut indices.
+    size_t baseSel = 0;
+
+    void muxDeclaration(const SyntaxNode& node, const SeparatedSyntaxList<DeclaratorSyntax>& declarators,
+                        const DeclShape& shape);
 public:
     BitMuxer(MuxContext& context) : context(context) {}
-    std::shared_ptr<SyntaxTree> insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree>);
+    std::shared_ptr<SyntaxTree> insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree>, size_t baseSel);
     void initialize(const std::shared_ptr<SyntaxTree>);
     void handle(const DataDeclarationSyntax& node);
+    void handle(const NetDeclarationSyntax& node);
     void handle(const IdentifierNameSyntax& node);
     void handle(const IdentifierSelectNameSyntax& node);
     void handle(const SyntaxNode& node);
@@ -266,9 +378,6 @@ public:
 class BitShrinkCollector : public SyntaxVisitor<BitShrinkCollector> {
 private:
     std::vector<BitShrinkTarget> shrinkNodes; // One entry per shrinkable packed dimension
-    bool allowSigned;   // Signed decls are only shrinkable when narrowing in place (not with intermediate wires)
-    bool allowNets;     // Net decls (wire/tri/...) are only shrinkable when narrowing in place
-    bool allowMultiDim; // Multi-packed-dim vectors are only shrinkable when narrowing in place
     // Signal name -> the (left, right) each of its packed dimensions actually
     // evaluates to, outermost dimension first, for ranges whose bounds are not
     // literals (`[WIDTH-1:0]`). Such a dimension is only shrinkable when these are
@@ -279,23 +388,59 @@ private:
     // multi-packed-dim vector be shrunk on every dimension, not just literal ones.
     std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges;
 public:
-    BitShrinkCollector(bool allowSigned = false, bool allowNets = false, bool allowMultiDim = false,
-                       std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges = {})
-        : allowSigned(allowSigned), allowNets(allowNets), allowMultiDim(allowMultiDim),
-          symbolicRanges(std::move(symbolicRanges)) {}
+    // Signed declarations, nets and multi-packed-dim vectors are all shrinkable by
+    // both strategies -- narrow-in-place rebuilds the range, and the intermediate
+    // wire names the retained bits -- so there is nothing left to gate them on.
+    explicit BitShrinkCollector(
+        std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges = {})
+        : symbolicRanges(std::move(symbolicRanges)) {}
     void handle(const DeclaratorSyntax&);
     std::vector<BitShrinkTarget> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
-// MARK: Ternary
-class TernaryMuxer : public PapercutsRewriter<TernaryMuxer> {
+// MARK: ExprMuxer
+//
+// One pass for every expression-level mux family (ternary, if, and later binop and
+// case). Two properties make it correct where the old per-family passes were not:
+//
+//  * It collects on the tree it will transform and never re-collects. The old
+//    passes ran in sequence, and each one's output contains `|`, `&` and `?:` of
+//    its own -- so a later collector saw operators the cutter never enumerated.
+//  * It builds replacements from the ORIGINAL operand nodes rather than from
+//    re-parsed text, so a mux nested inside another mux's operand survives.
+//
+// Select numbers come from explicit per-family base offsets rather than a running
+// counter, so a family's numbering does not depend on which other families ran.
+class ExprMuxer : public PapercutsRewriter<ExprMuxer> {
 private:
-    MuxContext& context;
+    bool initialized = false;
+    // Node -> the first of its selects; the second (where a family has two) is +1.
+    std::unordered_map<const ConditionalExpressionSyntax*, size_t> ternarySel;
+    std::unordered_map<const ConditionalStatementSyntax*, size_t> ifSel;
+    // Binop -> (keep-left select, keep-right select). Shifts collect keep-left only,
+    // so the second is absent for those.
+    std::unordered_map<const BinaryExpressionSyntax*, std::pair<size_t, std::optional<size_t>>> binopSel;
+    // Case statement -> {prunable item index -> its select}. The default item is
+    // never prunable and so never appears here.
+    std::unordered_map<const CaseStatementSyntax*, std::unordered_map<size_t, size_t>> caseSel;
+
+    // Replacement predicate for a ternary or an `if`: sel1 | (!sel0 & (<pred>)).
+    // sel0 forces the false branch, sel1 the true branch -- matching the even/odd
+    // cut order for both families.
+    ExpressionSyntax& muxPredicate(const ConditionalPredicateSyntax& pred, size_t sel);
 
 public:
-    TernaryMuxer(MuxContext& context) : context(context) {}
-    std::shared_ptr<SyntaxTree> insertTernaryMuxes(const std::shared_ptr<SyntaxTree>);
-    void handle(const ConditionalExpressionSyntax&);
+    ExprMuxer() = default;
+    std::shared_ptr<SyntaxTree> insertExprMuxes(const std::shared_ptr<SyntaxTree>);
+    // `baseTernary` / `baseIf` are the select numbers this tree's first ternary and
+    // first `if` cut occupy.
+    void initialize(const std::shared_ptr<SyntaxTree>, bool ternaryMux, size_t baseTernary,
+                    bool ifMux, size_t baseIf, bool binopMux, size_t baseBinop,
+                    bool binopsInConditionsOnly, bool caseMux, size_t baseCase);
+    void handle(const ConditionalExpressionSyntax& node);
+    void handle(const ConditionalStatementSyntax& node);
+    void handle(const BinaryExpressionSyntax& node);
+    void handle(const CaseStatementSyntax& node);
 };
 
 class TernaryRemover : public PapercutsRewriter<TernaryRemover> {
@@ -322,16 +467,6 @@ public:
 };
 
 // MARK: If
-class IfMuxer : public PapercutsRewriter<IfMuxer> {
-private:
-    MuxContext& context;
-
-public:
-    IfMuxer(MuxContext& context) : context(context) {}
-    std::shared_ptr<SyntaxTree> insertIfMuxes(const std::shared_ptr<SyntaxTree>);
-    void handle(const ConditionalStatementSyntax&);
-};
-
 class IfRemover : public PapercutsRewriter<IfRemover> {
 private:
     std::vector<const ConditionalStatementSyntax*> ifNodes;
@@ -412,6 +547,31 @@ public:
     std::vector<std::pair<const BinaryExpressionSyntax*, bool>> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
 
+class ConstForceMuxer : public PapercutsRewriter<ConstForceMuxer> {
+private:
+    bool initialized = false;
+    MuxContext& context;
+    // The 1-bit scalars Papercutter enumerates as const-force cuts, in cut order.
+    // Keyed by pointer, so initialize() must run on the tree being transformed.
+    std::unordered_map<const DeclaratorSyntax*, size_t> ordinalByDecl;
+    size_t declCount = 0;
+    // Names that got a companion signal, for redirecting reads onto it.
+    std::unordered_set<std::string> muxedNames;
+    // context.muxCount when this pass began; the pair of selects for signal i is
+    // baseSel + 2*i (force 0) and baseSel + 2*i + 1 (force 1), matching cut order.
+    size_t baseSel = 0;
+
+    void muxDeclaration(const SyntaxNode& node, const SeparatedSyntaxList<DeclaratorSyntax>& declarators,
+                        const DeclShape& shape);
+public:
+    ConstForceMuxer(MuxContext& context) : context(context) {}
+    std::shared_ptr<SyntaxTree> insertConstForceMuxes(const std::shared_ptr<SyntaxTree>, size_t baseSel);
+    void initialize(const std::shared_ptr<SyntaxTree>);
+    void handle(const DataDeclarationSyntax& node);
+    void handle(const NetDeclarationSyntax& node);
+    void handle(const IdentifierNameSyntax& node);
+};
+
 // MARK: ForceConst
 class ConstForceCollector : public SyntaxVisitor<ConstForceCollector> {
 private:
@@ -488,6 +648,14 @@ private:
     // `amounts` optionally overrides the shrink amount (bits to drop) for any
     // bitshrink index; indices absent from the map default to 1 bit. Non-bitshrink
     // indices ignore it.
+    // Emit the intermediate-wire bit-shrink form for every targeted declarator of
+    // one declaration: a companion signal of the same declared type whose dropped
+    // bits are forced, inserted directly after the original. Shared by the
+    // variable and net handlers, which differ only in how `typeHead` is spelled.
+    void emitIntermediateWires(const SyntaxNode& decl,
+                               const SeparatedSyntaxList<DeclaratorSyntax>& declarators,
+                               const DeclShape& shape);
+
     void selectCuts(const std::vector<size_t>& indicesToCut,
                     const std::unordered_map<size_t, int>& amounts = {});
 public:

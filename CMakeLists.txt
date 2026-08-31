@@ -22,6 +22,17 @@ include(FetchContent)
 # vendored boost_unordered.hpp (redefinition of boost::exception_detail::*).
 add_compile_definitions(BOOST_REGEX_STANDALONE)
 
+# Keep slang's SLANG_ASSERT active in EVERY build, Release included. The macro is
+# a no-op unless SLANG_ASSERT_ENABLED (or SLANG_DEBUG) is set, so without this the
+# wheel built through pyproject.toml/scikit-build silently skips slang's own
+# preconditions while a build from CMakePresets.json (which passes the same flag in
+# CMAKE_CXX_FLAGS) enforces them. That asymmetry hid a real violation: deadcode.py
+# called AnalysisManager::analyze on an unfrozen Compilation, which only ever
+# asserted on the preset build. Papercuts' output is a proof, so a precondition
+# violation should fail loudly wherever it happens, not depend on how it was built.
+# Set here, before FetchContent pulls slang in, so it applies to slang's targets too.
+add_compile_definitions(SLANG_ASSERT_ENABLED)
+
 FetchContent_Declare(pybind11
     GIT_REPOSITORY https://github.com/pybind/pybind11.git
     GIT_TAG        v3.0.2

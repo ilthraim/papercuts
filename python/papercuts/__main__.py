@@ -10,6 +10,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import shutil
 import time
 import subprocess
@@ -22,7 +23,8 @@ from papercuts.elaborator import (
 from papercuts.deadcode import prune_dead_source
 from papercuts.utils import print_tree, status, set_verbose, Run
 from papercuts.backends import discover_backends, get_backend
-from papercuts.pypercuts import Papercutter, insert_muxes
+from papercuts.pypercuts import (Papercutter, get_instantiated_modules,
+                                 insert_muxes, wire_mux_hierarchy)
 from papercuts.status import StatusWriter
 
 
@@ -781,14 +783,94 @@ async def main():
     if args.mux_rewrites:
         # Bit muxes are sized from the same literal packed ranges bit-shrink uses,
         # so under --in-situ they are only inserted for non-parameterized signals.
-        status("Performing mux rewrites...")
+        #
+        # The per-family flags follow --only-families, so a select is inserted only
+        # where a cut would actually be scheduled. Families left out still RESERVE
+        # their select numbers inside insert_muxes -- --only-families does not change
+        # what cut_info() enumerates, so cut indices are unchanged and pc_sel<N> has
+        # to keep meaning cut N. Those reserved selects become ports that drive
+        # nothing.
+        fams = only_families if only_families is not None else set(CUT_FAMILIES)
+        status("Performing mux rewrites"
+               + (f" ({', '.join(sorted(fams))})" if only_families is not None else "")
+               + "...")
         mux_dir = f"{output_dir}/muxed_sources"
         os.makedirs(mux_dir, exist_ok=True)
+        muxed: dict[str, SyntaxTree] = {}
+        n_muxed = 0
         for tree, name in conc_trees:
-            rewrite = insert_muxes(SyntaxTree.fromText(print_tree(tree)), True, True, True)
+            # An excluded or non-target module is never cut, so it has no selects to
+            # insert -- muxing it would only burn time rebuilding a module that is
+            # kept verbatim.
+            if is_excluded(name) or not is_cut_target(name):
+                continue
+            rewrite = insert_muxes(
+                SyntaxTree.fromText(print_tree(tree)),
+                "bitshrink" in fams, "ternary" in fams, "if" in fams,
+                caseMux="case" in fams,
+                binopMux="binop" in fams,
+                constForceMux="force-const" in fams,
+                binopsInConditionsOnly=args.binops_in_conditions_only,
+            )
+            muxed[name] = rewrite
+            n_muxed += 1
+
+        # Wire the selects up the hierarchy. A cut belongs to a module DEFINITION,
+        # so every instance of a module shares one set of selects: a parent forwards
+        # one signal per (module, cut index), not one per instance. Each module
+        # therefore gains an input port for every select of every module beneath it,
+        # named pc_sel_<module>_<i>, and passes it down; a module's own selects keep
+        # the plain pc_sel<i> names. At the top that leaves one flat, uniquely named
+        # port per (module, cut) in the whole design.
+        def mux_select_count(t) -> int:
+            # Ports are always created for 0..N-1, including reserved ones, so the
+            # highest index that appears is the count.
+            nums = [int(m) for m in re.findall(r"\bpc_sel(\d+)\b", print_tree(t))]
+            return max(nums) + 1 if nums else 0
+
+        own = {n: mux_select_count(t) for n, t in muxed.items()}
+        kids = {n: [c for c in get_instantiated_modules(t) if c in muxed]
+                for n, t in muxed.items()}
+
+        fwd: dict[str, list[tuple[str, int]]] = {}
+
+        def forwarded(name: str, stack: tuple[str, ...] = ()) -> list[tuple[str, int]]:
+            """Every (module, select) this module must carry for the modules below
+            it, deepest-last and deduplicated."""
+            if name in fwd:
+                return fwd[name]
+            if name in stack:
+                raise SystemExit(f"module instantiation cycle: {' -> '.join(stack + (name,))}")
+            out: list[tuple[str, int]] = []
+            for child in kids.get(name, []):
+                for entry in [(child, i) for i in range(own.get(child, 0))] + \
+                             forwarded(child, stack + (name,)):
+                    if entry not in out:
+                        out.append(entry)
+            fwd[name] = out
+            return out
+
+        for name in muxed:
+            forwarded(name)
+
+        for name, tree_ in muxed.items():
+            extra = [f"pc_sel_{m}_{i}" for m, i in fwd[name]]
+            conns = {}
+            for child in kids.get(name, []):
+                # The child's own selects bind to this module's forwarded signals;
+                # anything the child forwards in turn passes straight through.
+                pairs = [(f"pc_sel{i}", f"pc_sel_{child}_{i}") for i in range(own.get(child, 0))]
+                pairs += [(f"pc_sel_{m}_{i}", f"pc_sel_{m}_{i}") for m, i in fwd[child]]
+                if pairs:
+                    conns[child] = pairs
+            if extra or conns:
+                tree_ = wire_mux_hierarchy(tree_, extra, conns)
             with open(f"{mux_dir}/{name}.sv", "w") as f:
-                f.write(print_tree(rewrite))
-        status("Mux rewrites complete.")
+                f.write(print_tree(tree_))
+
+        n_wired = sum(1 for n in muxed if fwd[n])
+        status(f"Mux rewrites complete ({n_muxed}/{len(conc_trees)} modules, "
+               f"{n_wired} wired through hierarchy).")
 
     # MARK: Phase 1 -- enumerate every cut across every module.
     # Enumeration only reads the cut PLAN (pc.cut_info(): type + line per cut,

@@ -125,6 +125,12 @@ def analyze_dead(comp, *, protect_modules=(), clean_decls=True):
     opts = an.AnalysisOptions()
     opts.flags = an.AnalysisFlags.CheckUnused
     mgr = an.AnalysisManager(opts)
+    # AnalysisManager::analyze requires a frozen compilation -- it walks the
+    # elaborated design and must not race further elaboration. slang enforces it
+    # with SLANG_ASSERT, which is compiled out unless the build sets
+    # SLANG_ASSERT_ENABLED (CMakePresets.json does; the pyproject/uv build does
+    # not), so omitting this only *looked* harmless on an assertions-off build.
+    comp.freeze()
     mgr.analyze(comp)
 
     values, decls = set(), set()
