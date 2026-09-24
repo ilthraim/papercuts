@@ -30,10 +30,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pyslang
-from pyslang.ast import Compilation, CompilationOptions
+from pyslang import Diagnostic
+from pyslang.ast import Compilation, CompilationOptions, Symbol
 from pyslang.syntax import SyntaxTree
 
-from papercuts.elaborator import Emitter, EmitError
+from papercuts.elaborator import EmitError, Emitter
 
 # Dead *value* diagnostics: a net/variable that is never read (or never driven).
 # Removing such a signal and the logic that solely drives it cannot change any
@@ -103,7 +104,7 @@ def _module_def_name(sym):
     return getattr(defn, "name", None) or getattr(body, "name", None)
 
 
-def _compile(source: str, top: str):
+def _compile(source: str, top: str) -> tuple[Compilation, pyslang.SourceManager]:
     """Compile one self-contained source blob with ``top`` pinned as the top."""
     sm = pyslang.SourceManager()
     co = CompilationOptions()
@@ -113,7 +114,7 @@ def _compile(source: str, top: str):
     return comp, sm
 
 
-def analyze_dead(comp, *, protect_modules=(), clean_decls=True):
+def analyze_dead(comp: Compilation, *, protect_modules=(), clean_decls=True):
     """Return ``(dead_value_hpaths, dead_decl_hpaths)`` for a compiled design.
 
     Excludes ports, port parameters, and any symbol inside a protected
@@ -133,14 +134,16 @@ def analyze_dead(comp, *, protect_modules=(), clean_decls=True):
     comp.freeze()
     mgr.analyze(comp)
 
-    values, decls = set(), set()
+    values: set[str] = set()
+    decls: set[str] = set()
+    d: Diagnostic
     for d in mgr.getDiagnostics():
         code = _code_name(d)
         is_value = code in DEAD_VALUE_CODES
         is_decl = clean_decls and code in DEAD_DECL_CODES
         if not (is_value or is_decl):
             continue
-        sym = d.symbol
+        sym: Symbol | None = d.symbol
         if sym is None:
             continue
         # Never prune ports or port parameters (module interface identity).
@@ -148,7 +151,7 @@ def analyze_dead(comp, *, protect_modules=(), clean_decls=True):
             continue
         if getattr(sym, "isPortParam", False):
             continue
-        hp = getattr(sym, "hierarchicalPath", None)
+        hp: str | None = getattr(sym, "hierarchicalPath", None)
         if not hp:
             continue
         if _module_def_name(sym) in protect:
@@ -157,7 +160,7 @@ def analyze_dead(comp, *, protect_modules=(), clean_decls=True):
     return values, decls
 
 
-def compute_dead_bits(comp, *, protect_modules=(), exclude_hps=()):
+def compute_dead_bits(comp: Compilation, *, protect_modules=(), exclude_hps=()):
     """Return ``{signal hp: set of dead bit indices}`` for PARTIALLY-dead signals
     -- ones with some bits driven-but-never-read while other bits are live, which
     slang's whole-symbol :func:`analyze_dead` cannot see.
@@ -290,7 +293,7 @@ def compute_dead_bits(comp, *, protect_modules=(), exclude_hps=()):
 
 
 def prune_dead_source(source, top, *, protect_modules=(), clean_decls=True,
-                      flatten=True, fold_constants=True, max_iters=16):
+                      flatten=True, fold_constants=True, max_iters=16) -> tuple[str, PruneStats]:
     """Re-emit ``source`` with dead signals/logic (and unused decls) removed,
     iterating to a fixpoint. Returns ``(pruned_source, PruneStats)``.
 

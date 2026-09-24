@@ -2,39 +2,42 @@
 # - Change from using CST to AST for rewrites?
 
 from __future__ import annotations
-import sys
-from dataclasses import dataclass, field
-from pyslang.syntax import SyntaxTree
 
 import argparse
+import asyncio
 import fnmatch
 import json
 import os
 import re
 import shutil
-import time
 import subprocess
-import asyncio
+import time
+from dataclasses import dataclass, field
 
-import papercuts.chipper as chipper
-from papercuts.manifest import build_manifest, check_manifest, write_manifest
-from papercuts.elaborator import (
-    elaborate_design, build_compilation_from, ElaborationError, EmitError, make_parse_env,
-)
-from papercuts.deadcode import prune_dead_source
-from papercuts.utils import print_tree, status, set_verbose, Run
+from pyslang.syntax import SyntaxTree
+
+from papercuts import chipper
 from papercuts.backends import discover_backends, get_backend
-from papercuts.pypercuts import (Papercutter, get_instantiated_modules,
-                                 insert_muxes_report, rename_instance_types, rename_module,
-                                 wire_mux_hierarchy)
+from papercuts.deadcode import prune_dead_source
+from papercuts.elaborator import (
+    ElaborationError,
+    EmitError,
+    build_compilation_from,
+    elaborate_design,
+    make_parse_env,
+)
+from papercuts.manifest import build_manifest, check_manifest, write_manifest
+from papercuts.pypercuts import (
+    Papercutter,
+    get_instantiated_modules,
+    insert_muxes_report,
+    rename_instance_types,
+    rename_module,
+    wire_mux_hierarchy,
+)
 from papercuts.status import StatusWriter
+from papercuts.utils import Run, print_tree, set_verbose, status
 
-
-# Cut-family names, matching the prefix of each cut's type string from
-# Papercutter.cut_info() (the token before the first '('): "bitshrink",
-# "ternary(...)", "if(...)", "case(...)", "binop(...)", "force-const(...)". Used
-# by --only-families to restrict which families get scheduled/consolidated. Keep
-# in sync with the emplace_back type strings in cpp/src/papercuts.cpp (cutInfo).
 CUT_FAMILIES = ("bitshrink", "ternary", "if", "case", "binop", "force-const")
 
 
@@ -48,7 +51,7 @@ def cut_family(ctype: str) -> str:
 class ModuleCuts:
     """All enumerated cuts for a single (concretized) module."""
 
-    name: str
+    name: str                  # module name
     tree: SyntaxTree           # concretized source tree (pre-cut)
     pc: Papercutter | None     # cutter used to generate each cut on demand + consolidate (None if excluded)
     is_top: bool
@@ -61,14 +64,8 @@ class ModuleCuts:
     noops: list[int] = field(default_factory=list)  # cut indices identical to source (never FVed)
 
 
-# MARK: results stream
-#: Append-only, one-JSON-object-per-line record of every finished check. Written
-#: incrementally (and flushed) as checks complete, so a run that is killed or
-#: crashes mid-flight still leaves a complete record of every check done so far --
-#: unlike papercuts.log, which is only written once at the end. Post-process into
-#: any table; the live per-type roll-up lives in papercuts.stats.json/.log.
+# MARK: papercuts.log
 RESULTS_FILENAME = "papercuts.results.jsonl"
-
 
 def append_result(path: str, rec: dict) -> None:
     """Append one result record as a JSON line and flush it to disk."""
@@ -76,14 +73,12 @@ def append_result(path: str, rec: dict) -> None:
         f.write(json.dumps(rec) + "\n")
         f.flush()
 
-
-# MARK: papercuts.log
 def write_papercuts_log(
     log_path: str,
     modules: list[ModuleCuts],
     checked: bool,
-    final_runs: "list[tuple[ModuleCuts, Run]] | None" = None,
-    fv_gate: "str | None" = None,
+    final_runs: list[tuple[ModuleCuts, Run]] | None = None,
+    fv_gate: str | None = None,
     prune_stats=None,
 ) -> None:
     """Write a text summary of every papercut that was tried.
@@ -102,7 +97,7 @@ def write_papercuts_log(
     rows = []
     for m in modules:
         if m.excluded:
-            # Kept in the golden source but never cut; no runs to report.
+            # Kept in the golden source but never cut
             rows.append((m.name, "-", "excluded", "-", "X"))
             continue
         for run in m.runs:
@@ -111,14 +106,11 @@ def write_papercuts_log(
                 v = "-"
             else:
                 v = "Y" if run.valid else "N"
-                # For a greedily-shrunk bitshrink cut, annotate how many bits were
-                # removed (e.g. "Y(-3b)"); a plain 1-bit shrink stays "Y".
+                # Report number of bits removed
                 if run.valid and ctype.startswith("bitshrink") and run.shrink_amount > 1:
                     v = f"Y(-{run.shrink_amount}b)"
             rows.append((m.name, run.index, ctype, line, v))
-        # No-op cuts: generated but byte-identical to the elaborated source, so
-        # never sent to FV. Flagged as errors here (a cut that changes nothing is
-        # a cut-generation bug) rather than silently dropped.
+        # Cuts that are byte-identical to elaborated source should not occur, and are errored accordingly
         for idx in m.noops:
             ctype, line = m.cut_infos[idx]
             rows.append((m.name, idx, ctype, line, "ERR"))

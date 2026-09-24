@@ -43,8 +43,8 @@ from dataclasses import dataclass
 
 import pyslang
 from pyslang.ast import ASTContext, Compilation, InstanceSymbol, LookupLocation
-from pyslang.syntax import SyntaxTree
 from pyslang.parsing import PreprocessorOptions
+from pyslang.syntax import SyntaxTree
 
 INDENT = "    "
 
@@ -187,7 +187,7 @@ class Emitter:
 
     # --- top-level -----------------------------------------------------------
 
-    def run(self, compilation):
+    def run(self, compilation: Compilation):
         root = compilation.getRoot()
 
         # Compilation-unit scoped declarations (packages first).
