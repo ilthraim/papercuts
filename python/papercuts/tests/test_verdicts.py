@@ -29,6 +29,9 @@ CASES = {
     "ar_determined": "cex",
     "cex": "cex",
     "ar_cex": "cex",
+    # Early exit from `check_sec -prove -cex_limit N`. Not every property is
+    # decided, but hitting the threshold means an output assertion was refuted.
+    "cex_threshold_reached": "cex",
     # Ran without deciding everything: unusable, but not a refutation and not a
     # broken environment.
     "undetermined": "inconclusive",

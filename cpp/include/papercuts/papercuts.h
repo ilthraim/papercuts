@@ -27,6 +27,13 @@ using namespace slang::parsing;
 namespace papercuts {
 struct MuxContext {
     int muxCount = 0;
+    // Selects a muxer actually emitted a control for. Every index in [0, muxCount)
+    // is RESERVED and becomes a port, but a family that is disabled -- or a target
+    // its muxer cannot build, such as a parameterized bit-shrink -- leaves its
+    // select driving nothing. The difference is what the mux manifest reports as
+    // `inserted: false`, so a consumer never mistakes an inert select for a cut
+    // that was actually exercised.
+    std::vector<size_t> insertedSelects;
 };
 
 class ASTPrinter : public SyntaxVisitor<ASTPrinter> {
@@ -123,6 +130,21 @@ public:
     std::shared_ptr<SyntaxTree> renameSubmodules();
 };
 
+// Renames the module type of instantiations from an explicit old -> new map:
+// with {"adder": "adder_muxed"}, `adder u0 (...)` becomes `adder_muxed u0 (...)`.
+// Unlike SubmoduleRenamer this derives nothing from the parent and never splits a
+// multi-instance declaration, because every instance of one module type gets the
+// same new name. That is what a whole-hierarchy rename (e.g. the muxed copy of a
+// design, which must coexist with the original in one miter) needs.
+class InstanceTypeRenamer : public SyntaxRewriter<InstanceTypeRenamer> {
+private:
+    std::unordered_map<std::string, std::string> renames;
+public:
+    explicit InstanceTypeRenamer(std::unordered_map<std::string, std::string> renames);
+    void handle(const HierarchyInstantiationSyntax& node);
+    std::shared_ptr<SyntaxTree> apply(const std::shared_ptr<SyntaxTree> tree);
+};
+
 class InputAdder: public SyntaxRewriter<InputAdder> { 
 private:
     int numInputs = 0;
@@ -144,15 +166,29 @@ std::shared_ptr<SyntaxTree> wireMuxHierarchy(
     const std::shared_ptr<SyntaxTree> tree, const std::vector<std::string>& extraPorts,
     const std::map<std::string, std::vector<std::pair<std::string, std::string>>>& conns);
 
-std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
-                                        bool ifMux, bool caseMux = false, bool binopMux = false,
-                                        bool constForceMux = false,
-                                        bool binopsInConditionsOnly = false);
+// `symbolicRanges` is the same map Papercutter takes: signal -> the (left, right)
+// each packed dimension evaluates to, for ranges whose bounds are not literals.
+// It MUST match what the cutter was given, because the bit-shrink band's width is
+// computed from it on both sides; a mismatch shifts every later family's selects
+// off its cut index (which is what `--in-situ` used to do, silently).
+// `insertedOut`, when non-null, receives the sorted select numbers a control was
+// actually emitted for -- the manifest's source of truth for which cuts the muxed
+// design can exercise.
+std::shared_ptr<SyntaxTree> insertMuxes(
+    const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux, bool ifMux, bool caseMux = false,
+    bool binopMux = false, bool constForceMux = false, bool binopsInConditionsOnly = false,
+    const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges = {},
+    bool shrinkWithIntermediate = false, std::vector<size_t>* insertedOut = nullptr);
 
 std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName);
 
 std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> tree,
                                              const std::vector<std::string>& excluded = {});
+
+// See InstanceTypeRenamer. Instantiations whose type is absent from `renames`
+// are left untouched.
+std::shared_ptr<SyntaxTree> renameInstanceTypes(const std::shared_ptr<SyntaxTree> tree,
+                                                const std::map<std::string, std::string>& renames);
 
 std::string getModuleName(const std::shared_ptr<SyntaxTree> tree);
 
@@ -349,7 +385,8 @@ private:
 public:
     BitMuxer(MuxContext& context) : context(context) {}
     std::shared_ptr<SyntaxTree> insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree>, size_t baseSel);
-    void initialize(const std::shared_ptr<SyntaxTree>);
+    void initialize(const std::shared_ptr<SyntaxTree>,
+                    const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges = {});
     void handle(const DataDeclarationSyntax& node);
     void handle(const NetDeclarationSyntax& node);
     void handle(const IdentifierNameSyntax& node);
@@ -434,6 +471,8 @@ public:
     std::shared_ptr<SyntaxTree> insertExprMuxes(const std::shared_ptr<SyntaxTree>);
     // `baseTernary` / `baseIf` are the select numbers this tree's first ternary and
     // first `if` cut occupy.
+    // Selects this pass emitted a control for; see MuxContext::insertedSelects.
+    std::vector<size_t> insertedSelects;
     void initialize(const std::shared_ptr<SyntaxTree>, bool ternaryMux, size_t baseTernary,
                     bool ifMux, size_t baseIf, bool binopMux, size_t baseBinop,
                     bool binopsInConditionsOnly, bool caseMux, size_t baseCase);
@@ -679,7 +718,23 @@ public:
                              std::unordered_map<size_t, int> amounts = {});
     // Per-cut (type, line) aligned 1:1 with cutAll() indices. Line numbers are
     // relative to the source tree this Papercutter was constructed from.
+    // Width of each cut band, in cutInfo() order: ternary, if, bitshrink, case,
+    // binop, force-const. THE place these widths are decided. insertMuxes takes
+    // its select offsets from here rather than recounting, because when the two
+    // disagreed -- over a parameterized bit-shrink the cutter counts and the muxer
+    // cannot build -- every select after that band silently stopped matching its
+    // cut index.
+    std::vector<size_t> cutBands() const {
+        return {TRCount, IRCount, BSRCount, CRCount, BRCount, CFRCount};
+    }
+
     std::vector<std::pair<std::string, size_t>> cutInfo();
+    // Cut index pairs that are mutually exclusive because they are the two halves
+    // of one site (ternary/if keep-false + keep-true, a binop's keep-left +
+    // keep-right, force-const 0 + 1). Turning both on is just the dominant one, so
+    // counting both inflates the cut count. Built from the same node lists, in the
+    // same order, as cutInfo() -- never inferred from the log's line numbers.
+    std::vector<std::pair<size_t, size_t>> cutPairs();
     // Per-cut shrinkable width aligned 1:1 with cutAll() indices: for a bitshrink
     // cut, the current bit width of the targeted packed dimension (so the caller
     // can bound an iterative shrink at width-1); 0 for every non-bitshrink cut.

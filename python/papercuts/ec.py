@@ -353,6 +353,13 @@ def _parse_verdict(output: str, returncode: int) -> str:
     instead. Reading only "cex" therefore files ordinary refuted cuts under
     "error", which reads as a broken environment rather than a working check
     that said no. Anything genuinely unrecognized still falls through to "error".
+
+    "cex_threshold_reached" is the same story one level down: it is what
+    ``check_sec -prove -cex_limit N`` returns when it abandons the run after N
+    refutations. Some properties are left unprocessed, so it is not "determined"
+    -- but reaching the threshold at all means an output assertion was refuted,
+    which settles the cut. Cutpoint helper properties do not count toward the
+    threshold, so this cannot fire on a design whose outputs all match.
     """
     raw = None
     for line in output.splitlines():
@@ -364,7 +371,8 @@ def _parse_verdict(output: str, returncode: int) -> str:
         return "proven"
     # Fully decided, and not all-proven => at least one property was refuted.
     if raw in ("cex", "ar_cex", "determined", "ar_determined",
-               "falsified", "disproven", "not_proven", "not-proven"):
+               "falsified", "disproven", "not_proven", "not-proven",
+               "cex_threshold_reached"):
         return "cex"
     # Ran, but did not decide everything -- the cut is unusable either way, and
     # the distinction from a refutation is worth keeping (it is a budget/effort

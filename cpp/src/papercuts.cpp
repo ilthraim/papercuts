@@ -48,6 +48,36 @@ RangeBounds classifyRange(const RangeSelectSyntax& sel) {
         return {};
     return {false, 0, left ? sel.right : sel.left};
 }
+// Whether the bit muxer can actually build a companion for this target. The
+// companion's RHS names the retained bits, which needs literal bounds; a
+// parameterized dimension (`[W-1:0]`) is enumerated as a cut but cannot be muxed.
+// Its select is still RESERVED (see insertMuxes), so the cuts after it keep their
+// indices -- the select is simply a port that drives nothing.
+bool canBuildCompanion(const BitShrinkTarget& target) {
+    const DataTypeSyntax* type = nullptr;
+    if (auto* dataDecl = target.decl->parent->as_if<DataDeclarationSyntax>())
+        type = dataDecl->type;
+    else if (auto* netDecl = target.decl->parent->as_if<NetDeclarationSyntax>())
+        type = netDecl->type;
+    if (!type)
+        return false;
+
+    const SyntaxList<VariableDimensionSyntax>* dims = nullptr;
+    if (auto* intType = type->as_if<IntegerTypeSyntax>())
+        dims = &intType->dimensions;
+    else if (auto* impType = type->as_if<ImplicitTypeSyntax>())
+        dims = &impType->dimensions;
+    if (!dims || target.dimIndex < 0 || static_cast<size_t>(target.dimIndex) >= dims->size())
+        return false;
+
+    auto* dimSpec = (*dims)[target.dimIndex]->specifier->as_if<RangeDimensionSpecifierSyntax>();
+    if (!dimSpec)
+        return false;
+    auto* dimSelect = dimSpec->selector->as_if<RangeSelectSyntax>();
+    if (!dimSelect)
+        return false;
+    return classifyRange(*dimSelect).literal;
+}
 } // namespace
 
 void ModuleNameRewriter::handle(const ModuleHeaderSyntax& node) {
@@ -123,6 +153,28 @@ std::shared_ptr<SyntaxTree> renameSubmodules(const std::shared_ptr<SyntaxTree> t
                                              const std::vector<std::string>& excluded) {
     SubmoduleRenamer rewriter(tree, std::unordered_set<std::string>(excluded.begin(), excluded.end()));
     return rewriter.renameSubmodules();
+}
+
+InstanceTypeRenamer::InstanceTypeRenamer(std::unordered_map<std::string, std::string> renames)
+    : renames(std::move(renames)) {}
+
+void InstanceTypeRenamer::handle(const HierarchyInstantiationSyntax& node) {
+    auto it = renames.find(std::string(node.type.valueText()));
+    if (it == renames.end())
+        return;
+    // Token 1 of an instantiation is the module type; instance names, parameter
+    // overrides and port connections are left exactly as they are.
+    replaceToken(node, 1, makeId(persistString(alloc, it->second)), true);
+}
+
+std::shared_ptr<SyntaxTree> InstanceTypeRenamer::apply(const std::shared_ptr<SyntaxTree> tree) {
+    return this->transform(tree);
+}
+
+std::shared_ptr<SyntaxTree> renameInstanceTypes(const std::shared_ptr<SyntaxTree> tree,
+                                                const std::map<std::string, std::string>& renames) {
+    InstanceTypeRenamer rewriter({renames.begin(), renames.end()});
+    return rewriter.apply(tree);
 }
 
 std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName) {
@@ -263,34 +315,49 @@ std::shared_ptr<SyntaxTree> wireMuxHierarchy(
 
 std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux,
                                         bool ifMux, bool caseMux, bool binopMux, bool constForceMux,
-                                        bool binopsInConditionsOnly) {
+                                        bool binopsInConditionsOnly,
+                                        const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges,
+                                        bool shrinkWithIntermediate, std::vector<size_t>* insertedOut) {
     std::shared_ptr<SyntaxTree> newTree = tree;
     std::vector<std::shared_ptr<SyntaxTree>> keepAlive;
 
-    // Every count comes from the ORIGINAL tree, using the same collectors (and the
-    // same configuration) Papercutter enumerates cuts with, so `pc_sel<N>` is the
-    // control for cut N. They are taken before any rewriting: each pass below emits
-    // `|`, `&` and `?:` of its own, and a collector run afterwards would count those
-    // too.
-    size_t ternaryCount = TernaryCollector().getFoundNodes(tree).size() * 2;
-    size_t ifCount = IfCollector().getFoundNodes(tree).size() * 2;
-    size_t bitCount = BitShrinkCollector().getFoundNodes(tree).size();
-    auto caseNodes = CaseCollector().getFoundNodes(tree);
-    size_t binopCount = BinopCollector(binopsInConditionsOnly).getFoundNodes(tree).size();
-    size_t constForceCount = ConstForceCollector().getFoundNodes(tree).size() * 2;
+    // The band widths come from the cutter itself, on the ORIGINAL tree and with
+    // the same configuration, so `pc_sel<N>` is the control for cut N by
+    // construction rather than by two counts happening to agree. Recounting here
+    // is what broke: the cutter counts a parameterized bit-shrink as a cut and
+    // clears the symbolic ranges under --shrink-with-intermediate, and a muxer
+    // that reached either conclusion on its own shifted every later band.
+    Papercutter cutter(tree, shrinkWithIntermediate, binopsInConditionsOnly, symbolicRanges);
+    auto bands = cutter.cutBands();  // ternary, if, bitshrink, case, binop, force-const
 
-    // A family whose muxer is disabled -- or not written yet, as for case and binop
-    // -- still reserves its select numbers, so the families after it stay on their
-    // cut indices. Reserved selects become ports with nothing wired to them.
+    // A family whose muxer is disabled -- or a target it cannot build -- still
+    // reserves its select numbers, so the families after it stay on their cut
+    // indices. Reserved selects become ports with nothing wired to them.
     size_t baseTernary = 0;
-    size_t baseIf = baseTernary + ternaryCount;
-    size_t baseBit = baseIf + ifCount;
-    size_t baseCase = baseBit + bitCount;
-    size_t baseBinop = baseCase + caseNodes.size();
-    size_t baseConstForce = baseBinop + binopCount;
+    size_t baseIf = baseTernary + bands[0];
+    size_t baseBit = baseIf + bands[1];
+    size_t baseCase = baseBit + bands[2];
+    size_t baseBinop = baseCase + bands[3];
+    size_t baseConstForce = baseBinop + bands[4];
+
+    // The muxers collect their own targets, so they must see the same effective
+    // symbolic ranges the cutter did -- it drops them entirely for the
+    // intermediate-wire strategy.
+    std::unordered_map<std::string, std::vector<std::pair<int, int>>> effectiveRanges =
+        shrinkWithIntermediate
+            ? std::unordered_map<std::string, std::vector<std::pair<int, int>>>{}
+            : symbolicRanges;
 
     MuxContext context;
-    context.muxCount = static_cast<int>(baseConstForce + constForceCount);
+    context.muxCount = static_cast<int>(baseConstForce + bands[5]);
+    if (static_cast<size_t>(context.muxCount) != cutter.getCutCount()) {
+        throw std::logic_error("insertMuxes: reserved " + std::to_string(context.muxCount) +
+                               " selects for " + std::to_string(cutter.getCutCount()) +
+                               " cuts; the select bands and the cut bands have diverged");
+    }
+
+    // Only for the wildcard check below; the band width above is the cutter's.
+    auto caseNodes = CaseCollector().getFoundNodes(tree);
 
     // Case cuts prune an item; muxing that means reproducing the item's match, which
     // casez/casex wildcards make impossible to do faithfully. Reject up front rather
@@ -308,6 +375,8 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
         EM.initialize(newTree, ternaryMux, baseTernary, ifMux, baseIf, binopMux, baseBinop,
                       binopsInConditionsOnly, caseMux, baseCase);
         auto transformed = EM.insertExprMuxes(newTree);
+        context.insertedSelects.insert(context.insertedSelects.end(), EM.insertedSelects.begin(),
+                                       EM.insertedSelects.end());
         keepAlive.push_back(newTree);
         newTree = transformed;
     }
@@ -318,7 +387,7 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
     PS.visit(newTree->root());
     if (bitMux) {
         BitMuxer BM(context);
-        BM.initialize(newTree);
+        BM.initialize(newTree, effectiveRanges);
         auto transformed = BM.insertBitShrinkMuxes(newTree, baseBit);
         keepAlive.push_back(newTree);
         newTree = transformed;
@@ -334,6 +403,13 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
         auto transformed = CFM.insertConstForceMuxes(newTree, baseConstForce);
         keepAlive.push_back(newTree);
         newTree = transformed;
+    }
+
+    if (insertedOut) {
+        auto sels = context.insertedSelects;
+        std::sort(sels.begin(), sels.end());
+        sels.erase(std::unique(sels.begin(), sels.end()), sels.end());
+        *insertedOut = std::move(sels);
     }
 
     InputAdder IA;
@@ -662,8 +738,10 @@ std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
 }
 } // namespace
 
-// Defined with the const-force cut logic further down.
-static bool isConstForceWriteTarget(const IdentifierNameSyntax& node);
+// Defined with the const-force cut logic further down. True when this identifier
+// is (part of) the LHS of an assignment -- of ANY assignment operator, `<=`
+// included -- so a muxer knows not to redirect it onto a read-side companion.
+static bool isAssignmentWriteTarget(const SyntaxNode& node);
 
 // MARK: BitMuxer
 std::shared_ptr<SyntaxTree> BitMuxer::insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree> tree,
@@ -676,15 +754,25 @@ std::shared_ptr<SyntaxTree> BitMuxer::insertBitShrinkMuxes(const std::shared_ptr
     return transform(tree);
 }
 
-void BitMuxer::initialize(const std::shared_ptr<SyntaxTree> tree) {
+void BitMuxer::initialize(const std::shared_ptr<SyntaxTree> tree,
+                          const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges) {
     targetsByDecl.clear();
     muxedNames.clear();
 
     // Same configuration Papercutter uses, so the muxer sees exactly the cuts the
-    // cutter enumerates and select N stays the control for bit-shrink cut N.
-    BitShrinkCollector collector;
+    // cutter enumerates and select N stays the control for bit-shrink cut N. That
+    // includes the symbolic ranges: without them a parameterized dimension is a cut
+    // to the cutter and invisible here, and the two band widths diverge.
+    BitShrinkCollector collector(symbolicRanges);
     shrinkNodes = collector.getFoundNodes(tree);
     for (size_t i = 0; i < shrinkNodes.size(); ++i) {
+        // `i` is the target's position in the cut order and fixes its select, so a
+        // target that cannot be muxed still consumes its index. It must NOT reach
+        // muxedNames, though: that set redirects reads onto the companion wire, and
+        // redirecting onto a wire no declaration was emitted for produces source
+        // that references an undeclared signal.
+        if (!canBuildCompanion(shrinkNodes[i]))
+            continue;
         targetsByDecl[shrinkNodes[i].decl].push_back(i);
         muxedNames.insert(std::string(shrinkNodes[i].decl->name.valueText()));
     }
@@ -718,6 +806,8 @@ void BitMuxer::muxDeclaration(const SyntaxNode& node,
             continue;
         insertAfter(node, parse(wire->decl));
         insertAfter(node, parse(wire->assign));
+        for (size_t idx : it->second)
+            context.insertedSelects.push_back(baseSel + idx);
     }
 }
 
@@ -734,9 +824,12 @@ void BitMuxer::handle(const NetDeclarationSyntax& node) {
 }
 
 void BitMuxer::handle(const IdentifierNameSyntax& node) {
-    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
-        &node == node.parent->as<BinaryExpressionSyntax>().left) {
-        return; // Don't replace the left side of an assignment expression
+    // The companion carries the READ value; the original signal keeps its driver.
+    // Every assignment operator counts, `<=` included: redirecting a procedural
+    // write leaves the original undriven and gives the companion a second driver,
+    // so the muxed design stops matching the original with all selects off.
+    if (isAssignmentWriteTarget(node)) {
+        return;
     }
 
     std::string nodeName{node.identifier.valueText()};
@@ -746,9 +839,8 @@ void BitMuxer::handle(const IdentifierNameSyntax& node) {
 }
 
 void BitMuxer::handle(const IdentifierSelectNameSyntax& node) {
-    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
-        &node == node.parent->as<BinaryExpressionSyntax>().left) {
-        return; // Don't replace the left side of an assignment expression
+    if (isAssignmentWriteTarget(node)) {
+        return; // see handle(IdentifierNameSyntax)
     }
 
     std::string oldName{node.identifier.valueText()};
@@ -1012,6 +1104,8 @@ void ConstForceMuxer::muxDeclaration(const SyntaxNode& node,
         std::string newName = name + "_papercuts";
         std::string sel0 = "pc_sel" + std::to_string(baseSel + 2 * it->second);
         std::string sel1 = "pc_sel" + std::to_string(baseSel + 2 * it->second + 1);
+        context.insertedSelects.push_back(baseSel + 2 * it->second);
+        context.insertedSelects.push_back(baseSel + 2 * it->second + 1);
 
         insertAfter(node, parse(trivia + shape.typeHead + " " +
                                 buildPackedRanges(*shape.dims, {}) + " " + newName + ";"));
@@ -1037,7 +1131,7 @@ void ConstForceMuxer::handle(const NetDeclarationSyntax& node) {
 void ConstForceMuxer::handle(const IdentifierNameSyntax& node) {
     // The cut substitutes a literal at read sites only, so the companion signal is
     // redirected the same way -- writes keep driving the original.
-    if (isConstForceWriteTarget(node))
+    if (isAssignmentWriteTarget(node))
         return;
 
     std::string name{node.identifier.valueText()};
@@ -1156,14 +1250,20 @@ ExpressionSyntax& ExprMuxer::muxPredicate(const ConditionalPredicateSyntax& pred
 }
 
 void ExprMuxer::handle(const ConditionalExpressionSyntax& node) {
-    if (auto it = ternarySel.find(&node); it != ternarySel.end())
+    if (auto it = ternarySel.find(&node); it != ternarySel.end()) {
         replace(*node.predicate, makeConditionalPredicate(muxPredicate(*node.predicate, it->second)));
+        insertedSelects.push_back(it->second);
+        insertedSelects.push_back(it->second + 1);
+    }
     visitDefault(node);
 }
 
 void ExprMuxer::handle(const ConditionalStatementSyntax& node) {
-    if (auto it = ifSel.find(&node); it != ifSel.end())
+    if (auto it = ifSel.find(&node); it != ifSel.end()) {
         replace(*node.predicate, makeConditionalPredicate(muxPredicate(*node.predicate, it->second)));
+        insertedSelects.push_back(it->second);
+        insertedSelects.push_back(it->second + 1);
+    }
     visitDefault(node);
 }
 
@@ -1221,6 +1321,7 @@ void ExprMuxer::handle(const CaseStatementSyntax& node) {
             guard = &makeBinary(SyntaxKind::LogicalAndExpression,
                                 makeNot(makeIdentExpr("pc_sel" + std::to_string(sel->second))),
                                 TokenKind::DoubleAnd, "&&", makeParen(*match, true));
+            insertedSelects.push_back(sel->second);
         }
 
         ElseClauseSyntax* elseClause =
@@ -1264,6 +1365,9 @@ void ExprMuxer::handle(const BinaryExpressionSyntax& node) {
         auto& muxed = makeParen(makeTernary(makeIdentExpr("pc_sel" + std::to_string(selL)),
                                             makeParen(*node.left, true), *value));
         replace(node, muxed);
+        insertedSelects.push_back(selL);
+        if (selR)
+            insertedSelects.push_back(*selR);
     }
     // Descend regardless: nested replacements are registered here and resolved into
     // the reused operands when the tree is cloned.
@@ -1837,6 +1941,33 @@ std::vector<std::pair<std::string, size_t>> Papercutter::cutInfo() {
     return info;
 }
 
+std::vector<std::pair<size_t, size_t>> Papercutter::cutPairs() {
+    // Same bands, same order, as cutInfo(). Bit-shrink and case contribute one cut
+    // per site, so they pair with nothing.
+    std::vector<std::pair<size_t, size_t>> pairs;
+    size_t base = 0;
+    for (size_t i = 0; i < ternaryNodes.size(); ++i)
+        pairs.emplace_back(base + 2 * i, base + 2 * i + 1);
+    base += ternaryNodes.size() * 2;
+    for (size_t i = 0; i < ifNodes.size(); ++i)
+        pairs.emplace_back(base + 2 * i, base + 2 * i + 1);
+    base += ifNodes.size() * 2;
+    base += shrinkNodes.size();
+    base += caseNodes.size();
+    // Binops carry one entry per (node, side); a shift has keep-left only, so pair
+    // consecutive entries only when they belong to the same node.
+    for (size_t i = 0; i + 1 < binopNodes.size(); ++i) {
+        if (binopNodes[i].first == binopNodes[i + 1].first) {
+            pairs.emplace_back(base + i, base + i + 1);
+            ++i;
+        }
+    }
+    base += binopNodes.size();
+    for (size_t i = 0; i < constForceNodes.size(); ++i)
+        pairs.emplace_back(base + 2 * i, base + 2 * i + 1);
+    return pairs;
+}
+
 std::vector<size_t> Papercutter::cutShrinkWidths() {
     // Aligned 1:1 with cutInfo()/cutAll() indices. Only bitshrink cuts carry a
     // meaningful width (the current bit width of their targeted packed dimension);
@@ -2157,7 +2288,7 @@ void Papercutter::handle(const BinaryExpressionSyntax& node) {
 // True when this identifier sits in a write position (LHS of any assignment),
 // climbing out of enclosing LHS concatenations/streams first ({a, x} = ...).
 // Such occurrences must not be substituted with a constant.
-static bool isConstForceWriteTarget(const IdentifierNameSyntax& node) {
+static bool isAssignmentWriteTarget(const SyntaxNode& node) {
     const SyntaxNode* cur = &node;
     const SyntaxNode* parent = node.parent;
     while (parent && (parent->kind == SyntaxKind::ConcatenationExpression ||
@@ -2177,7 +2308,7 @@ void Papercutter::handle(const IdentifierNameSyntax& node) {
     if (!shrinkWithIntermediate) {
         if (!constForceActive.empty()) {
             auto it = constForceActive.find(std::string(node.identifier.valueText()));
-            if (it != constForceActive.end() && !isConstForceWriteTarget(node)) {
+            if (it != constForceActive.end() && !isAssignmentWriteTarget(node)) {
                 this->replace(node, makeIntLiteral(it->second ? "1'b1" : "1'b0", node.identifier.trivia()));
                 return;
             }

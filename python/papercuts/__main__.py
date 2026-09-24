@@ -17,6 +17,7 @@ import subprocess
 import asyncio
 
 import papercuts.chipper as chipper
+from papercuts.manifest import build_manifest, check_manifest, write_manifest
 from papercuts.elaborator import (
     elaborate_design, build_compilation_from, ElaborationError, EmitError, make_parse_env,
 )
@@ -24,7 +25,8 @@ from papercuts.deadcode import prune_dead_source
 from papercuts.utils import print_tree, status, set_verbose, Run
 from papercuts.backends import discover_backends, get_backend
 from papercuts.pypercuts import (Papercutter, get_instantiated_modules,
-                                 insert_muxes, wire_mux_hierarchy)
+                                 insert_muxes_report, rename_instance_types, rename_module,
+                                 wire_mux_hierarchy)
 from papercuts.status import StatusWriter
 
 
@@ -270,6 +272,13 @@ async def main():
     parser.add_argument("input_files", help="The input SystemVerilog files to process", nargs="+")
     parser.add_argument("-e", "--check-equivalence", action="store_true")
     parser.add_argument("-m", "--mux-rewrites", action="store_true")
+    parser.add_argument(
+        "--mux-suffix",
+        default="_muxed",
+        help="Suffix appended to every muxed module's name (default: _muxed), so the "
+        "muxed copy can be elaborated alongside the original -- which is what a miter "
+        "needs. Pass an empty string to emit the muxed copy under the original names.",
+    )
     parser.add_argument(
         "-j",
         "--max-jobs",
@@ -797,6 +806,10 @@ async def main():
         mux_dir = f"{output_dir}/muxed_sources"
         os.makedirs(mux_dir, exist_ok=True)
         muxed: dict[str, SyntaxTree] = {}
+        # Selects a control was actually emitted for, per module. The rest of
+        # 0..N-1 are reserved ports that drive nothing; the manifest reports them
+        # as `inserted: false` so no consumer mistakes one for a testable cut.
+        mux_inserted: dict[str, set[int]] = {}
         n_muxed = 0
         for tree, name in conc_trees:
             # An excluded or non-target module is never cut, so it has no selects to
@@ -804,15 +817,21 @@ async def main():
             # kept verbatim.
             if is_excluded(name) or not is_cut_target(name):
                 continue
-            rewrite = insert_muxes(
+            rewrite, inserted = insert_muxes_report(
                 SyntaxTree.fromText(print_tree(tree)),
                 "bitshrink" in fams, "ternary" in fams, "if" in fams,
                 caseMux="case" in fams,
                 binopMux="binop" in fams,
                 constForceMux="force-const" in fams,
                 binopsInConditionsOnly=args.binops_in_conditions_only,
+                # Must be exactly what this module's Papercutter gets below:
+                # insert_muxes builds one internally to take the cut bands from,
+                # so a difference here is a difference in what pc_sel<N> means.
+                symbolicRanges=symbolic_ranges.get(name, {}),
+                shrinkWithIntermediate=args.shrink_with_intermediate,
             )
             muxed[name] = rewrite
+            mux_inserted[name] = set(inserted)
             n_muxed += 1
 
         # Wire the selects up the hierarchy. A cut belongs to a module DEFINITION,
@@ -853,6 +872,21 @@ async def main():
         for name in muxed:
             forwarded(name)
 
+        # Rename the muxed copy so it can be elaborated next to the original: a
+        # miter instantiates both, and two definitions of one name collide. Only
+        # MUXED modules are renamed. A child that was never muxed (excluded or not
+        # a cut target) keeps its name and is shared by both hierarchies, which is
+        # correct -- it holds no cuts, so the two copies of it are identical.
+        suffix = args.mux_suffix
+        mux_files: dict[str, str] = {}
+        renames = {n: f"{n}{suffix}" for n in muxed} if suffix else {}
+        clashes = sorted(set(renames.values()) & {n for _, n in conc_trees})
+        if clashes:
+            raise SystemExit(
+                f"--mux-suffix {suffix!r} collides with existing module(s): {', '.join(clashes)}. "
+                "Choose another suffix."
+            )
+
         for name, tree_ in muxed.items():
             extra = [f"pc_sel_{m}_{i}" for m, i in fwd[name]]
             conns = {}
@@ -864,13 +898,23 @@ async def main():
                 if pairs:
                     conns[child] = pairs
             if extra or conns:
+                # Wiring is keyed by the ORIGINAL child names, so it has to happen
+                # before the rename.
                 tree_ = wire_mux_hierarchy(tree_, extra, conns)
-            with open(f"{mux_dir}/{name}.sv", "w") as f:
+            if renames:
+                child_renames = {c: renames[c] for c in kids.get(name, []) if c in renames}
+                tree_ = rename_module(tree_, renames[name])
+                if child_renames:
+                    tree_ = rename_instance_types(tree_, child_renames)
+            muxed_path = f"{mux_dir}/{renames.get(name, name)}.sv"
+            with open(muxed_path, "w") as f:
                 f.write(print_tree(tree_))
+            mux_files[name] = muxed_path
 
         n_wired = sum(1 for n in muxed if fwd[n])
         status(f"Mux rewrites complete ({n_muxed}/{len(conc_trees)} modules, "
-               f"{n_wired} wired through hierarchy).")
+               f"{n_wired} wired through hierarchy"
+               + (f", renamed with suffix '{suffix}'" if renames else "") + ").")
 
     # MARK: Phase 1 -- enumerate every cut across every module.
     # Enumeration only reads the cut PLAN (pc.cut_info(): type + line per cut,
@@ -954,6 +998,35 @@ async def main():
         modules.append(mod)
 
     status(f"{len(all_runs)} candidate cuts across {len(modules)} modules")
+
+    # MARK: Mux manifest -- the contract for whoever consumes the muxed design.
+    # Written here, after enumeration, because it joins what the muxer inserted
+    # (mux_inserted, captured above) with what the cutter enumerated (cut_infos and
+    # cut_pairs, the same objects the log is written from). Anything derived by
+    # convention instead -- select name to cut index, a module's `_muxed` name, two
+    # cuts on one line being a pair -- has been wrong at least once.
+    if args.mux_rewrites:
+        golden_files = {mod.name: f"{ctree_dir}/{mod.name}.sv" for mod in modules}
+        manifest = build_manifest(
+            mode="in-situ" if args.in_situ else "elaborated",
+            top=top_name,
+            suffix=args.mux_suffix,
+            modules=modules,
+            muxed_names=renames,
+            muxed_files=mux_files,
+            golden_files=golden_files,
+            inserted=mux_inserted,
+            forwarded=fwd,
+            base_dir=output_dir,
+        )
+        problems = check_manifest(manifest, muxed_text={
+            name: open(path).read() for name, path in mux_files.items()})
+        if problems:
+            raise SystemExit("mux manifest is inconsistent:\n  " + "\n  ".join(problems))
+        manifest_path = write_manifest(manifest, output_dir)
+        n_inert = sum(1 for m in manifest["modules"].values() for c in m["cuts"] if not c["inserted"])
+        status(f"Mux manifest written to {manifest_path}"
+               + (f" ({n_inert} reserved select(s) drive nothing)" if n_inert else ""))
 
     log_path = f"{output_dir}/papercuts.log"
     plan_path = f"{output_dir}/papercuts.plan.log"
