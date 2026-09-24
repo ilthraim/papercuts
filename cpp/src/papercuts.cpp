@@ -1495,7 +1495,68 @@ std::vector<std::shared_ptr<SyntaxTree>> IfRemover::removeAllIfs() {
     return newTrees;
 }
 
+namespace {
+// Every identifier referenced under a node.
+class IdentifierNameCollector : public SyntaxVisitor<IdentifierNameCollector> {
+public:
+    std::unordered_set<std::string> names;
+    void handle(const IdentifierNameSyntax& node) {
+        names.insert(std::string(node.identifier.valueText()));
+        visitDefault(node);
+    }
+    void handle(const IdentifierSelectNameSyntax& node) {
+        names.insert(std::string(node.identifier.valueText()));
+        visitDefault(node);
+    }
+};
+
+// Signals qualified by an edge in an event list, one entry per edge event.
+class EdgeSignalCollector : public SyntaxVisitor<EdgeSignalCollector> {
+public:
+    std::vector<std::string> names;
+    void handle(const SignalEventExpressionSyntax& node) {
+        if (node.edge) {
+            IdentifierNameCollector inc;
+            node.expr->visit(inc);
+            for (const auto& n : inc.names)
+                names.push_back(n);
+        }
+        visitDefault(node);
+    }
+};
+} // namespace
+
+void IfCollector::handle(const ProceduralBlockSyntax& node) {
+    // Only this block's own event list decides; its body is visited with whatever
+    // that list says, and restored afterwards so sibling blocks are unaffected.
+    std::vector<std::string> edges;
+    if (auto* timed = node.statement->as_if<TimingControlStatementSyntax>()) {
+        EdgeSignalCollector esc;
+        timed->timingControl->visit(esc);
+        edges = std::move(esc.names);
+    }
+
+    auto saved = asyncEdgeSignals;
+    asyncEdgeSignals.clear();
+    if (edges.size() >= 2)  // one edge is an ordinary synchronous block
+        asyncEdgeSignals.insert(edges.begin(), edges.end());
+    this->visitDefault(node);
+    asyncEdgeSignals = std::move(saved);
+}
+
 void IfCollector::handle(const ConditionalStatementSyntax& node) {
+    if (!asyncEdgeSignals.empty()) {
+        IdentifierNameCollector inc;
+        node.predicate->visit(inc);
+        for (const auto& n : inc.names) {
+            if (asyncEdgeSignals.contains(n)) {
+                // The asynchronous reset test: not a cut site in any form. Keep
+                // descending, though -- the ifs inside it are ordinary cuts.
+                this->visitDefault(node);
+                return;
+            }
+        }
+    }
     this->foundNodes.emplace_back(&node);
     this->visitDefault(node);
 }

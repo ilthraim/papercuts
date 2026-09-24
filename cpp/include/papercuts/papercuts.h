@@ -520,11 +520,24 @@ public:
     size_t getCutCount() const { return cutCount; }
 };
 
+// Every `if` that is a cut site. The exception is the reset test of an
+// asynchronous block: in `always @(posedge clk or posedge rst) if (rst) ...` the
+// condition has to stay a bare reference to a signal in the event list, or the
+// asynchronous load pattern is gone and the result is not synthesizable -- yosys
+// rejects it outright ("condition cannot be matched to any signal from the event
+// list"). Both the mux form and the cut form break it, so the site is not a cut
+// at all. Only the condition that names an edge signal is skipped; ifs nested
+// inside the same block are ordinary cut sites, because the outermost `if` is
+// the one the pattern depends on.
 class IfCollector : public SyntaxVisitor<IfCollector> {
 private:
     std::vector<const ConditionalStatementSyntax*> foundNodes;
+    // Signals carrying an edge in the enclosing block's event list, when there is
+    // more than one such event (which is what makes the block asynchronous).
+    std::unordered_set<std::string> asyncEdgeSignals;
 
 public:
+    void handle(const ProceduralBlockSyntax&);
     void handle(const ConditionalStatementSyntax&);
     std::vector<const ConditionalStatementSyntax*> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };
