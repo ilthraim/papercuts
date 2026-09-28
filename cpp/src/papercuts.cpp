@@ -123,7 +123,9 @@ void SubmoduleRenamer::handle(const HierarchyInstantiationSyntax& node) {
             makeToken(TokenKind::Identifier,
                       persistString(alloc, moduleName + "_" + std::string(node.instances[0]->decl->name.valueText())));
 
-        replaceToken(node, 1, newType, true);
+        // The attribute list's elements come first in the flat child index
+        // space, so the module type token sits right after them.
+        replaceToken(node, node.attributes.getChildCount(), newType, true);
     }
     else {
         for (const auto& instance : node.instances) {
@@ -132,10 +134,10 @@ void SubmoduleRenamer::handle(const HierarchyInstantiationSyntax& node) {
                 oldTriviaText += t.getRawText();
 
             auto& newInst = parse(persistString(
-                alloc, oldTriviaText + (node.attributes.size() > 0 ? node.attributes.toString() + " " : "") +
+                alloc, oldTriviaText + (node.attributes.size() > 0 ? listToString(node.attributes) + " " : "") +
                            moduleName + "_" + std::string(instance->decl->name.valueText()) +
                            (node.parameters ? node.parameters->toString() : "") + " " +
-                           std::string(instance->decl->name.valueText()) + " (" + instance->connections.toString() +
+                           std::string(instance->decl->name.valueText()) + " (" + listToString(instance->connections) +
                            ");"));
 
             insertBefore(node, newInst);
@@ -162,9 +164,10 @@ void InstanceTypeRenamer::handle(const HierarchyInstantiationSyntax& node) {
     auto it = renames.find(std::string(node.type.valueText()));
     if (it == renames.end())
         return;
-    // Token 1 of an instantiation is the module type; instance names, parameter
-    // overrides and port connections are left exactly as they are.
-    replaceToken(node, 1, makeId(persistString(alloc, it->second)), true);
+    // The module type is the first token after the attribute list's elements
+    // in the flat child index space; instance names, parameter overrides and
+    // port connections are left exactly as they are.
+    replaceToken(node, node.attributes.getChildCount(), makeId(persistString(alloc, it->second)), true);
 }
 
 std::shared_ptr<SyntaxTree> InstanceTypeRenamer::apply(const std::shared_ptr<SyntaxTree> tree) {
@@ -644,7 +647,7 @@ std::optional<DeclShape> shapeOf(const DataDeclarationSyntax& node) {
         return std::nullopt;
 
     DeclShape out;
-    std::string mods = trimWs(std::string(node.modifiers.toString()));
+    std::string mods = trimWs(listToString(node.modifiers));
     out.typeHead = (mods.empty() ? "" : mods + " ") + std::string(intType->keyword.valueText());
     if (intType->signing)
         out.typeHead += " " + std::string(intType->signing.valueText());
@@ -906,12 +909,12 @@ void BitShrinker::handle(const DeclaratorSyntax& node) {
         auto& type = parentDecl.type;
 
         auto& newDecl = factory.declarator(makeId(persistString(alloc, newName), SingleSpace),
-                                           std::span<VariableDimensionSyntax*>{}, nullptr);
+                                           SyntaxList<VariableDimensionSyntax>{}, nullptr);
 
         auto declElem = std::span(alloc.emplace<TokenOrSyntax>(&newDecl), size_t{1});
-        SeparatedSyntaxList<DeclaratorSyntax> declList(declElem);
+        SeparatedSyntaxList<DeclaratorSyntax> declList(alloc, declElem);
 
-        auto& newDataDecl = factory.dataDeclaration(std::span<AttributeInstanceSyntax*>{},
+        auto& newDataDecl = factory.dataDeclaration(SyntaxList<AttributeInstanceSyntax>{},
                                                     *deepClone(parentDecl.modifiers, alloc), *deepClone(*type, alloc),
                                                     declList, makeSemicolon());
         insertAfter(parentDecl, newDataDecl);
@@ -1298,7 +1301,9 @@ void ExprMuxer::handle(const CaseStatementSyntax& node) {
 
     // Built back to front, so each iteration's else clause is the chain so far.
     for (size_t r = node.items.size(); r-- > 0;) {
-        auto* item = node.items[r];
+        // Lists now propagate const to their elements; the operands are reused
+        // (never mutated) in the replacement, as they were under the old API.
+        auto* item = const_cast<CaseItemSyntax*>(node.items[r]);
         if (item->kind != SyntaxKind::StandardCaseItem)
             continue;
         auto& std_item = item->as<StandardCaseItemSyntax>();
@@ -1331,7 +1336,7 @@ void ExprMuxer::handle(const CaseStatementSyntax& node) {
         // `unique`/`priority` qualifies the whole chain, so it belongs on the
         // outermost `if` only.
         tail = &factory.conditionalStatement(
-            nullptr, std::span<AttributeInstanceSyntax*>{},
+            nullptr, SyntaxList<AttributeInstanceSyntax>{},
             r == outermost ? node.uniqueOrPriority : Token{},
             makeToken(TokenKind::IfKeyword, "if", spaced()),
             makeToken(TokenKind::OpenParenthesis, "(", spaced()), makeConditionalPredicate(*guard),
@@ -2204,7 +2209,7 @@ void Papercutter::handle(const DataDeclarationSyntax& node) {
     for (const auto& t : node.getFirstToken().trivia())
         trivia += t.getRawText();
 
-    std::string mods = trimWs(std::string(node.modifiers.toString()));
+    std::string mods = trimWs(listToString(node.modifiers));
     std::string modsOut = mods.empty() ? "" : mods + " ";
 
     std::string typeHead = std::string(intType.keyword.valueText());

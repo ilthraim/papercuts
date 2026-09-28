@@ -33,11 +33,6 @@ add_compile_definitions(BOOST_REGEX_STANDALONE)
 # Set here, before FetchContent pulls slang in, so it applies to slang's targets too.
 add_compile_definitions(SLANG_ASSERT_ENABLED)
 
-FetchContent_Declare(pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG        v3.0.2
-    GIT_SHALLOW    ON
-)
 
 # Configure slang build options BEFORE FetchContent_MakeAvailable
 set(SLANG_INCLUDE_PYLIB ON CACHE BOOL "" FORCE)    # <-- builds pyslang!
@@ -46,25 +41,22 @@ set(SLANG_INCLUDE_TESTS OFF CACHE BOOL "" FORCE)    # don't need slang tests
 set(SLANG_INCLUDE_INSTALL OFF CACHE BOOL "" FORCE)  # we handle our own install
 set(SLANG_USE_MIMALLOC OFF CACHE BOOL "" FORCE)     # incompatible with python's global symbol visibility requirements
 
-# Pin slang to a fork that has some clone visitor changes
+# Pin slang to the fork's `papercuts` branch: upstream plus the resolveReplacement
+# fix (composes nested replacements; see CLAUDE.md, mux invariant 3) and an
+# ASTContext(Symbol) binding overload. Pin the SHA, not the tag -- the tag
+# (papercuts-2026-09) only keeps the commit reachable on GitHub.
 FetchContent_Declare(slang
     GIT_REPOSITORY https://github.com/ilthraim/slang.git
-    GIT_TAG        32180a2fc89a490a4f80f47dd2eca8377ccfe8e5
+    GIT_TAG        3ceae7d20cbe61e13ccfea1a3950d917f0e3fc74  # tag papercuts-2026-09
 )
 
-# GCC 13.2.0 hits an internal compiler error in LTO partitioning
-# (add_symbol_to_partition_1, lto-partition.cc) when linking the pybind11
-# modules in Release builds. pybind11 adds -flto per target; pre-marking its
-# LTO-detection cache vars as unsupported makes it skip -flto for BOTH pyslang
-# and pypercuts (check_cxx_compiler_flag short-circuits on a cached result).
-set(HAS_FLTO_THIN FALSE CACHE INTERNAL "" FORCE)
-set(HAS_FLTO_AUTO FALSE CACHE INTERNAL "" FORCE)
-set(HAS_FLTO FALSE CACHE INTERNAL "" FORCE)
+# Populate slang FIRST -- it locates nanobind (from the active Python env, else
+# FetchContent) and defines nanobind_add_module/nanobind_add_stub for us.
+FetchContent_MakeAvailable(slang)
 
-# Populate slang and pybind11 FIRST — so pyslang reuses them
-FetchContent_MakeAvailable(slang pybind11)
-
-
+if(NOT TARGET pyslang)
+    message(FATAL_ERROR "pyslang target not found — is SLANG_INCLUDE_PYLIB ON?")
+endif()
 
 # ---- Core C++ library ----
 add_library(papercuts_core
@@ -87,75 +79,89 @@ add_executable(pc cpp/src/main.cpp)
 target_link_libraries(pc PRIVATE papercuts_core)
 
 # ---- Python extension module ----
-pybind11_add_module(pypercuts cpp/bindings/bindings.cpp)
+# Same split-mode runtime and ABI floor as upstream pyslang, so SyntaxTree can
+# cross between the two modules.
+nanobind_add_module(pypercuts BACKEND_MODULE nanobind_backend STABLE_ABI_VERSION 3.11
+    cpp/bindings/bindings.cpp)
 target_link_libraries(pypercuts PRIVATE papercuts_core)
-
-# ---- Install the extension into the papercuts package ----
-# Must land inside the package so it imports as `papercuts.pypercuts` from an
-# installed wheel (the in-place dev build relies on copy_pypercuts below). NB:
-# pyslang stays top-level — it is imported as `import pyslang`, not a subpackage.
-install(TARGETS pypercuts
-    LIBRARY DESTINATION papercuts
-    COMPONENT pylib
-)
-
-# ---- Dev convenience (for cmake --build) ----
-
-if(NOT TARGET pyslang)
-    message(FATAL_ERROR "pyslang target not found — is SLANG_INCLUDE_PYLIB ON?")
-endif()
-
-# ---- Copy targets ----
-# Can't use add_custom_command(TARGET pyslang ...) because
-# pyslang was created in a subdirectory. Use a custom target instead.
-
-add_custom_target(copy_pyslang ALL
-    COMMAND ${CMAKE_COMMAND} -E copy
-        $<TARGET_FILE:pyslang>
-        "${CMAKE_SOURCE_DIR}/python/$<TARGET_FILE_NAME:pyslang>"
-    COMMENT "Copying pyslang to python/"
-    DEPENDS pyslang
-    VERBATIM
-)
-
-add_custom_target(copy_pypercuts ALL
-    COMMAND ${CMAKE_COMMAND} -E copy
-        $<TARGET_FILE:pypercuts>
-        "${CMAKE_SOURCE_DIR}/python/papercuts/$<TARGET_FILE_NAME:pypercuts>"
-    COMMENT "Copying pypercuts to python/"
-    DEPENDS pypercuts
-    VERBATIM
-)
-
 
 set_target_properties(pypercuts PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python/papercuts"
 )
 
-# ---- Stub generation ----
+# ---- pyslang package ----
+# Upstream pyslang is a package, not a bare extension:
+#
+#     pyslang/__init__.py         re-exports pyslang.pyslang, aliases pyslang.ast etc.
+#     pyslang/pyslang.abi3.so     the extension, imported as pyslang.pyslang
+#     pyslang/py.typed
+#     pyslang/*.pyi               stubs for the re-exported names
+#     pyslang/pyslang/*.pyi       the same stubs, for pyslang.pyslang.*
+#
+# slang's own install rules (component `pylib`) assume a wheel whose install-dir
+# is pyslang/, so they put these at the root of ours. We assemble the package
+# once in the build tree and both install it and copy it into python/ from there,
+# so the dev tree and the wheel cannot disagree. slang's `pylib` component is left
+# out of the wheel in pyproject.toml.
+set(PYSLANG_SRC_PKG "${slang_SOURCE_DIR}/pyslang/pyslang")
+set(PYSLANG_STUBS "${slang_BINARY_DIR}/bindings/pyslang-stubs/pyslang")
+set(PYSLANG_PKG "${CMAKE_BINARY_DIR}/pyslang-pkg/pyslang")
 
-# Only attempt if pybind11-stubgen is installed
-execute_process(
-    COMMAND "${Python_EXECUTABLE}" -c "import pybind11_stubgen"
-    RESULT_VARIABLE STUBGEN_AVAILABLE
-    OUTPUT_QUIET ERROR_QUIET
+add_custom_target(pyslang_pkg ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${PYSLANG_PKG}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${PYSLANG_PKG}/pyslang"
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:pyslang> "${PYSLANG_PKG}/"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${PYSLANG_SRC_PKG}/__init__.py" "${PYSLANG_SRC_PKG}/py.typed" "${PYSLANG_PKG}/"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PYSLANG_STUBS}" "${PYSLANG_PKG}"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PYSLANG_STUBS}" "${PYSLANG_PKG}/pyslang"
+    DEPENDS pyslang pyslang_stub
+    COMMENT "Assembling the pyslang package"
+    VERBATIM
 )
 
-if(STUBGEN_AVAILABLE EQUAL 0)
-    add_custom_target(stubs ALL
-        COMMAND ${CMAKE_COMMAND} -E env
-            "PYTHONPATH=${CMAKE_SOURCE_DIR}/python"
-            "${Python_EXECUTABLE}" -m pybind11_stubgen pyslang
-                --output-dir "${CMAKE_SOURCE_DIR}/python"
-        COMMAND ${CMAKE_COMMAND} -E env
-            "PYTHONPATH=${CMAKE_SOURCE_DIR}/python/papercuts:${CMAKE_SOURCE_DIR}/python"
-            "${Python_EXECUTABLE}" -m pybind11_stubgen pypercuts
-                --output-dir "${CMAKE_SOURCE_DIR}/python/papercuts"
-        DEPENDS copy_pyslang copy_pypercuts
-        COMMENT "Generating Python type stubs"
-        VERBATIM
-    )
-else()
-    message(STATUS "pybind11-stubgen not found — skipping stub generation")
-    message(STATUS "  Install with: pip install pybind11-stubgen")
+install(DIRECTORY "${PYSLANG_PKG}"
+    DESTINATION .
+    COMPONENT papercuts_py
+    USE_SOURCE_PERMISSIONS
+)
+
+# ---- Install the extension into the papercuts package ----
+# Must land inside the package so it imports as `papercuts.pypercuts` from an
+# installed wheel.
+install(TARGETS pypercuts
+    LIBRARY DESTINATION papercuts
+    COMPONENT papercuts_py
+)
+
+# ---- Dev convenience (for cmake --build) ----
+# Mirror the assembled package into python/ so `import pyslang` resolves there.
+# The directory is replaced wholesale: a stale stub or extension can't survive.
+add_custom_target(copy_pyslang ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_SOURCE_DIR}/python/pyslang"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PYSLANG_PKG}" "${CMAKE_SOURCE_DIR}/python/pyslang"
+    DEPENDS pyslang_pkg
+    COMMENT "Copying the pyslang package to python/"
+    VERBATIM
+)
+
+# ---- Stub generation ----
+# pypercuts is imported by stubgen, which imports pyslang, which (split mode)
+# imports nanobind_backend. Use the build env's copy if it has one, else the one
+# slang fetched into its build tree for its own stubs.
+set(PYPERCUTS_STUB_PATH "${CMAKE_SOURCE_DIR}/python/papercuts" "${CMAKE_BINARY_DIR}/pyslang-pkg")
+if(EXISTS "${slang_BINARY_DIR}/bindings/nanobind_backend")
+    list(APPEND PYPERCUTS_STUB_PATH "${slang_BINARY_DIR}/bindings/nanobind_backend")
 endif()
+
+nanobind_add_stub(pypercuts_stub
+    MODULE pypercuts
+    OUTPUT "${CMAKE_SOURCE_DIR}/python/papercuts/pypercuts.pyi"
+    PYTHON_PATH ${PYPERCUTS_STUB_PATH}
+    DEPENDS pypercuts pyslang_pkg
+)
+
+install(FILES "${CMAKE_SOURCE_DIR}/python/papercuts/pypercuts.pyi"
+    DESTINATION papercuts
+    COMPONENT papercuts_py
+)

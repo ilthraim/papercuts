@@ -276,8 +276,8 @@ def compute_dead_bits(comp: Compilation, *, protect_modules=(), exclude_hps=()):
                 continue
             driven = set()
             try:
-                for _drv, rng in mgr.getDrivers(m):
-                    lo, hi = rng
+                for drv in mgr.getDrivers(m):
+                    lo, hi = drv.bounds
                     driven.update(range(min(lo, hi), max(lo, hi) + 1))
             except Exception:
                 continue

@@ -17,6 +17,8 @@
 #include "slang/syntax/SyntaxKind.h"
 #include "slang/syntax/SyntaxNode.h"
 #include "slang/syntax/SyntaxTree.h"
+#include "slang/syntax/SyntaxPrinter.h"
+#include "slang/syntax/SyntaxRewriter.h"
 #include "slang/syntax/SyntaxVisitor.h"
 
 #include "papercuts/utils.h"
@@ -71,36 +73,31 @@ public:
 
 class ParentSetter{
 public:
+    // Syntax lists are not nodes: their elements occupy the owning node's flat
+    // child index space, so every node child here gets `node` as its parent.
     void visit(SyntaxNode& node) {
-        bool isList = node.kind == SyntaxKind::SeparatedList || node.kind == SyntaxKind::SyntaxList || node.kind == SyntaxKind::TokenList;
-        if (!isList) {
-            for (size_t i = 0; i < node.getChildCount(); i++) {
-                auto child = node.childNode(i);
-                if (child) { // If not a token
-                    if (child->kind == SyntaxKind::SeparatedList || child->kind == SyntaxKind::SyntaxList || child->kind == SyntaxKind::TokenList) { // If child is a list we need to set the parents of all the elements
-                        for (size_t j = 0; j < child->getChildCount(); j++) {
-                            auto grandChild = child->childNode(j);
-                            if (grandChild) { // If not a token
-                                grandChild->parent = &node;
-                            }
-                        }
-                    }
-                    child->parent = &node;
-
-                    visit(*child);
-                }
+        for (size_t i = 0; i < node.getChildCount(); i++) {
+            if (auto child = node.childNode(i)) { // If not a token
+                child->parent = &node;
+                visit(*child);
             }
-        } else { // If this is a list, just visit all the children
-            for (size_t i = 0; i < node.getChildCount(); i++) {
-                auto child = node.childNode(i);
-                if (child) {
-                    visit(*child);
-                }
-            }
-
         }
     }
 };
+
+/// Source text of a syntax list, trivia included (lists no longer have toString()).
+template<typename TList>
+std::string listToString(const TList& list) {
+    slang::syntax::SyntaxPrinter printer;
+    for (size_t i = 0; i < list.getChildCount(); i++) {
+        auto child = list.getChild(i);
+        if (child.isNode())
+            printer.print(*child.node());
+        else
+            printer.print(child.token());
+    }
+    return printer.str();
+}
 
 
 class ModuleNameRewriter : public SyntaxRewriter<ModuleNameRewriter> {
@@ -220,7 +217,7 @@ protected:
     SeparatedSyntaxList<TNode> makeSeparatedList(std::span<TNode* const> nodes,
                                                  std::optional<Token> separator = std::nullopt) {
         if (nodes.empty())
-            return SeparatedSyntaxList<TNode>{std::span<TokenOrSyntax>{}};
+            return SeparatedSyntaxList<TNode>{};
 
         slang::SmallVector<TokenOrSyntax> buffer;
         const size_t count = separator ? (nodes.size() * 2 - 1) : nodes.size();
@@ -232,20 +229,20 @@ protected:
                 buffer.push_back(separator->deepClone(this->alloc));
         }
 
-        return SeparatedSyntaxList<TNode>(buffer.copy(this->alloc));
+        return SeparatedSyntaxList<TNode>(this->alloc, buffer);
     }
 
     template<typename TNode>
     SyntaxList<TNode> makeSyntaxList(std::span<TNode* const> nodes) {
         if (nodes.empty())
-            return SyntaxList<TNode>{std::span<TNode*>{}};
+            return SyntaxList<TNode>{};
 
         slang::SmallVector<TNode*> buffer;
         buffer.reserve(nodes.size());
         for (TNode* node : nodes)
             buffer.push_back(node);
 
-        return SyntaxList<TNode>(buffer.copy(this->alloc));
+        return SyntaxList<TNode>(this->alloc, buffer);
     }
 
     // MARK: expression construction
@@ -274,13 +271,13 @@ protected:
     ExpressionSyntax& makeNot(ExpressionSyntax& operand) {
         return factory.prefixUnaryExpression(SyntaxKind::UnaryLogicalNotExpression,
                                              makeToken(TokenKind::Exclamation, "!"),
-                                             std::span<AttributeInstanceSyntax*>{}, operand);
+                                             SyntaxList<AttributeInstanceSyntax>{}, operand);
     }
 
     ExpressionSyntax& makeBinary(SyntaxKind kind, ExpressionSyntax& left, TokenKind opKind,
                                  std::string_view opText, ExpressionSyntax& right) {
         return factory.binaryExpression(kind, left, makeToken(opKind, opText, spaced()),
-                                        std::span<AttributeInstanceSyntax*>{}, right);
+                                        SyntaxList<AttributeInstanceSyntax>{}, right);
     }
 
     /// Rebuild a binary expression around its original operator token (and so its
@@ -288,14 +285,14 @@ protected:
     ExpressionSyntax& makeBinary(SyntaxKind kind, ExpressionSyntax& left, Token operatorToken,
                                  ExpressionSyntax& right) {
         return factory.binaryExpression(kind, left, operatorToken,
-                                        std::span<AttributeInstanceSyntax*>{}, right);
+                                        SyntaxList<AttributeInstanceSyntax>{}, right);
     }
 
     ExpressionSyntax& makeTernary(ExpressionSyntax& predicate, ExpressionSyntax& whenTrue,
                                   ExpressionSyntax& whenFalse) {
         return factory.conditionalExpression(makeConditionalPredicate(predicate),
                                              makeToken(TokenKind::Question, "?", spaced()),
-                                             std::span<AttributeInstanceSyntax*>{}, whenTrue,
+                                             SyntaxList<AttributeInstanceSyntax>{}, whenTrue,
                                              makeColon(spaced()), whenFalse);
     }
 

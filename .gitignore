@@ -7,6 +7,8 @@ wheels/
 *.egg-info
 *.so
 *.pyi
+# pyslang package assembled by the build (copy_pyslang)
+python/pyslang/
 
 # Virtual environments
 .venv

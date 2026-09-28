@@ -1,13 +1,18 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>  // for std::vector, std::shared_ptr automatic conversion
-#include <pybind11/typing.h>  // for py::list, py::dict, etc. automatic conversion
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
+#include <nanobind/stl/pair.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/unordered_map.h>
+#include <nanobind/stl/vector.h>
 #include "papercuts/papercuts.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
-PYBIND11_MODULE(pypercuts, m) {
+NB_MODULE(pypercuts, m) {
     // Ensure pyslang types are registered first
-    py::module_::import("pyslang");
+    nb::module_::import_("pyslang");
 
     m.doc() = "papercuts C++ bindings";
 
@@ -20,16 +25,16 @@ PYBIND11_MODULE(pypercuts, m) {
                                           constForceMux, binopsInConditionsOnly, symbolicRanges,
                                           shrinkWithIntermediate);
         },
-        py::arg("tree"),
-        py::arg("bitMux") = false,
-        py::arg("ternaryMux") = false,
-        py::arg("ifMux") = false,
-        py::arg("caseMux") = false,
-        py::arg("binopMux") = false,
-        py::arg("constForceMux") = false,
-        py::arg("binopsInConditionsOnly") = false,
-        py::arg("symbolicRanges") = std::unordered_map<std::string, std::vector<std::pair<int, int>>>{},
-        py::arg("shrinkWithIntermediate") = false,
+        nb::arg("tree"),
+        nb::arg("bitMux") = false,
+        nb::arg("ternaryMux") = false,
+        nb::arg("ifMux") = false,
+        nb::arg("caseMux") = false,
+        nb::arg("binopMux") = false,
+        nb::arg("constForceMux") = false,
+        nb::arg("binopsInConditionsOnly") = false,
+        nb::arg("symbolicRanges") = std::unordered_map<std::string, std::vector<std::pair<int, int>>>{},
+        nb::arg("shrinkWithIntermediate") = false,
         "Insert muxes into a SyntaxTree. `symbolicRanges` must be the same map the "
         "Papercutter for this module was given, or the bit-shrink band's width differs "
         "between enumeration and insertion and every later select shifts off its cut index."
@@ -44,74 +49,74 @@ PYBIND11_MODULE(pypercuts, m) {
             auto tr = papercuts::insertMuxes(tree, bitMux, ternaryMux, ifMux, caseMux, binopMux,
                                              constForceMux, binopsInConditionsOnly, symbolicRanges,
                                              shrinkWithIntermediate, &inserted);
-            return py::make_tuple(tr, inserted);
+            return nb::make_tuple(tr, inserted);
         },
-        py::arg("tree"),
-        py::arg("bitMux") = false,
-        py::arg("ternaryMux") = false,
-        py::arg("ifMux") = false,
-        py::arg("caseMux") = false,
-        py::arg("binopMux") = false,
-        py::arg("constForceMux") = false,
-        py::arg("binopsInConditionsOnly") = false,
-        py::arg("symbolicRanges") = std::unordered_map<std::string, std::vector<std::pair<int, int>>>{},
-        py::arg("shrinkWithIntermediate") = false,
+        nb::arg("tree"),
+        nb::arg("bitMux") = false,
+        nb::arg("ternaryMux") = false,
+        nb::arg("ifMux") = false,
+        nb::arg("caseMux") = false,
+        nb::arg("binopMux") = false,
+        nb::arg("constForceMux") = false,
+        nb::arg("binopsInConditionsOnly") = false,
+        nb::arg("symbolicRanges") = std::unordered_map<std::string, std::vector<std::pair<int, int>>>{},
+        nb::arg("shrinkWithIntermediate") = false,
         "insert_muxes, plus the sorted select numbers a control was actually emitted for. "
         "Every index below the port count is reserved; the ones missing here drive nothing."
     );
 
     m.def("get_instantiated_modules", &papercuts::getInstantiatedModules,
-        py::arg("tree"),
+        nb::arg("tree"),
         "Names of the modules instantiated in a SyntaxTree, in source order"
     );
 
     m.def("wire_mux_hierarchy", &papercuts::wireMuxHierarchy,
-        py::arg("tree"),
-        py::arg("extraPorts"),
-        py::arg("conns"),
+        nb::arg("tree"),
+        nb::arg("extraPorts"),
+        nb::arg("conns"),
         "Append forwarded pc_sel ports and connect them through to child instances"
     );
 
     m.def("rename_module", &papercuts::renameModule,
-        py::arg("tree"),
-        py::arg("newName"),
+        nb::arg("tree"),
+        nb::arg("newName"),
         "Rename the module in a SyntaxTree"
     );
 
     m.def("get_module_name", &papercuts::getModuleName,
-        py::arg("tree"),
+        nb::arg("tree"),
         "Get the name of the module in a SyntaxTree"
     );
 
     m.def("rename_submodules", &papercuts::renameSubmodules,
-        py::arg("tree"),
-        py::arg("excluded") = std::vector<std::string>{},
+        nb::arg("tree"),
+        nb::arg("excluded") = std::vector<std::string>{},
         "Rename submodules in a SyntaxTree based on the parent module name. "
         "Instantiations whose module name is in `excluded` are left untouched."
     );
 
     m.def("rename_instance_types", &papercuts::renameInstanceTypes,
-        py::arg("tree"),
-        py::arg("renames"),
+        nb::arg("tree"),
+        nb::arg("renames"),
         "Rename the module type of instantiations from an {old: new} map. "
         "Instantiations whose type is not a key are left untouched."
     );
 
-    py::classh<papercuts::Papercutter>(m, "Papercutter")
-        .def(py::init<const std::shared_ptr<slang::syntax::SyntaxTree>, bool, bool,
+    nb::class_<papercuts::Papercutter>(m, "Papercutter")
+        .def(nb::init<const std::shared_ptr<slang::syntax::SyntaxTree>, bool, bool,
                       std::unordered_map<std::string, std::vector<std::pair<int, int>>>>(),
-             py::arg("tree"),
-             py::arg("shrink_with_intermediate") = false,
-             py::arg("binops_in_conditions_only") = false,
-             py::arg("symbolic_ranges") =
+             nb::arg("tree"),
+             nb::arg("shrink_with_intermediate") = false,
+             nb::arg("binops_in_conditions_only") = false,
+             nb::arg("symbolic_ranges") =
                  std::unordered_map<std::string, std::vector<std::pair<int, int>>>{})
         .def("cut_all", &papercuts::Papercutter::cutAll)
         .def("cut_index", &papercuts::Papercutter::cutIndex,
-             py::arg("indices"),
-             py::arg("amounts") = std::unordered_map<size_t, int>{})
+             nb::arg("indices"),
+             nb::arg("amounts") = std::unordered_map<size_t, int>{})
         .def("cut_index_text", &papercuts::Papercutter::cutIndexText,
-             py::arg("indices"),
-             py::arg("amounts") = std::unordered_map<size_t, int>{})
+             nb::arg("indices"),
+             nb::arg("amounts") = std::unordered_map<size_t, int>{})
         .def("cut_info", &papercuts::Papercutter::cutInfo)
         .def("cut_pairs", &papercuts::Papercutter::cutPairs,
              "Mutually exclusive cut index pairs (the two halves of one site).")

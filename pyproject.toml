@@ -1,7 +1,11 @@
 [build-system]
 requires = [
     "scikit-build-core>=0.8",
-    "pybind11>=2.13",
+    # Must match slang's own pyproject: pypercuts and pyslang have to be built
+    # against the same nanobind so SyntaxTree can cross between them, and stub
+    # generation imports both, which needs the split-mode runtime.
+    "nanobind>=3.0.1,<4",
+    "nanobind-backend>=1.0",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -12,7 +16,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pybind11-stubgen>=2.5.5",
+    # Runtime for both extensions (nanobind split mode).
+    "nanobind-backend>=1.0",
     "z3>=0.2.0",
     "z3-solver>=4.15.4.0",
 ]
@@ -20,6 +25,10 @@ dependencies = [
 [tool.scikit-build]
 cmake.source-dir = "."
 cmake.build-type = "Release"
+# Only our component: slang's own `pylib` rules assume a pyslang-only wheel and
+# would put pyslang's files at the root of this one (CMakeLists.txt installs the
+# pyslang package itself).
+install.components = ["papercuts_py"]
 
 [tool.scikit-build.wheel]
 packages = ["python/papercuts"]
