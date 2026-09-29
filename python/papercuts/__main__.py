@@ -1010,6 +1010,9 @@ async def main():
             inserted=mux_inserted,
             forwarded=fwd,
             base_dir=output_dir,
+            # the backend registers these; a backend without them leaves both unset
+            clock=getattr(args, "clock", None),
+            reset=getattr(args, "reset", None),
         )
         problems = check_manifest(manifest, muxed_text={
             name: open(path).read() for name, path in mux_files.items()})

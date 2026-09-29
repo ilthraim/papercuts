@@ -58,6 +58,12 @@ def run():
                               golden_files={"m": "/out/orig/m.sv"}, inserted={"m": inserted},
                               forwarded={}, base_dir="/out")
     assert check_manifest(manifest) == [], check_manifest(manifest)
+    assert (manifest["clock"], manifest["reset"]) == (None, None), "no --clock/--reset: both null"
+    clocked = build_manifest(mode="in-situ", top="m", suffix="_muxed", modules=[mod],
+                             muxed_names={"m": "m_muxed"}, muxed_files={"m": "/out/muxed/m_muxed.sv"},
+                             golden_files={"m": "/out/orig/m.sv"}, inserted={"m": inserted},
+                             forwarded={}, base_dir="/out", clock="clk", reset="!rst_n")
+    assert (clocked["clock"], clocked["reset"]) == ("clk", "!rst_n"), "--clock/--reset recorded verbatim"
     cuts = manifest["modules"]["m"]["cuts"]
     types = [c["type"] for c in cuts]
 

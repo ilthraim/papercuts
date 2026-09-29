@@ -9,6 +9,7 @@ cannot drift from the muxed source it describes.
 Shape (version 1), paths relative to the manifest's own directory:
 
     {"version": 1, "mode": "in-situ"|"elaborated", "top": "...", "mux_suffix": "_muxed",
+     "clock": "clk" | null, "reset": "!rst_n" | null,
      "files": {"golden": [...], "muxed": [...]},
      "modules": {
        "<module>": {
@@ -18,6 +19,11 @@ Shape (version 1), paths relative to the manifest's own directory:
                    "port": "pc_sel0", "inserted": true}, ...],
          "exclusive": [[0, 1]],
          "forwarded": [{"port": "pc_sel_<child>_<i>", "module": "<child>", "index": i}]}}}
+
+`clock` and `reset` are the `--clock` / `--reset` this run was given, verbatim
+(null when absent): the signals papercuts' own formal checks declare. A consumer
+that checks the muxed design itself uses these, so both sides reason about the
+same clock and the same reset instead of each being told separately.
 
 `inserted: false` marks a select that is RESERVED (the port exists, so cut
 indices stay aligned) but drives nothing: a family turned off with
@@ -39,7 +45,7 @@ VERSION = 1
 def build_manifest(*, mode: str, top: str, suffix: str, modules, muxed_names: dict[str, str],
                    muxed_files: dict[str, str], golden_files: dict[str, str],
                    inserted: dict[str, set[int]], forwarded: dict[str, list[tuple[str, int]]],
-                   base_dir: str) -> dict:
+                   base_dir: str, clock: str | None = None, reset: str | None = None) -> dict:
     """`modules` is the pipeline's ModuleCuts list; only those that were muxed appear."""
     def rel(p):
         return os.path.relpath(p, base_dir)
@@ -69,6 +75,8 @@ def build_manifest(*, mode: str, top: str, suffix: str, modules, muxed_names: di
         "mode": mode,
         "top": top,
         "mux_suffix": suffix,
+        "clock": clock,
+        "reset": reset,
         "files": {
             "golden": sorted({rel(p) for p in golden_files.values()}),
             "muxed": sorted({rel(p) for p in muxed_files.values()}),
