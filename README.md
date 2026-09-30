@@ -18,43 +18,53 @@ Papercuts applies various code transformations ("papercuts") to SystemVerilog de
 
 ### Prerequisites
 
-- Python 3.13 or higher
-- pybind11-stubgen
+- Linux
+- Python 3.12 or higher
+- CMake 3.20 or higher
+- A C++20 compiler (tested with clang 21)
+- JasperGold on `PATH`, for `-e`
 
-Everything else should be installed automatically during the make process
+The build fetches a pinned fork of slang and compiles it together with its
+Python bindings (pyslang), so the first build takes several minutes.
 
 ```bash
-# Create a virtual environment (recommended)
-python -m venv .venv
-source venv/bin/activate  # On Linux/Mac
-# or
-venv\Scripts\activate  # On Windows
-
-# Install pybind11-stubgen
-pip install pybind11-stubgen
-
-# Clone the repository
-git clone <repository-url>
-
-# Install the package and dependencies
+git clone <repository-url> papercuts
 cd papercuts
-cmake -B build
-cmake --build build -j
+
+# The CMake presets expect the virtual environment at .venv in the repo
+python3 -m venv .venv
+source .venv/bin/activate
+pip install nanobind nanobind-backend z3-solver
+
+# Configure and build (set CXX first if your default compiler is too old)
+cmake --preset Release
+cmake --build build -j 8
+
+# Make `papercuts` and `pyslang` importable from the source tree
+echo "$PWD/python" > "$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/papercuts-dev.pth"
+
+# Check the install
+python python/papercuts/tests/run_tests.py   # expect PASSED: N/N (every test)
 ```
 
-**Note**: The installation will build pyslang from source, which requires:
-- CMake 3.20 or higher
-- A C++20 compatible compiler
-- Adequate build time (may take several minutes)
+The build writes the compiled modules into `python/` itself, so after a C++
+change `cmake --build build` is all it takes; Python edits are live.
+
+**Do not `pip install -e .`** Its editable-install import hook shadows the
+modules the build writes into `python/` and breaks `import pyslang` after the
+next rebuild. If it happens: `pip uninstall -y papercuts` and redo the
+`papercuts-dev.pth` line above.
 
 ## Usage
 
 ### Basic Command
 
 ```bash
-cd python
 python -m papercuts <input_files.sv> [options]
 ```
+
+Results are written to `./outputs` in the current directory (replacing any
+previous run's), so run from a scratch directory.
 
 ### Options
 

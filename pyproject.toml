@@ -45,3 +45,7 @@ line-length = 100
 [tool.pyright]
 pythonPlatform = "Linux"
 extraPaths = ["python"]
+# pyslang.ast/.syntax/... exist only as stubs beside pyslang.abi3.so; at runtime
+# pyslang/__init__.py aliases them from the extension. Types resolve fine, but
+# every import would otherwise warn "could not be resolved from source".
+reportMissingModuleSource = "none"
