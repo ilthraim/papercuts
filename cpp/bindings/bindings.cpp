@@ -20,10 +20,10 @@ NB_MODULE(pypercuts, m) {
         [](const std::shared_ptr<slang::syntax::SyntaxTree> tree, bool bitMux, bool ternaryMux, bool ifMux,
            bool caseMux, bool binopMux, bool constForceMux, bool binopsInConditionsOnly,
            const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges,
-           bool shrinkWithIntermediate) {
+           bool shrinkWithIntermediate, const papercuts::PortDirections& portDirections) {
             return papercuts::insertMuxes(tree, bitMux, ternaryMux, ifMux, caseMux, binopMux,
                                           constForceMux, binopsInConditionsOnly, symbolicRanges,
-                                          shrinkWithIntermediate);
+                                          shrinkWithIntermediate, nullptr, portDirections);
         },
         nb::arg("tree"),
         nb::arg("bitMux") = false,
@@ -35,6 +35,7 @@ NB_MODULE(pypercuts, m) {
         nb::arg("binopsInConditionsOnly") = false,
         nb::arg("symbolicRanges") = std::unordered_map<std::string, std::vector<std::pair<int, int>>>{},
         nb::arg("shrinkWithIntermediate") = false,
+        nb::arg("portDirections") = papercuts::PortDirections{},
         "Insert muxes into a SyntaxTree. `symbolicRanges` must be the same map the "
         "Papercutter for this module was given, or the bit-shrink band's width differs "
         "between enumeration and insertion and every later select shifts off its cut index."
@@ -44,11 +45,11 @@ NB_MODULE(pypercuts, m) {
         [](const std::shared_ptr<slang::syntax::SyntaxTree> tree, bool bitMux, bool ternaryMux, bool ifMux,
            bool caseMux, bool binopMux, bool constForceMux, bool binopsInConditionsOnly,
            const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges,
-           bool shrinkWithIntermediate) {
+           bool shrinkWithIntermediate, const papercuts::PortDirections& portDirections) {
             std::vector<size_t> inserted;
             auto tr = papercuts::insertMuxes(tree, bitMux, ternaryMux, ifMux, caseMux, binopMux,
                                              constForceMux, binopsInConditionsOnly, symbolicRanges,
-                                             shrinkWithIntermediate, &inserted);
+                                             shrinkWithIntermediate, &inserted, portDirections);
             return nb::make_tuple(tr, inserted);
         },
         nb::arg("tree"),
@@ -61,6 +62,7 @@ NB_MODULE(pypercuts, m) {
         nb::arg("binopsInConditionsOnly") = false,
         nb::arg("symbolicRanges") = std::unordered_map<std::string, std::vector<std::pair<int, int>>>{},
         nb::arg("shrinkWithIntermediate") = false,
+        nb::arg("portDirections") = papercuts::PortDirections{},
         "insert_muxes, plus the sorted select numbers a control was actually emitted for. "
         "Every index below the port count is reserved; the ones missing here drive nothing."
     );
@@ -104,12 +106,14 @@ NB_MODULE(pypercuts, m) {
 
     nb::class_<papercuts::Papercutter>(m, "Papercutter")
         .def(nb::init<const std::shared_ptr<slang::syntax::SyntaxTree>, bool, bool,
-                      std::unordered_map<std::string, std::vector<std::pair<int, int>>>>(),
+                      std::unordered_map<std::string, std::vector<std::pair<int, int>>>,
+                      papercuts::PortDirections>(),
              nb::arg("tree"),
              nb::arg("shrink_with_intermediate") = false,
              nb::arg("binops_in_conditions_only") = false,
              nb::arg("symbolic_ranges") =
-                 std::unordered_map<std::string, std::vector<std::pair<int, int>>>{})
+                 std::unordered_map<std::string, std::vector<std::pair<int, int>>>{},
+             nb::arg("port_directions") = papercuts::PortDirections{})
         .def("cut_all", &papercuts::Papercutter::cutAll)
         .def("cut_index", &papercuts::Papercutter::cutIndex,
              nb::arg("indices"),

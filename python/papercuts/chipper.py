@@ -118,6 +118,33 @@ def definition_signal_ranges(comp: Compilation) -> dict[str, dict[str, list[tupl
     return ranges
 
 
+def definition_port_directions(comp: Compilation) -> dict[str, list[tuple[str, str]]]:
+    """Map each instantiated module definition to its ports in declaration order,
+    each with its direction: "in", "out", "inout" or "ref".
+
+    Feeds ``Papercutter(port_directions=...)`` and ``insert_muxes(portDirections=...)``
+    (the same map to both). A signal connected to an instance's output port is
+    WRITTEN there, which the parent's syntax alone cannot tell from a read; a cut
+    or companion wire that treated it as a read would substitute a constant for,
+    or redirect, the child's driver (``.out(1'b0)``, ``.out(x_papercuts)``).
+    A port whose direction cannot be read (an interface port) is reported as
+    "inout", which the cutter treats as a write.
+    """
+    names = {"In": "in", "Out": "out", "InOut": "inout", "Ref": "ref"}
+    out: dict[str, list[tuple[str, str]]] = {}
+
+    def _visitor(obj: Union[Token, SyntaxNode]) -> None:
+        if isinstance(obj, ast.InstanceSymbol) and obj.definition.name not in out:
+            ports = []
+            for p in obj.body.portList:
+                d = getattr(p, "direction", None)
+                ports.append((p.name, names.get(str(d).split(".")[-1], "inout") if d is not None else "inout"))
+            out[obj.definition.name] = ports
+
+    comp.getRoot().visit(_visitor)
+    return out
+
+
 def collect_modules_cst(comp: Compilation) -> dict[str, SyntaxTree]:
     """Collects all module instances from the given compilation and returns a dictionary mapping their hierarchical paths (string) to their syntax trees."""
     modules = {}

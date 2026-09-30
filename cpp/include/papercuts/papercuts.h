@@ -27,6 +27,15 @@ using namespace slang::syntax;
 using namespace slang::parsing;
 
 namespace papercuts {
+
+// Module definition -> its ports in declaration order, each with its direction
+// ("in", "out", "inout", "ref"). Built from the compilation (chipper
+// .definition_port_directions) and handed to the cutter and the muxer alike: an
+// identifier connected to an instance's output or inout port is a WRITE, which
+// no syntax of the parent module can tell from a read. A module missing from the
+// map counts every connection as a write, so such a site is left alone rather
+// than redirected wrongly.
+using PortDirections = std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>;
 struct MuxContext {
     int muxCount = 0;
     // Selects a muxer actually emitted a control for. Every index in [0, muxCount)
@@ -175,7 +184,8 @@ std::shared_ptr<SyntaxTree> insertMuxes(
     const std::shared_ptr<SyntaxTree> tree, bool bitMux, bool ternaryMux, bool ifMux, bool caseMux = false,
     bool binopMux = false, bool constForceMux = false, bool binopsInConditionsOnly = false,
     const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges = {},
-    bool shrinkWithIntermediate = false, std::vector<size_t>* insertedOut = nullptr);
+    bool shrinkWithIntermediate = false, std::vector<size_t>* insertedOut = nullptr,
+    const PortDirections& portDirections = {});
 
 std::shared_ptr<SyntaxTree> renameModule(const std::shared_ptr<SyntaxTree> tree, std::string newName);
 
@@ -376,6 +386,7 @@ private:
     // context.muxCount when the bit pass began; select for shrinkNodes[i] is
     // baseSel + i, which keeps selects aligned with cut indices.
     size_t baseSel = 0;
+    const PortDirections* ports = nullptr;  // which instance connections are writes
 
     void muxDeclaration(const SyntaxNode& node, const SeparatedSyntaxList<DeclaratorSyntax>& declarators,
                         const DeclShape& shape);
@@ -383,7 +394,8 @@ public:
     BitMuxer(MuxContext& context) : context(context) {}
     std::shared_ptr<SyntaxTree> insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree>, size_t baseSel);
     void initialize(const std::shared_ptr<SyntaxTree>,
-                    const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges = {});
+                    const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges = {},
+                    const PortDirections* ports = nullptr);
     void handle(const DataDeclarationSyntax& node);
     void handle(const NetDeclarationSyntax& node);
     void handle(const IdentifierNameSyntax& node);
@@ -609,13 +621,14 @@ private:
     // context.muxCount when this pass began; the pair of selects for signal i is
     // baseSel + 2*i (force 0) and baseSel + 2*i + 1 (force 1), matching cut order.
     size_t baseSel = 0;
+    const PortDirections* ports = nullptr;  // which instance connections are writes
 
     void muxDeclaration(const SyntaxNode& node, const SeparatedSyntaxList<DeclaratorSyntax>& declarators,
                         const DeclShape& shape);
 public:
     ConstForceMuxer(MuxContext& context) : context(context) {}
     std::shared_ptr<SyntaxTree> insertConstForceMuxes(const std::shared_ptr<SyntaxTree>, size_t baseSel);
-    void initialize(const std::shared_ptr<SyntaxTree>);
+    void initialize(const std::shared_ptr<SyntaxTree>, const PortDirections* ports = nullptr);
     void handle(const DataDeclarationSyntax& node);
     void handle(const NetDeclarationSyntax& node);
     void handle(const IdentifierNameSyntax& node);
@@ -682,6 +695,7 @@ private:
     // Const-force variables
     std::vector<const DeclaratorSyntax*> constForceNodes;    // 1-bit scalars, one per signal
     std::unordered_map<std::string, bool> constForceActive;  // active run: signal name -> polarity (true=1)
+    PortDirections portDirections;  // which instance connections are writes
 
     void clearState() {
         nodesToShrink.clear();
@@ -713,9 +727,11 @@ public:
     // declarations whose range is parameterized (`logic [WIDTH-1:0] x;`), including
     // every dimension of a multi-packed-dim vector. Empty (the default) keeps such
     // declarations uncut.
+    // `portDirections`: see PortDirections. The muxer must be given the same map.
     Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate = false,
                 bool binopsInConditionsOnly = false,
-                std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges = {});
+                std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges = {},
+                PortDirections portDirections = {});
     std::vector<std::shared_ptr<SyntaxTree>> cutAll();
     // `amounts`: optional per-bitshrink-index override of the number of bits to
     // drop (default 1). Enables iterative multi-bit shrinking; other cut families

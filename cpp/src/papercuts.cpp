@@ -320,7 +320,8 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
                                         bool ifMux, bool caseMux, bool binopMux, bool constForceMux,
                                         bool binopsInConditionsOnly,
                                         const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges,
-                                        bool shrinkWithIntermediate, std::vector<size_t>* insertedOut) {
+                                        bool shrinkWithIntermediate, std::vector<size_t>* insertedOut,
+                                        const PortDirections& portDirections) {
     std::shared_ptr<SyntaxTree> newTree = tree;
     std::vector<std::shared_ptr<SyntaxTree>> keepAlive;
 
@@ -330,7 +331,7 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
     // is what broke: the cutter counts a parameterized bit-shrink as a cut and
     // clears the symbolic ranges under --shrink-with-intermediate, and a muxer
     // that reached either conclusion on its own shifted every later band.
-    Papercutter cutter(tree, shrinkWithIntermediate, binopsInConditionsOnly, symbolicRanges);
+    Papercutter cutter(tree, shrinkWithIntermediate, binopsInConditionsOnly, symbolicRanges, portDirections);
     auto bands = cutter.cutBands();  // ternary, if, bitshrink, case, binop, force-const
 
     // A family whose muxer is disabled -- or a target it cannot build -- still
@@ -390,7 +391,7 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
     PS.visit(newTree->root());
     if (bitMux) {
         BitMuxer BM(context);
-        BM.initialize(newTree, effectiveRanges);
+        BM.initialize(newTree, effectiveRanges, &portDirections);
         auto transformed = BM.insertBitShrinkMuxes(newTree, baseBit);
         keepAlive.push_back(newTree);
         newTree = transformed;
@@ -402,7 +403,7 @@ std::shared_ptr<SyntaxTree> insertMuxes(const std::shared_ptr<SyntaxTree> tree, 
         // fresh one.
         PS.visit(newTree->root());
         ConstForceMuxer CFM(context);
-        CFM.initialize(newTree);
+        CFM.initialize(newTree, &portDirections);
         auto transformed = CFM.insertConstForceMuxes(newTree, baseConstForce);
         keepAlive.push_back(newTree);
         newTree = transformed;
@@ -742,9 +743,10 @@ std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
 } // namespace
 
 // Defined with the const-force cut logic further down. True when this identifier
-// is (part of) the LHS of an assignment -- of ANY assignment operator, `<=`
-// included -- so a muxer knows not to redirect it onto a read-side companion.
-static bool isAssignmentWriteTarget(const SyntaxNode& node);
+// is written: (part of) the LHS of an assignment -- of ANY assignment operator,
+// `<=` included -- or connected to an instance's output/inout port. A muxer
+// must not redirect it onto a read-side companion, nor a cut substitute it.
+static bool isAssignmentWriteTarget(const SyntaxNode& node, const PortDirections* ports);
 
 // MARK: BitMuxer
 std::shared_ptr<SyntaxTree> BitMuxer::insertBitShrinkMuxes(const std::shared_ptr<SyntaxTree> tree,
@@ -758,7 +760,9 @@ std::shared_ptr<SyntaxTree> BitMuxer::insertBitShrinkMuxes(const std::shared_ptr
 }
 
 void BitMuxer::initialize(const std::shared_ptr<SyntaxTree> tree,
-                          const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges) {
+                          const std::unordered_map<std::string, std::vector<std::pair<int, int>>>& symbolicRanges,
+                          const PortDirections* ports) {
+    this->ports = ports;
     targetsByDecl.clear();
     muxedNames.clear();
 
@@ -831,7 +835,7 @@ void BitMuxer::handle(const IdentifierNameSyntax& node) {
     // Every assignment operator counts, `<=` included: redirecting a procedural
     // write leaves the original undriven and gives the companion a second driver,
     // so the muxed design stops matching the original with all selects off.
-    if (isAssignmentWriteTarget(node)) {
+    if (isAssignmentWriteTarget(node, ports)) {
         return;
     }
 
@@ -842,7 +846,7 @@ void BitMuxer::handle(const IdentifierNameSyntax& node) {
 }
 
 void BitMuxer::handle(const IdentifierSelectNameSyntax& node) {
-    if (isAssignmentWriteTarget(node)) {
+    if (isAssignmentWriteTarget(node, ports)) {
         return; // see handle(IdentifierNameSyntax)
     }
 
@@ -1076,7 +1080,8 @@ std::shared_ptr<SyntaxTree> ConstForceMuxer::insertConstForceMuxes(const std::sh
     return transform(tree);
 }
 
-void ConstForceMuxer::initialize(const std::shared_ptr<SyntaxTree> tree) {
+void ConstForceMuxer::initialize(const std::shared_ptr<SyntaxTree> tree, const PortDirections* ports) {
+    this->ports = ports;
     ordinalByDecl.clear();
     muxedNames.clear();
 
@@ -1134,7 +1139,7 @@ void ConstForceMuxer::handle(const NetDeclarationSyntax& node) {
 void ConstForceMuxer::handle(const IdentifierNameSyntax& node) {
     // The cut substitutes a literal at read sites only, so the companion signal is
     // redirected the same way -- writes keep driving the original.
-    if (isAssignmentWriteTarget(node))
+    if (isAssignmentWriteTarget(node, ports))
         return;
 
     std::string name{node.identifier.valueText()};
@@ -1778,9 +1783,10 @@ std::vector<std::pair<const BinaryExpressionSyntax*, bool>> BinopCollector::getF
 
 Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWithIntermediate,
                          bool binopsInConditionsOnly,
-                         std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges)
+                         std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges,
+                         PortDirections portDirections)
     : tree(tree), shrinkWithIntermediate(shrinkWithIntermediate),
-      binopsInConditionsOnly(binopsInConditionsOnly) {
+      binopsInConditionsOnly(binopsInConditionsOnly), portDirections(std::move(portDirections)) {
 
     // Both strategies handle signed decls, nets and multi-packed-dim vectors.
     // Parameterized ranges remain narrow-only: the intermediate wire has to name
@@ -2351,10 +2357,55 @@ void Papercutter::handle(const BinaryExpressionSyntax& node) {
 
 }
 
-// True when this identifier sits in a write position (LHS of any assignment),
-// climbing out of enclosing LHS concatenations/streams first ({a, x} = ...).
-// Such occurrences must not be substituted with a constant.
-static bool isAssignmentWriteTarget(const SyntaxNode& node) {
+// True when `cur` is the whole expression of a port connection whose port is not
+// an input. The connection's direction is the child's, so it comes from `ports`
+// (PortDirections); a connection that cannot be resolved counts as a write.
+static bool isOutputConnection(const SyntaxNode* cur, const PortDirections* ports) {
+    const SyntaxNode* p = cur->parent;
+    // a connection's expression sits inside property/sequence wrappers
+    while (p && (p->kind == SyntaxKind::ParenthesizedExpression || p->kind == SyntaxKind::SimpleSequenceExpr ||
+                 p->kind == SyntaxKind::SimplePropertyExpr)) {
+        cur = p;
+        p = p->parent;
+    }
+    if (!p || (p->kind != SyntaxKind::NamedPortConnection && p->kind != SyntaxKind::OrderedPortConnection))
+        return false;
+    const SyntaxNode* conn = p;
+    const SyntaxNode* inst = conn->parent;
+    while (inst && inst->kind != SyntaxKind::HierarchicalInstance)
+        inst = inst->parent;
+    const SyntaxNode* instantiation = inst ? inst->parent : nullptr;
+    while (instantiation && instantiation->kind != SyntaxKind::HierarchyInstantiation)
+        instantiation = instantiation->parent;
+    if (!inst || !instantiation || !ports)
+        return true;
+    auto def = ports->find(std::string(instantiation->as<HierarchyInstantiationSyntax>().type.valueText()));
+    if (def == ports->end())
+        return true;
+    const auto& list = def->second;
+    if (conn->kind == SyntaxKind::NamedPortConnection) {
+        std::string name{conn->as<NamedPortConnectionSyntax>().name.valueText()};
+        for (const auto& [port, dir] : list)
+            if (port == name)
+                return dir != "in";
+        return true;
+    }
+    size_t idx = 0;
+    for (auto* c : inst->as<HierarchicalInstanceSyntax>().connections) {
+        if (c == conn)
+            return idx < list.size() ? list[idx].second != "in" : true;
+        ++idx;
+    }
+    return true;
+}
+
+// True when this identifier sits in a write position -- the LHS of any
+// assignment, or a connection to an instance's output/inout port -- climbing out
+// of enclosing concatenations/streams first ({a, x} = ..., .y({a, x})). Such
+// occurrences must not be substituted with a constant or redirected onto a
+// read-side companion: the child's port would drive the companion (a second
+// driver) and leave the original undriven.
+static bool isAssignmentWriteTarget(const SyntaxNode& node, const PortDirections* ports) {
     const SyntaxNode* cur = &node;
     const SyntaxNode* parent = node.parent;
     while (parent && (parent->kind == SyntaxKind::ConcatenationExpression ||
@@ -2365,7 +2416,7 @@ static bool isAssignmentWriteTarget(const SyntaxNode& node) {
     if (auto* bin = parent ? parent->as_if<BinaryExpressionSyntax>() : nullptr)
         return SyntaxFacts::isAssignmentOperator(bin->kind) &&
                static_cast<const SyntaxNode*>(bin->left) == cur;
-    return false;
+    return isOutputConnection(cur, ports);
 }
 
 void Papercutter::handle(const IdentifierNameSyntax& node) {
@@ -2374,7 +2425,7 @@ void Papercutter::handle(const IdentifierNameSyntax& node) {
     if (!shrinkWithIntermediate) {
         if (!constForceActive.empty()) {
             auto it = constForceActive.find(std::string(node.identifier.valueText()));
-            if (it != constForceActive.end() && !isAssignmentWriteTarget(node)) {
+            if (it != constForceActive.end() && !isAssignmentWriteTarget(node, &portDirections)) {
                 this->replace(node, makeIntLiteral(it->second ? "1'b1" : "1'b0", node.identifier.trivia()));
                 return;
             }

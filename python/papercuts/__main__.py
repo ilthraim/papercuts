@@ -659,6 +659,17 @@ async def main():
 
         status("Elaboration complete.")
 
+    # Which instance connections are WRITES: a signal connected to a child's output
+    # port is driven there, and neither a cut nor a mux may treat it as a read.
+    # The same map goes to the cutter and the muxer, like the symbolic ranges.
+    try:
+        port_directions = chipper.definition_port_directions(
+            build_compilation_from([t for t, _ in conc_trees]))
+    except Exception as e:
+        port_directions = {}
+        status(f"WARNING: could not read port directions ({e}); no cut or mux will touch "
+               f"a signal inside an instance's port connection.")
+
     def is_excluded(module_name: str) -> bool:
         return module_name in verbatim
 
@@ -821,6 +832,7 @@ async def main():
                 # so a difference here is a difference in what pc_sel<N> means.
                 symbolicRanges=symbolic_ranges.get(name, {}),
                 shrinkWithIntermediate=args.shrink_with_intermediate,
+                portDirections=port_directions,
             )
             muxed[name] = rewrite
             mux_inserted[name] = set(inserted)
@@ -958,6 +970,7 @@ async def main():
             shrink_with_intermediate=args.shrink_with_intermediate,
             binops_in_conditions_only=args.binops_in_conditions_only,
             symbolic_ranges=symbolic_ranges.get(name, {}),
+            port_directions=port_directions,
         )
         cut_infos = list(pc.cut_info())  # (type, line) aligned 1:1 with cut indices
 
