@@ -93,6 +93,10 @@ PROCEDURE_KEYWORD = {
     "AlwaysComb": "always_comb", "AlwaysLatch": "always_latch",
     "AlwaysFF": "always_ff",
 }
+UNIQUE_PRIORITY = {"None_": "", "Unique": "unique ", "Unique0": "unique0 ",
+                   "Priority": "priority "}
+CASE_KEYWORD = {"Normal": "case", "WildcardJustZ": "casez",
+                "WildcardXOrZ": "casex", "Inside": "case"}
 DIRECTION = {"In": "input", "Out": "output", "InOut": "inout", "Ref": "ref"}
 
 
@@ -913,14 +917,31 @@ class Emitter:
             d += " = " + self.expr(var.initializer)
         self.emit(d + ";")
 
-    def _stmt_Conditional(self, stmt):
+    def _stmt_Conditional(self, stmt, prefix=""):
+        # unique/priority covers the whole else-if chain, but slang records it only
+        # on the head. An `else if` must therefore stay flat: wrapping it in
+        # begin/end (as _emit_statement_open does) starts a new statement outside
+        # the chain. A source `else begin if ... end` arrives as a Block and stays
+        # wrapped.
+        check = UNIQUE_PRIORITY[stmt.check.name]
         cond = " &&& ".join(self.expr(c.expr) for c in stmt.conditions)
-        self._emit_statement_open(stmt.ifTrue, prefix=f"if ({cond}) ")
-        if getattr(stmt, "ifFalse", None) is not None:
-            self._emit_statement_open(stmt.ifFalse, prefix="else ")
+        self._emit_statement_open(stmt.ifTrue, prefix=f"{prefix}{check}if ({cond}) ")
+        iff = getattr(stmt, "ifFalse", None)
+        if iff is None:
+            return
+        if kind(iff) == "Conditional" and not self._stmt_all_dead(iff):
+            self._stmt_Conditional(iff, prefix="else ")
+        else:
+            self._emit_statement_open(iff, prefix="else ")
 
     def _stmt_Case(self, stmt):
-        self.emit(f"case ({self.expr(stmt.expr)})")
+        # The flavour and the unique/priority qualifier both change what matches.
+        # Emitting a bare `case` turned casez's `?` labels (folded to z) into
+        # literal z matches.
+        keyword = CASE_KEYWORD[stmt.condition.name]
+        check = UNIQUE_PRIORITY[stmt.check.name]
+        inside = " inside" if stmt.condition.name == "Inside" else ""
+        self.emit(f"{check}{keyword} ({self.expr(stmt.expr)}){inside}")
         self.level += 1
         for item in stmt.items:
             labels = ", ".join(self.expr(e) for e in item.expressions)
@@ -1164,6 +1185,12 @@ class Emitter:
         if sel == "IndexedDown":
             return f"{value}[{left}-:{right}]"
         raise EmitError(f"unsupported range selection kind: {sel!r}")
+
+    def _expr_ValueRange(self, node):
+        # `case inside` / `inside` labels. The binding has no rangeKind, so take
+        # the operator (`:`, or the tolerance forms `+/-` / `+%-`) from syntax.
+        op = node.syntax.op.valueText if node.syntax is not None else ":"
+        return f"[{self.expr(node.left)}{op}{self.expr(node.right)}]"
 
     def _expr_MemberAccess(self, node):
         return f"{self.expr(node.value)}.{node.member.name}"
