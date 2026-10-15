@@ -2485,7 +2485,17 @@ void Papercutter::handle(const ConditionalStatementSyntax& node) {
     if (ifNodesToChange.contains(&node)) {
         if (!ifNodesToChange[&node]) {
             if (node.elseClause == nullptr) {
-                this->remove(node);
+                // Nothing runs: an empty `begin end`. Not remove(): that only works
+                // on a list element, and an `if` can also fill a single-statement
+                // slot (`else if`, a bare always body, a bare then-branch), where
+                // removing it leaves a null child. Not `;` either: a label on it is
+                // illegal, and a block keeps the if's label and attributes.
+                Token head = node.uniqueOrPriority ? node.uniqueOrPriority : node.ifKeyword;
+                this->replace(node, factory.blockStatement(
+                                        SyntaxKind::SequentialBlockStatement, node.label, node.attributes,
+                                        makeToken(TokenKind::BeginKeyword, "begin", head.trivia()), nullptr,
+                                        SyntaxList<SyntaxNode>{}, makeToken(TokenKind::EndKeyword, "end", spaced()),
+                                        nullptr));
             }
             else {
                 auto replacement = node.elseClause->clause;
