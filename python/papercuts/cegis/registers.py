@@ -36,9 +36,6 @@ FF_CELL_TYPES = frozenset(
     "$dff $dffe $adff $adffe $aldff $aldffe $sdff $sdffe $sdffce $dffsr $dffsre "
     "$dlatch $adlatch $dlatchsr $ff".split()
 )
-# A hierarchical path we are willing to write into SystemVerilog. Generate blocks
-# and arrays can produce names needing escapes; those are reported, not emitted.
-SAFE_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)*$")
 
 
 class Registers(dict):
@@ -62,6 +59,13 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
     golden and muxed copies share them by construction, being rewrites of one
     source.
 
+    Memories are mapped to registers first (`memory_map`, as the BTOR2 front end
+    does), so each word is a register named `<mem>[<i>]`, the name its BTOR2
+    state carries. Without that the words were never paired and started apart
+    in the two copies (opencores cr_div: MiterMismatch with every cut off). Names
+    are only looked up in the BTOR2, never written into SystemVerilog, so any
+    public name is usable.
+
     One net can carry several names once the hierarchy is flattened: a child's
     output port, the parent wire it drives and the next child's input port are
     one net. Which of those the register is listed under is arbitrary, and the
@@ -71,7 +75,7 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
     """
     out = os.path.join(workdir, f"regs_{tag or top}.json")
     script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top}; "
-              f"prep -top {top} -flatten; write_json {out}")
+              f"prep -top {top} -flatten; memory_map; write_json {out}")
     r = subprocess.run(["yosys", "-q", "-p", script], capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):
         raise RuntimeError(f"yosys failed listing registers of {top}:\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
@@ -85,8 +89,7 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
             continue
         for b in w["bits"]:
             owner.setdefault(b, name)
-        if SAFE_PATH.match(name):
-            by_bits.setdefault(tuple(w["bits"]), []).append(name)
+        by_bits.setdefault(tuple(w["bits"]), []).append(name)
 
     regs = Registers()
     skipped: list[str] = []
@@ -101,9 +104,6 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
         for n in names:
             # The whole wire is the register; comparing all of it is what R means,
             # even when a cell drives only part of it.
-            if not SAFE_PATH.match(n):
-                skipped.append(f"{n} (not a plain hierarchical path)")
-                continue
             width = len(m["netnames"][n]["bits"])
             if regs.get(n, width) != width:
                 skipped.append(f"{n} (conflicting widths)")

@@ -144,6 +144,30 @@ endmodule
         DESIGN = saved
 
 
+def test_memory_words_are_paired():
+    # opencores cr_div: memory words were not listed as registers, so they started
+    # apart in the two copies and the run stopped with MiterMismatch, cuts all off
+    design = """
+module top(input logic clk, input logic we, input logic [1:0] wa, input logic [1:0] ra,
+           input logic [3:0] d, output logic [3:0] q);
+    reg [3:0] mem [0:3];
+    always @(posedge clk) if (we) mem[wa] <= d;
+    assign q = mem[ra] | 4'h0;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+            with open(os.path.join(tmp, "outputs", "cegis", "summary.json")) as f:
+                summary = json.load(f)
+            assert summary["registers"] >= 4 and summary["in_set"] >= 1, summary
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])
