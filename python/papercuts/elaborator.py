@@ -703,6 +703,12 @@ class Emitter:
             self.emit(f"import {m.packageName}::{m.importName};")
         elif k in ("TransparentMember", "EmptyMember", "Genvar", "StatementBlock"):
             return
+        elif k in ("DefParam", "SpecifyBlock", "Specparam"):
+            # A defparam's override is already in every specialized module's
+            # parameter values (vtr ch_intrinsics, opencores sbd_sqrt_fp); a
+            # specify block and its specparams carry timing only. Neither has a
+            # place in the elaborated design; the gate proves it equivalent.
+            return
         else:
             raise EmitError(f"unsupported module member kind: {k!r}")
 
