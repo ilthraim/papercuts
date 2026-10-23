@@ -132,6 +132,13 @@ def run():
     assert any("select ports" in p for p in check_manifest(short, muxed_text={"m": text})), \
         check_manifest(short, muxed_text={"m": text})
 
+    # a named connection to a CHILD's select port is not a use of this module's own
+    # select of the same number (opencores wb_to_amba with case muxing off)
+    inert_idx = par_cut["index"]
+    child_conn = text.replace("endmodule", f"    child u(.pc_sel{inert_idx}(pc_sel_child_{inert_idx}));\nendmodule")
+    assert check_manifest(sound, muxed_text={"m": child_conn}) == [], \
+        check_manifest(sound, muxed_text={"m": child_conn})
+
     print(f"test_manifest: OK ({len(cuts)} cuts, {len(pairs)} exclusive pairs, 1 inert)")
 
 
