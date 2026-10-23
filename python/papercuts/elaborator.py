@@ -1396,8 +1396,26 @@ class Emitter:
         if not name:
             sub = node.subroutine
             name = getattr(sub, "name", None) or str(sub)
-        args = ", ".join(self.expr(a) for a in node.arguments)
+        args = ", ".join(self._call_arg(name, i, a) for i, a in enumerate(node.arguments))
         return f"{name}({args})"
+
+    # System tasks whose first argument is a file name. A string parameter used
+    # there folds to its integer value (`104'h4450...`, opencores dpsfmnce), which
+    # is no file name; it is re-emitted as the string it spells.
+    _FILE_NAME_TASKS = {"$readmemh", "$readmemb", "$writememh", "$writememb", "$fopen", "$dumpfile"}
+
+    def _call_arg(self, name, i, a):
+        # an output argument (the memory of $readmemh) arrives as `target = <empty>`
+        if kind(a) == "Assignment" and kind(a.right) == "EmptyArgument":
+            return self.expr(a.left)
+        text = self.expr(a)
+        if i == 0 and name in self._FILE_NAME_TASKS:
+            m = re.fullmatch(r"(\d+)'h([0-9a-fA-F]+)", text)
+            if m and int(m.group(1)) % 8 == 0:
+                raw = bytes.fromhex(m.group(2).zfill(int(m.group(1)) // 4)).lstrip(b"\0")
+                if raw and all(32 <= c < 127 for c in raw):
+                    return '"' + raw.decode().replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return text
 
     def _expr_LValueReference(self, node):
         # Only meaningful inside a compound-assignment RHS; the common case is

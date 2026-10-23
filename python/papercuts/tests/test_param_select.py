@@ -15,8 +15,10 @@ import tempfile
 from papercuts.elaborator import elaborate_design
 
 SRC = """
-module m #(parameter [5:0] C = 6'b100101, parameter W = 16)
+module m #(parameter [5:0] C = 6'b100101, parameter W = 16, parameter init = "rom.hex")
          (input logic [2:0] i, input logic [15:0] a, output logic y, output logic z, output logic [W-1:0] w);
+    reg [7:0] mem [0:3];
+    initial $readmemh(init, mem, 0, 3);  // opencores dpsfmnce
     assign y = C[i + 1];
     assign z = C[2];
     assign w = { {{W-16}{1'b0}}, a };  // zero-count replication (opencores wb_mcs51)
@@ -34,8 +36,9 @@ def run():
         assert "assign y = C[(i + 1)];" in src, src
         assert "assign z = 1'b1;" in src, src  # constant index still folds
         assert "null" not in src and "assign w = {a};" in src, src
+        assert '$readmemh("rom.hex", mem, 0, 3);' in src, src
     print("test_param_select: OK (variable index names the parameter; constant index folds; "
-          "zero-count replication dropped)")
+          "zero-count replication dropped; $readmemh file name and memory argument)")
 
 
 if __name__ == "__main__":
