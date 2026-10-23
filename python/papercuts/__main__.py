@@ -80,6 +80,8 @@ def write_papercuts_log(
     final_runs: list[tuple[ModuleCuts, Run]] | None = None,
     fv_gate: str | None = None,
     prune_stats=None,
+    cegis: list[str] | None = None,
+    joint: Run | None = None,
 ) -> None:
     """Write a text summary of every papercut that was tried.
 
@@ -89,31 +91,40 @@ def write_papercuts_log(
     When ``final_runs`` is provided (after consolidation), a second section
     reports each module's consolidated run: how many valid cuts were merged and
     whether the merged source verified (PROVEN/FAILED).
+
+    Under --method cegis-comb, ``cegis`` holds the run's header lines, rows gain
+    a `set` column (Y: in the selected set), valid is the cut's validity on its
+    own under the combinational spec ('-' not checked, 'U' untested: its select
+    drives nothing), and ``joint`` is the one check of the whole consolidated
+    design.
     """
     total = sum(len(m.runs) for m in modules)
     valid = sum(1 for m in modules for r in m.runs if r.valid)
     noop = sum(len(m.noops) for m in modules)
+    in_set = sum(1 for m in modules for r in m.runs if r.in_set)
 
     rows = []
     for m in modules:
         if m.excluded:
             # Kept in the golden source but never cut
-            rows.append((m.name, "-", "excluded", "-", "X"))
+            rows.append((m.name, "-", "excluded", "-", "X", "-"))
             continue
         for run in m.runs:
             ctype, line = m.cut_infos[run.index]
-            if not checked:
+            if not checked or run.verdict == "not-checked":
                 v = "-"
+            elif run.verdict == "untested":
+                v = "U"
             else:
                 v = "Y" if run.valid else "N"
                 # Report number of bits removed
                 if run.valid and ctype.startswith("bitshrink") and run.shrink_amount > 1:
                     v = f"Y(-{run.shrink_amount}b)"
-            rows.append((m.name, run.index, ctype, line, v))
+            rows.append((m.name, run.index, ctype, line, v, "Y" if run.in_set else "N"))
         # Cuts that are byte-identical to elaborated source should not occur, and are errored accordingly
         for idx in m.noops:
             ctype, line = m.cut_infos[idx]
-            rows.append((m.name, idx, ctype, line, "ERR"))
+            rows.append((m.name, idx, ctype, line, "ERR", "-"))
 
     # Column widths for aligned output (account for both sections' module names).
     mod_names = [r[0] for r in rows] + (
@@ -135,12 +146,16 @@ def write_papercuts_log(
                 f"{prune_stats.bits} dead bit(s), {prune_stats.decls} decl(s) "
                 f"in {prune_stats.iters} iteration(s)\n"
             )
+        for line in cegis or []:
+            f.write(f"# {line}\n")
+        set_head = "  set" if cegis is not None else ""
         f.write(
-            f"# {'module':<{w_mod}}  {'idx':>4}  {'type':<{w_type}}  {'line':>6}  valid\n"
+            f"# {'module':<{w_mod}}  {'idx':>4}  {'type':<{w_type}}  {'line':>6}  valid{set_head}\n"
         )
-        for mod, idx, ctype, line, v in rows:
+        for mod, idx, ctype, line, v, s in rows:
+            set_col = f"  {s:>5}" if cegis is not None else ""
             f.write(
-                f"  {mod:<{w_mod}}  {idx:>4}  {ctype:<{w_type}}  {line:>6}  {v}\n"
+                f"  {mod:<{w_mod}}  {idx:>4}  {ctype:<{w_type}}  {line:>6}  {v:<5}{set_col}\n".rstrip() + "\n"
             )
 
         # Per-type success breakdown (only meaningful once checks have run). This
@@ -156,9 +171,10 @@ def write_papercuts_log(
                 for run in m.runs:
                     ct = m.cut_infos[run.index][0]
                     a = by_type.setdefault(
-                        ct, {"planned": 0, "proven": 0, "failed": 0, "verdicts": {}}
+                        ct, {"planned": 0, "proven": 0, "failed": 0, "in_set": 0, "verdicts": {}}
                     )
                     a["planned"] += 1
+                    a["in_set"] += bool(run.in_set)
                     if run.valid:
                         a["proven"] += 1
                     else:
@@ -171,29 +187,37 @@ def write_papercuts_log(
                 verdicts: dict[str, int] = {}
                 for ct, a in by_type.items():
                     fkey = ct.split("(", 1)[0]
-                    fa = fam.setdefault(fkey, {"planned": 0, "proven": 0, "failed": 0})
+                    fa = fam.setdefault(fkey, {"planned": 0, "proven": 0, "failed": 0, "in_set": 0})
                     fa["planned"] += a["planned"]
                     fa["proven"] += a["proven"]
                     fa["failed"] += a["failed"]
+                    fa["in_set"] += a["in_set"]
                     for k, v in a["verdicts"].items():
                         verdicts[k] = verdicts.get(k, 0) + v
 
                 wt = max([len("type")] + [len(t) for t in by_type])
                 wf = max([len("family")] + [len(t) for t in fam])
+                # Under cegis-comb, proven/failed are each cut on its own and
+                # `in set` is membership of the selected set.
+                set_h = f"  {'in set':>6}" if cegis is not None else ""
+
+                def set_c(a):
+                    return f"  {a['in_set']:>6}" if cegis is not None else ""
+
                 f.write("\n# success by type\n")
                 f.write(
-                    f"# {'type':<{wt}}  {'planned':>7}  {'proven':>6}  {'failed':>6}\n"
+                    f"# {'type':<{wt}}  {'planned':>7}  {'proven':>6}  {'failed':>6}{set_h}\n"
                 )
                 for ct, a in sorted(by_type.items()):
                     f.write(
                         f"  {ct:<{wt}}  {a['planned']:>7}  {a['proven']:>6}  "
-                        f"{a['failed']:>6}\n"
+                        f"{a['failed']:>6}{set_c(a)}\n"
                     )
-                f.write(f"# {'family':<{wf}}  {'planned':>7}  {'proven':>6}  {'failed':>6}\n")
+                f.write(f"# {'family':<{wf}}  {'planned':>7}  {'proven':>6}  {'failed':>6}{set_h}\n")
                 for fkey, a in sorted(fam.items()):
                     f.write(
                         f"  {fkey:<{wf}}  {a['planned']:>7}  {a['proven']:>6}  "
-                        f"{a['failed']:>6}\n"
+                        f"{a['failed']:>6}{set_c(a)}\n"
                     )
                 if verdicts:
                     f.write(
@@ -213,6 +237,10 @@ def write_papercuts_log(
                 applied = sum(1 for r in m.runs if r.valid)
                 result = "PROVEN" if fr.valid else "FAILED"
                 f.write(f"  {m.name:<{w_mod}}  {applied:>7}  {result}\n")
+
+        if joint is not None:
+            result = "PROVEN" if joint.valid else f"FAILED ({joint.verdict})"
+            f.write(f"\n# joint check of the consolidated design ({in_set} cuts applied): {result}\n")
 
 
 # MARK: cut plan
@@ -255,6 +283,175 @@ def write_cut_plan(plan_path: str, modules: list[ModuleCuts]) -> None:
         f.write(f"# {'module':<{w_mod}}  {'idx':>4}  {'type':<{w_type}}  {'line':>6}\n")
         for mod, idx, ctype, line in planned:
             f.write(f"  {mod:<{w_mod}}  {idx:>4}  {ctype:<{w_type}}  {line:>6}\n")
+
+
+# MARK: CEGIS method
+async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, backend, tracker,
+                      ctree_dir: str, consolidated_dir: str, top_name: str, output_dir: str,
+                      results_path: str, log_path: str, fv_gate, prune_stats) -> None:
+    """--method cegis-comb, in place of checking each cut and consolidating per module.
+
+    1. no-ops: a cut whose source is byte-identical to the baseline is a cutter
+       bug, as under fv; its select is held off, since applying the cut would
+       not reproduce what its mux did
+    2. the CEGIS loop on the muxed design picks the set (papercuts.cegis), and
+       each cut is also checked on its own for the statistics
+    3. every module gets its share of the set applied (and is re-pruned), and
+       the backend checks the WHOLE consolidated design against the golden one
+       once. Per-module checks would be wrong here: the set is valid jointly, and
+       one module's share of it need not be valid alone.
+
+    A failed joint check is fatal. The set was proven on the muxed design, so a
+    consolidated design that is not equivalent means the cut and mux paths
+    disagree, or the BTOR2 and the backend read the design differently.
+    """
+    from papercuts.cegis.comb import AnonymousX, MiterMismatch
+    from papercuts.cegis.netlist import DesignAssertsPresent, DesignMalformed
+    from papercuts.cegis.selection import select_cuts
+    from papercuts.cegis.xpair import XPairingError
+    from papercuts.manifest import Manifest, ManifestError
+
+    man = Manifest.load(manifest_path)
+    by_id: dict[str, tuple[ModuleCuts, Run]] = {}
+    for mod in modules:
+        for run in mod.runs:
+            by_id[f"{mod.name}#{run.index}"] = (mod, run)
+    testable = {c.id for c in man.testable}
+    stray = sorted(testable - set(by_id))
+    if stray:
+        raise SystemExit(f"FATAL: the manifest marks cuts testable that the pipeline did not schedule: "
+                         f"{stray[:10]}")
+
+    # 1. no-ops
+    noop_ids = []
+    for cid, (mod, run) in by_id.items():
+        if mod.pc.cut_index_text([run.index]) == mod.baseline:
+            ctype, line = mod.cut_infos[run.index]
+            run.noop = True
+            mod.noops.append(run.index)
+            noop_ids.append(cid)
+            append_result(results_path, {
+                "ts": time.time(), "phase": "cuts", "method": "cegis-comb", "module": mod.name,
+                "idx": run.index, "type": ctype, "line": line, "valid": False, "verdict": "noop",
+                "in_set": False,
+            })
+            status(f"WARNING: {mod.name} idx={run.index} {ctype} L{line} is a NO-OP (identical to "
+                   f"the source); its select is held off")
+    for mod in modules:
+        mod.runs = [r for r in mod.runs if not getattr(r, "noop", False)]
+    by_id = {cid: v for cid, v in by_id.items() if cid not in set(noop_ids)}
+
+    # 2. select
+    tracker.set_phase("cuts")
+    for cid, (mod, run) in by_id.items():
+        tracker.register(id(run), "cuts", f"{mod.name}_pc{run.index}", mod.cut_infos[run.index][0], flush=False)
+    tracker.flush()
+    n_individual = [0]
+
+    def on_event(kind, **f):
+        if kind == "stage":
+            extra = ", ".join(f"{k}={v}" for k, v in f.items() if k != "name")
+            status(f"CEGIS {f['name']}" + (f" ({extra})" if extra else ""))
+        elif kind == "iteration" and f["it"] % 10 == 0:
+            status(f"CEGIS iteration {f['it']}: {f['on']} cuts on")
+        elif kind == "done":
+            status(f"CEGIS converged: {f['on']} cuts in the set, {f['total_s']}s")
+        elif kind == "individual":
+            n_individual[0] += 1
+            if n_individual[0] % 100 == 0:
+                status(f"CEGIS individual checks: {n_individual[0]} done")
+
+    sel_task = object()
+    tracker.start(id(sel_task), "cegis", "select")
+    t0 = time.time()
+    try:
+        sel = await asyncio.to_thread(
+            select_cuts, man, f"{output_dir}/cegis", solver=args.cegis_solver, timeout=args.cegis_timeout,
+            individual=args.cegis_individual, pin_off=[c for c in noop_ids if c in testable],
+            verbose=args.verbose, on_event=on_event)
+    except (DesignAssertsPresent, DesignMalformed, MiterMismatch, ManifestError, AnonymousX,
+            XPairingError) as e:
+        tracker.finish(id(sel_task), "error", False)
+        raise SystemExit(f"FATAL: CEGIS cut selection: {type(e).__name__}: {e}")
+    tracker.finish(id(sel_task), "proven", True)
+    sel_s = time.time() - t0
+
+    on = set(sel.ids)
+    for cid, (mod, run) in by_id.items():
+        ctype, line = mod.cut_infos[run.index]
+        run.in_set = cid in on
+        if cid not in testable:
+            run.valid, run.verdict = False, "untested"
+        elif sel.individual is None:
+            run.valid, run.verdict = False, "not-checked"
+        else:
+            run.valid = sel.individual[cid]
+            run.verdict = "proven" if run.valid else "cex"
+        tracker.finish(id(run), run.verdict, run.valid)
+        append_result(results_path, {
+            "ts": time.time(), "phase": "cuts", "method": "cegis-comb", "module": mod.name,
+            "idx": run.index, "type": ctype, "line": line, "valid": run.valid, "verdict": run.verdict,
+            "in_set": run.in_set, "how": (sel.individual_how or {}).get(cid),
+        })
+    untested = sum(1 for cid in by_id if cid not in testable)
+    summary = [
+        f"method cegis-comb: {len(on)} cuts in the selected set, of {len(by_id) - untested} searched "
+        f"({untested} untested: their select drives nothing); selection {sel_s:.1f}s",
+        "valid = the cut on its own under the combinational spec (registers equal => outputs and "
+        "next states equal)" + ("" if sel.individual is not None else "; not checked (--no-cegis-individual)"),
+        f"power-up: {'holds' if sel.base_ok else 'DOES NOT HOLD'} ({sel.base_evidence})",
+        f"registers compared: {len(sel.registers)}"
+        + (f"; not compared: {', '.join(sel.registers_dropped)}" if sel.registers_dropped else ""),
+        f"X sources: {sel.xpair.summary()}",
+    ]
+    for line in summary:
+        status(line)
+    write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate, prune_stats=prune_stats,
+                        cegis=summary)
+
+    # 3. consolidate the set and check the whole design
+    status(f"Consolidating the selected set ({len(on)} cuts)...")
+    texts = []
+    for mod in modules:
+        if mod.excluded:
+            text = print_tree(mod.tree)
+        else:
+            working = sorted(r.index for r in mod.runs if r.in_set)
+            text = print_tree(mod.pc.cut_index(working)) if working else print_tree(mod.tree)
+            if args.prune_dead and not args.in_situ:
+                text, _ = prune_dead_source(text, mod.name, fold_constants=args.fold_constants)
+        with open(f"{consolidated_dir}/{mod.name}.sv", "w") as f:
+            f.write(text)
+        texts.append(text)
+    joint_dir = f"{consolidated_dir}/joint"
+    os.makedirs(joint_dir, exist_ok=True)
+    joint_path = f"{joint_dir}/{top_name}_consolidated.sv"
+    with open(joint_path, "w") as f:
+        f.write("\n".join(texts))
+    joint = Run(top_module_path=f"{ctree_dir}/{top_name}.sv", spec_lib_path=ctree_dir,
+                impl_module_path=joint_path, impl_module_folder=joint_dir, is_top=True, index=-1)
+
+    status("Verifying the whole consolidated design...")
+    tracker.set_phase("consolidate")
+    tracker.start(id(joint), "consolidate", "joint")
+    t0 = time.time()
+    try:
+        await backend.check(joint)
+    finally:
+        tracker.finish(id(joint), joint.verdict, joint.valid)
+        append_result(results_path, {
+            "ts": time.time(), "phase": "consolidate", "method": "cegis-comb", "module": top_name,
+            "idx": -1, "type": "joint", "line": None, "valid": joint.valid, "verdict": joint.verdict,
+            "applied": len(on), "elapsed": round(time.time() - t0, 3),
+        })
+    write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate, prune_stats=prune_stats,
+                        cegis=summary, joint=joint)
+    if not joint.valid:
+        raise SystemExit(
+            f"FATAL: the consolidated design is not equivalent to the golden one (verdict={joint.verdict}), "
+            f"although the selected set was proven on the muxed design. The cut and mux paths disagree, "
+            f"or the CEGIS model and the backend read the design differently. See {joint_dir}.")
+    status(f"Consolidated design PROVEN ({len(on)} cuts); results written to {log_path}")
 
 
 # MARK: Main
@@ -303,13 +500,14 @@ async def main():
     parser.add_argument(
         "--iterative-bitshrink",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="After a bit-shrink cut is proven equivalent, keep removing bits "
         "from that same signal/dimension one at a time until a shrink fails, "
-        "keeping the last passing width (greedy maximal shrink). On by default; "
-        "pass --no-iterative-bitshrink to disable. Only has an effect with -e. "
-        "Costs up to (width-1) extra checks per shrinkable dimension; the "
-        "consolidated design reflects each signal's maximal proven width.",
+        "keeping the last passing width (greedy maximal shrink). On by default "
+        "under --method fv; pass --no-iterative-bitshrink to disable. Only has "
+        "an effect with -e. Costs up to (width-1) extra checks per shrinkable "
+        "dimension; the consolidated design reflects each signal's maximal proven "
+        "width. Not available under --method cegis-comb, whose muxes remove one bit.",
     )
     parser.add_argument(
         "--max-bitshrink-bits",
@@ -428,6 +626,44 @@ async def main():
         "does only (iterative) bit-shrinks; '--only-families bitshrink,binop' "
         "does both. Default: all families.",
     )
+    parser.add_argument(
+        "--method",
+        choices=("fv", "cegis-comb"),
+        default="fv",
+        help="How the cuts that pass are chosen (both need -e). 'fv' (default): "
+        "check every cut with the backend, consolidate each module's winners, and "
+        "check each consolidated module. 'cegis-comb': mux every cut in (implies -m) "
+        "and let a CEGIS loop find the largest set of cuts that, together, leave "
+        "the logic between the registers unchanged (sound, but stricter than SEC: "
+        "cuts valid only through reachability or cancellation are left out); "
+        "consolidate that set and check the whole consolidated design with the "
+        "backend once. The backend still runs both gates.",
+    )
+    parser.add_argument(
+        "--cegis-solver",
+        default="auto",
+        metavar="STRATEGY",
+        help="--method cegis-comb: SMT strategy for the loop's queries: auto "
+        "(yices-smt2, else bitwuzla, else a z3 tactic pipeline), ext:BINARY, "
+        "tactic:a,b,c, or qfbv.",
+    )
+    parser.add_argument(
+        "--cegis-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="--method cegis-comb: limit per solver call. A call that runs out "
+        "stops the run with an error; default: no limit.",
+    )
+    parser.add_argument(
+        "--cegis-individual",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="--method cegis-comb: also check each cut on its own (one solver call "
+        "per cut, fewer where a learned conflict core already answers), so the "
+        "per-type statistics count valid cuts, not only the selected set. On by "
+        "default.",
+    )
 
     # Two-phase parse: resolve the backend, let it add its own args, then parse.
     # Phase 1 runs on a throwaway parser that knows only --backend and has no
@@ -455,6 +691,18 @@ async def main():
                 f"(valid: {', '.join(CUT_FAMILIES)})"
             )
         only_families = set(requested)
+
+    if args.method == "cegis-comb":
+        if not args.check_equivalence:
+            parser.error("--method cegis-comb needs -e: the backend runs both gates and "
+                         "checks the consolidated design")
+        if args.iterative_bitshrink:
+            parser.error("--iterative-bitshrink is not available under --method cegis-comb: "
+                         "a bit-shrink mux removes exactly one bit")
+        args.iterative_bitshrink = False
+        args.mux_rewrites = True  # the loop works on the muxed design
+    elif args.iterative_bitshrink is None:
+        args.iterative_bitshrink = True
 
     if args.top and not args.in_situ:
         parser.error("--top only applies to --in-situ; the elaborated front end "
@@ -1086,6 +1334,16 @@ async def main():
         f"Cut plan ({len(all_runs)} planned tests; no-ops detected during "
         f"checking) written to {plan_path}"
     )
+
+    if args.method == "cegis-comb":
+        await cegis_phase(
+            args, modules, manifest_path, backend=backend, tracker=tracker,
+            ctree_dir=ctree_dir, consolidated_dir=consolidated_dir, top_name=top_name,
+            output_dir=output_dir, results_path=results_path, log_path=log_path,
+            fv_gate=fv_gate_result, prune_stats=prune_stats,
+        )
+        tracker.set_phase("done")
+        return
 
     # Label lookup + owning module for progress lines and just-in-time cut
     # generation, keyed by run identity.

@@ -20,6 +20,9 @@ dependencies = [
     "nanobind-backend>=1.0",
     "z3>=0.2.0",
     "z3-solver>=4.15.4.0",
+    # cegis/: the X-pairing pass and write_btor (the yosys-slang front end
+    # stays in the oss-cad-suite `yosys` binary).
+    "pyosys>=0.70",
 ]
 
 [tool.scikit-build]

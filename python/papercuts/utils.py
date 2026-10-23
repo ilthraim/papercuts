@@ -70,3 +70,8 @@ class Run:
     #: dimension. 1 for a plain single-bit shrink; higher when --iterative-bitshrink
     #: greedily removes several bits. Meaningless (stays 1) for non-bitshrink cuts.
     shrink_amount: int = 1
+    #: --method cegis-comb only: whether the cut is in the selected (maximum)
+    #: set. There, ``valid`` is the cut's validity on its own under the
+    #: combinational spec, which neither implies nor follows from membership.
+    #: None under --method fv.
+    in_set: "bool | None" = None
