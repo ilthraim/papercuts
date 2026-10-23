@@ -523,7 +523,8 @@ async def main():
         help="Use the legacy bit-shrink strategy: introduce an intermediate "
         "'<signal>_papercuts' wire with its MSB forced to 0 and redirect reads "
         "to it. The default instead narrows the declaration in place "
-        "(e.g. 'logic [7:0] x;' -> 'logic [6:0] x;').",
+        "(e.g. 'logic [7:0] x;' -> 'logic [6:0] x;'). Always on under --method "
+        "cegis-comb, whose bit-shrink muxes model exactly this form.",
     )
     parser.add_argument(
         "--binops-in-conditions-only",
@@ -738,6 +739,13 @@ async def main():
                          "a bit-shrink mux removes exactly one bit")
         args.iterative_bitshrink = False
         args.mux_rewrites = True  # the loop works on the muxed design
+        # The set is proven on the muxes, and a bit-shrink mux is a companion wire
+        # whose MSB reads as 0 while the signal keeps its width and its writes.
+        # Consolidation must apply that same form. Narrowing the declaration in
+        # place is a different rewrite: a constant-index write to the dropped bit
+        # stops compiling (vtr__multiclock_reader_writer), and a variable-index
+        # read of it becomes an out-of-range X instead of 0.
+        args.shrink_with_intermediate = True
     elif args.iterative_bitshrink is None:
         args.iterative_bitshrink = True
 

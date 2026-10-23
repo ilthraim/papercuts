@@ -115,6 +115,35 @@ def test_elaborated():
         assert sum(f["planned"] for f in summary["by_family"].values()) == 18, summary
 
 
+def test_bitshrink_consolidates_as_its_mux():
+    # A constant-index write to the top bit: narrowing `r` in place would leave
+    # `r[3] <= ...` out of range (vtr__multiclock_reader_writer). Consolidation
+    # must use the companion form the mux models, so `r` keeps its width.
+    design = """
+module top(input logic clk, input logic [2:0] a, input logic b, output logic [2:0] y);
+    reg [3:0] r;
+    always @(posedge clk) begin
+        r[2:0] <= a;
+        r[3] <= b;
+    end
+    assign y = r[2:0];
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+            cut = [r for r in results(tmp) if r["phase"] == "cuts" and r["type"].startswith("bitshrink")]
+            assert cut and cut[0]["in_set"], cut  # bit 3 is never read: the shrink is valid
+            with open(os.path.join(tmp, calls[-1].impl_module_path)) as f:
+                text = f.read()
+            assert "r_papercuts" in text and "r[3] <=" in text, text
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])

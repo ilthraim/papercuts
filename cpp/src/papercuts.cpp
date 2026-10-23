@@ -2439,10 +2439,13 @@ void Papercutter::handle(const IdentifierNameSyntax& node) {
         visitDefault(node);
         return;
     }
-    // Check to see if this is the left side of a declaration
-    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
-        &node == node.parent->as<BinaryExpressionSyntax>().left) {
-        return; // If it is, we don't want to replace it
+    // The companion carries the READ value; the original keeps its driver. Every
+    // write counts -- any assignment operator, `<=` included, and an instance
+    // output connection -- exactly as BitMuxer decides it, so this cut is the
+    // rewrite the mux models. Checking only `=` redirected `r[3] <= b` onto the
+    // companion (vtr__multiclock_reader_writer under cegis-comb).
+    if (isAssignmentWriteTarget(node, &portDirections)) {
+        return;
     }
 
     if (nodesToShrink.contains(std::string(node.identifier.valueText()))) {
@@ -2458,10 +2461,13 @@ void Papercutter::handle(const IdentifierSelectNameSyntax& node) {
         visitDefault(node);
         return;
     }
-    // Check to see if this is the left side of a declaration
-    if (node.parent && node.parent->kind == SyntaxKind::AssignmentExpression &&
-        &node == node.parent->as<BinaryExpressionSyntax>().left) {
-        return; // If it is, we don't want to replace it
+    // The companion carries the READ value; the original keeps its driver. Every
+    // write counts -- any assignment operator, `<=` included, and an instance
+    // output connection -- exactly as BitMuxer decides it, so this cut is the
+    // rewrite the mux models. Checking only `=` redirected `r[3] <= b` onto the
+    // companion (vtr__multiclock_reader_writer under cegis-comb).
+    if (isAssignmentWriteTarget(node, &portDirections)) {
+        return;
     }
 
     if (nodesToShrink.contains(std::string(node.identifier.valueText()))) {
