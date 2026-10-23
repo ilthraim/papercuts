@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import fnmatch
 import json
 import os
@@ -406,6 +407,37 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
     ]
     for line in summary:
         status(line)
+
+    # Machine-readable twin of the header above, for batch reports. Rewritten
+    # after the joint check, so a run that dies there still leaves the rest.
+    with open(sel.btor) as f:
+        ops = [ln.split()[1] for ln in f if ln[:1].isdigit()]
+    by_family: dict[str, dict] = {}
+    for cid, (mod, run) in by_id.items():
+        fam = by_family.setdefault(cut_family(mod.cut_infos[run.index][0]),
+                                   {"planned": 0, "valid": 0, "in_set": 0, "untested": 0})
+        fam["planned"] += 1
+        fam["valid"] += bool(run.valid)
+        fam["in_set"] += bool(run.in_set)
+        fam["untested"] += run.verdict == "untested"
+    record = {
+        "top": top_name, "mode": "in-situ" if args.in_situ else "elaborated",
+        "cuts": len(by_id) + len(noop_ids), "noops": len(noop_ids), "untested": untested,
+        "searched": len(by_id) - untested, "in_set": len(on),
+        "individually_valid": None if sel.individual is None else sum(sel.individual.values()),
+        "by_family": by_family,
+        "iterations": len(sel.stats), "loop_s": sel.total_s, "individual_s": sel.individual_s,
+        "selection_s": sel_s, "base_ok": sel.base_ok,
+        "registers": len(sel.registers), "registers_dropped": sel.registers_dropped,
+        "btor": {"nodes": len(ops), "inputs": ops.count("input"), "states": ops.count("state")},
+        "xpair": dataclasses.asdict(sel.xpair), "joint": None,
+    }
+
+    def write_record():
+        with open(f"{output_dir}/cegis/summary.json", "w") as f:
+            json.dump(record, f, indent=1)
+
+    write_record()
     write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate, prune_stats=prune_stats,
                         cegis=summary)
 
@@ -446,6 +478,8 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
         })
     write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate, prune_stats=prune_stats,
                         cegis=summary, joint=joint)
+    record["joint"] = {"valid": joint.valid, "verdict": joint.verdict, "s": round(time.time() - t0, 3)}
+    write_record()
     if not joint.valid:
         raise SystemExit(
             f"FATAL: the consolidated design is not equivalent to the golden one (verdict={joint.verdict}), "

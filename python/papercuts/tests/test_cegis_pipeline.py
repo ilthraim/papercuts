@@ -102,6 +102,12 @@ def test_elaborated():
         assert "method cegis-comb" in log and "valid  set" in log and "in set" in log
         assert f"joint check of the consolidated design ({len(in_set)} cuts applied): PROVEN" in log
 
+        with open(os.path.join(tmp, "outputs", "cegis", "summary.json")) as f:
+            summary = json.load(f)
+        assert summary["cuts"] == 18 and summary["in_set"] == len(in_set), summary
+        assert summary["joint"]["valid"] and summary["btor"]["states"] > 0, summary
+        assert sum(f["planned"] for f in summary["by_family"].values()) == 18, summary
+
 
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
