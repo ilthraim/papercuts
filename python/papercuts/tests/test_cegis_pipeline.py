@@ -259,6 +259,29 @@ endmodule
         DESIGN = saved
 
 
+def test_register_constant_in_golden():
+    # hls floyd_warshall: yosys folds the golden `done` flop to a constant 0, the
+    # muxed copy's muxes keep it a flip-flop; unpaired it started free in one copy
+    design = """
+module top(input logic clk, input logic a, input logic [3:0] d, output logic done, output logic [3:0] q);
+    reg r = 1'b0;
+    always @(posedge clk) begin
+        r <= 1'b0 & a;
+        q <= d;
+    end
+    assign done = r;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])

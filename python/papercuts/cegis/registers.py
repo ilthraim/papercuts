@@ -46,6 +46,7 @@ class Registers(dict):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.aliases: dict[str, frozenset[str]] = {}
+        self.nets: dict[str, int] = {}  # every public net: name -> width
 
 
 def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -> tuple[Registers, list[str]]:
@@ -84,14 +85,15 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
     m = j["modules"][top]
     owner: dict[int, str] = {}
     by_bits: dict[tuple, list[str]] = {}  # identical bit vectors: one net, several names
+    regs = Registers()
     for name, w in m["netnames"].items():
         if w.get("hide_name"):
             continue
+        regs.nets[name] = len(w["bits"])
         for b in w["bits"]:
             owner.setdefault(b, name)
         by_bits.setdefault(tuple(w["bits"]), []).append(name)
 
-    regs = Registers()
     skipped: list[str] = []
     for cell in m["cells"].values():
         if cell["type"] not in FF_CELL_TYPES:
@@ -161,7 +163,22 @@ def matched_registers(golden: dict[str, int], muxed: dict[str, int]) -> tuple[li
         common = ga & aliases(muxed, mname)
         name = g if g in common else (mname if mname in common else sorted(common)[0])
         pairs.append((name, golden[g]))
-    dropped += [f"{n} (muxed only)" for n in sorted(set(muxed) - used)]
+    # A register in one copy only, where the other copy has a public net of that
+    # name and width: yosys removed the other copy's flip-flop as constant
+    # (hls floyd_warshall: golden ap_done_reg is a constant 0, the muxed copy's
+    # muxes keep it a flip-flop). Pair them: R then holds the register to the
+    # net's value, and an unpaired register would start free in one copy only.
+    paired = {n for n, _ in pairs}
+    for n in sorted(set(muxed) - used):
+        if getattr(golden, "nets", {}).get(n) == muxed[n] and n not in paired:
+            pairs.append((n, muxed[n]))
+        else:
+            dropped.append(f"{n} (muxed only)")
+    rescued = [d for d in dropped if d.endswith("(golden only)")
+               and getattr(muxed, "nets", {}).get(d.split(" ")[0]) == golden.get(d.split(" ")[0])]
+    for d in rescued:
+        dropped.remove(d)
+        pairs.append((d.split(" ")[0], golden[d.split(" ")[0]]))
     return pairs, dropped
 
 
@@ -318,6 +335,10 @@ def power_up(design: Design, registers: list[tuple[str, int]] | None = None) -> 
     synchronous case."""
     consts = rom_values(design)
     pairs, _ = match_registers(design, [p for p, _ in registers] if registers else None)
+    # Only flip-flops on both sides power up "arbitrary but equal" (Jasper's
+    # auto-mapping pairs flops). A side with no state behind it -- a net yosys
+    # folded to a constant -- does not, so such a pair is left to the base case.
+    pairs = [p for p in pairs if states_behind(design, p.mod) and states_behind(design, p.orig)]
 
     def states_of(p: RegPair) -> set[str]:
         if p.kind == "state":
