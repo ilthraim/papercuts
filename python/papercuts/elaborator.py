@@ -38,6 +38,7 @@ silently dropped.
 
 import argparse
 import fnmatch
+import re
 import sys
 from dataclasses import dataclass
 
@@ -66,6 +67,52 @@ FOLDABLE_KINDS = {
     "BinaryOp", "UnaryOp", "ConditionalOp", "ElementSelect", "RangeSelect",
     "Concatenation", "Replication", "MemberAccess",
 }
+
+
+# IEEE 1800-2017 Annex B reserved keywords. A name that is one of these, or is not
+# a simple identifier, came from an escaped identifier (`\\opcode[0] `) and must be
+# re-emitted escaped (EPFL netlists, written by ABC, name every port that way).
+SV_KEYWORDS = frozenset("""
+accept_on alias always always_comb always_ff always_latch and assert assign assume
+automatic before begin bind bins binsof bit break buf bufif0 bufif1 byte case casex
+casez cell chandle checker class clocking cmos config const constraint context
+continue cover covergroup coverpoint cross deassign default defparam design disable
+dist do edge else end endcase endchecker endclass endclocking endconfig endfunction
+endgenerate endgroup endinterface endmodule endpackage endprimitive endprogram
+endproperty endspecify endsequence endtable endtask enum event eventually expect
+export extends extern final first_match for force foreach forever fork forkjoin
+function generate genvar global highz0 highz1 if iff ifnone ignore_bins
+illegal_bins implements implies import incdir include initial inout input inside
+instance int integer interconnect interface intersect join join_any join_none
+large let liblist library local localparam logic longint macromodule matches
+medium modport module nand negedge nettype new nexttime nmos nor noshowcancelled
+not notif0 notif1 null or output package packed parameter pmos posedge primitive
+priority program property protected pull0 pull1 pulldown pullup
+pulsestyle_ondetect pulsestyle_onevent pure rand randc randcase randsequence rcmos
+real realtime ref reg reject_on release repeat restrict return rnmos rpmos rtran
+rtranif0 rtranif1 s_always s_eventually s_nexttime s_until s_until_with scalared
+sequence shortint shortreal showcancelled signed small soft solve specify
+specparam static string strong strong0 strong1 struct super supply0 supply1
+sync_accept_on sync_reject_on table tagged task this throughout time timeprecision
+timeunit tran tranif0 tranif1 tri tri0 tri1 triand trior trireg type typedef union
+unique unique0 unsigned until until_with untyped use uwire var vectored virtual void
+wait wait_order wand weak weak0 weak1 while wildcard wire with within wor xnor xor
+""".split())
+_SIMPLE_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+def ident(name: str) -> str:
+    """`name` as SystemVerilog source: as-is when it is a plain identifier, else
+    escaped (backslash, the name, a terminating space)."""
+    if _SIMPLE_ID.fullmatch(name) and name not in SV_KEYWORDS:
+        return name
+    return f"\\{name} "
+
+
+def ident_path(path: str) -> str:
+    """A dotted hierarchical reference, each component escaped as needed. Only
+    for names this emitter joined with "." itself (unflattened generate scopes)."""
+    return ".".join(ident(c) for c in path.split("."))
 
 
 UNARY_PREFIX = {
@@ -123,6 +170,9 @@ class Emitter:
         # in _emit_module (the instance body is a valid slang Scope). None outside
         # a module, where folding is skipped.
         self._eval_body = None
+        self._cur_names = {}  # plain names for the module being emitted (_name_map_for)
+        self._name_maps = {}
+        self._top_paths = set()
         # Definition names to emit verbatim (from original syntax) instead of
         # specializing per instance. Set from the --ignore CLI option.
         self.ignore = set()
@@ -183,11 +233,59 @@ class Emitter:
             return s.rsplit(".", 1)[-1]
         return s
 
-    def decl(self, type_str, name, qualifier=""):
+    def decl(self, type_str, name, qualifier="", escape_only=False):
         prefix, suffix = self.split_type(type_str)
         parts = [p for p in (qualifier, prefix) if p]
         head = " ".join(parts)
-        return f"{head} {name}{suffix}".strip()
+        # lstrip only: an escaped name ends in the space that terminates it
+        shown = ident(name) if escape_only else self._name(name)
+        return f"{head} {shown}{suffix}".lstrip()
+
+    # --- names ---------------------------------------------------------------
+
+    # Escaped identifiers (`\\opcode[0] `, every EPFL netlist) are emitted as plain
+    # ones. The cutter and muxer rebuild expressions and names from tokens, and an
+    # escaped name only ends at the whitespace that belongs to the NEXT token, so
+    # a rebuilt `(\\a[0])` swallows the parenthesis and a companion
+    # `n[3]_papercuts` loses its escape; the muxer crashed outright. Within a
+    # module every name that is not a plain identifier, or is a keyword, maps to
+    # a sanitized unique one. The top's ports keep their names (the gate and
+    # every check match ports by name) and the body reaches them through plain
+    # aliases (_emit_port_aliases).
+
+    def _name_map_for(self, body):
+        """{emitted-as-is name: plain name} for one module body, deterministic, so
+        a parent connecting to this body by port name agrees with its header."""
+        key = body.hierarchicalPath
+        if key in self._name_maps:
+            return self._name_maps[key]
+        members = list(body)
+        pm = {}
+        self._build_path_map(members, "", pm, "_" if self.flatten else ".")
+        raws = set(pm.values()) | {m.name for m in members if kind(m) in ("Port", "Parameter", "Subroutine")}
+        if not self.flatten:
+            raws = {c for r in raws for c in r.split(".")}
+        taken = {r for r in raws if _SIMPLE_ID.fullmatch(r) and r not in SV_KEYWORDS}
+        out = {}
+        for r in sorted(raws - taken):
+            base = re.sub(r"[^A-Za-z0-9_$]", "_", r)
+            if not re.match(r"[A-Za-z_]", base):
+                base = "_" + base
+            cand, n = base, 1
+            while cand in taken or cand in SV_KEYWORDS:
+                n += 1
+                cand = f"{base}_e{n}"
+            taken.add(cand)
+            out[r] = cand
+        self._name_maps[key] = out
+        return out
+
+    def _name(self, raw):
+        """`raw` (a name as this emitter would print it) in the current module."""
+        if not self.flatten and "." in raw:
+            return ".".join(self._name(c) for c in raw.split("."))
+        mapped = self._cur_names.get(raw)
+        return mapped if mapped is not None else ident(raw)
 
     # --- top-level -----------------------------------------------------------
 
@@ -214,6 +312,8 @@ class Emitter:
         #   ("mod", emitted_name, body)      -- specialized, walked and re-emitted
         #   ("verbatim", def_name, text)     -- ignored def, original source text
         self.module_names = {}
+        self._top_paths = {inst.hierarchicalPath for inst in root.topInstances}
+        self._name_maps = {}
         units = []
         used_names = set()
         verbatim_seen = set()
@@ -298,7 +398,11 @@ class Emitter:
         return name
 
     def _mangle_path(self, hp):
-        return hp.replace(".", "_").replace("[", "_").replace("]", "")
+        # A path through an escaped instance name (`top.\\u[0] `) keeps its
+        # backslash and space in slang's hierarchicalPath; a mangled module name
+        # must still be a plain identifier.
+        flat = hp.replace(".", "_").replace("[", "_").replace("]", "")
+        return re.sub(r"[^A-Za-z0-9_$]", "", flat.replace(" ", ""))
 
     # --- packages ------------------------------------------------------------
 
@@ -402,11 +506,14 @@ class Emitter:
         if self.flatten:
             self._check_flatten_collisions(name)
 
+        self._cur_names = self._name_map_for(body)
+        is_top = body.hierarchicalPath in self._top_paths
+
         params = [m for m in members if kind(m) == "Parameter" and m.isPortParam]
         ports = [m for m in members if kind(m) == "Port"]
 
         if params:
-            self.emit(f"module {name} #(")
+            self.emit(f"module {ident(name)} #(")
             self.level += 1
             for i, p in enumerate(params):
                 comma = "," if i != len(params) - 1 else ""
@@ -414,19 +521,21 @@ class Emitter:
             self.level -= 1
             self.emit(") (" if ports else ") ();")
         elif ports:
-            self.emit(f"module {name} (")
+            self.emit(f"module {ident(name)} (")
         else:
-            self.emit(f"module {name} ();")
+            self.emit(f"module {ident(name)} ();")
 
         if ports:
             self.level += 1
             for i, port in enumerate(ports):
                 comma = "," if i != len(ports) - 1 else ""
-                self.emit(self._port_decl(port) + comma)
+                self.emit(self._port_decl(port, escape_only=is_top) + comma)
             self.level -= 1
             self.emit(");")
 
         self.level += 1
+        if is_top:
+            self._emit_port_aliases(ports)
         self._emit_body_members(members)
         self.level -= 1
         self.emit("endmodule")
@@ -638,9 +747,25 @@ class Emitter:
         body += " = " + self._render_constant(p.value)
         return body
 
-    def _port_decl(self, port):
+    def _port_decl(self, port, escape_only=False):
         qualifier = DIRECTION.get(port.direction.name, "")
-        return self.decl(tname(port.type), port.name, qualifier=qualifier)
+        return self.decl(tname(port.type), port.name, qualifier=qualifier, escape_only=escape_only)
+
+    def _emit_port_aliases(self, ports):
+        """The top keeps its escaped port names; the body uses plain aliases."""
+        for port in ports:
+            plain = self._cur_names.get(port.name)
+            if plain is None:
+                continue
+            d = port.direction.name
+            if d == "In":
+                self.emit(self.decl(tname(port.type), port.name, qualifier="wire")
+                          + f" = {ident(port.name)};")
+            elif d == "Out":
+                self.emit(self.decl(tname(port.type), port.name) + ";")
+                self.emit(f"assign {ident(port.name)} = {plain};")
+            else:
+                raise EmitError(f"unsupported escaped {d.lower()} top port {port.name!r}")
 
     def _decl_name(self, sym):
         if self.flatten:
@@ -698,8 +823,13 @@ class Emitter:
 
     def _emit_instance(self, inst):
         body = inst.body
-        def_name = self.module_names[inst.hierarchicalPath]
-        inst_name = self._decl_name(inst)
+        def_name = ident(self.module_names[inst.hierarchicalPath])
+        inst_name = self._name(self._decl_name(inst))
+        # a verbatim (excluded) child keeps its own names; an emitted one has a map
+        child = {} if body.name in self.ignore else self._name_map_for(body)
+
+        def child_name(n):
+            return child.get(n) or ident(n)
 
         params = [m for m in body if kind(m) == "Parameter" and m.isPortParam]
         conns = inst.portConnections
@@ -709,7 +839,7 @@ class Emitter:
             self.level += 1
             for i, p in enumerate(params):
                 comma = "," if i != len(params) - 1 else ""
-                self.emit(f".{p.name}({self._render_constant(p.value)}){comma}")
+                self.emit(f".{child_name(p.name)}({self._render_constant(p.value)}){comma}")
             self.level -= 1
             self.emit(f") {inst_name} (")
         else:
@@ -718,7 +848,7 @@ class Emitter:
         self.level += 1
         for i, conn in enumerate(conns):
             comma = "," if i != len(conns) - 1 else ""
-            pname = conn.port.name
+            pname = child_name(conn.port.name)
             text = self._port_conn_expr(conn)
             self.emit(f".{pname}({text or ''}){comma}")
         self.level -= 1
@@ -1129,8 +1259,8 @@ class Emitter:
             if val is not None:
                 return val
         if self.flatten and hp in self.path_map:
-            return self.path_map[hp]
-        return sym.name
+            return self._name(self.path_map[hp])
+        return self._name(sym.name)
 
     def _expr_NamedValue(self, node):
         return self._value_ref(node.symbol)
@@ -1142,7 +1272,7 @@ class Emitter:
             return self.param_subst[hp]
         mapped = self.path_map.get(hp)
         if mapped is not None:
-            return mapped
+            return self._name(mapped)
         # A hierarchical reference to a parameter in another scope resolves to
         # its concrete value (the target need not be inside the emitted module).
         if self.fold_constants and kind(sym) == "Parameter":

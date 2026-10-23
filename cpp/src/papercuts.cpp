@@ -456,8 +456,15 @@ void InputAdder::handle(const PortListSyntax& node) {
     // ports added at the front would shift every one of those connections onto the
     // wrong port. At the back they are simply the last ports, which is also the
     // order wireMuxHierarchy appends their connections in.
-    if (ansiNode.ports.size() > 0)
-        insertAtBack(ansiNode.ports, parse(newPortStr), makeComma());
+    if (ansiNode.ports.size() > 0) {
+        // An escaped identifier (`\\y[0] `) ends at whitespace, which belongs to the
+        // NEXT token's trivia; a bare comma after it would become part of the name.
+        Token comma = makeComma();
+        Token last = ansiNode.ports[ansiNode.ports.size() - 1]->getLastToken();
+        if (last.rawText().starts_with('\\'))
+            comma = comma.withTrivia(alloc, std::span<const Trivia>{&SingleSpace, 1});
+        insertAtBack(ansiNode.ports, parse(newPortStr), comma);
+    }
     else
         insertAtBack(ansiNode.ports, parse(newPortStr));
 }

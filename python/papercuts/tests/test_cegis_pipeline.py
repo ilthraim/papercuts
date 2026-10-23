@@ -168,6 +168,25 @@ endmodule
         DESIGN = saved
 
 
+def test_escaped_port_names():
+    # EPFL netlists name their ports `\\opcode[0] `; the miter must re-escape them
+    design = r"""
+module top(input \a[0] , input \a[1] , input s, output \y[0] );
+    assign \y[0]  = s ? (\a[0]  & 1'b1) : \a[1] ;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+            with open(os.path.join(tmp, "outputs", "cegis", "summary.json")) as f:
+                assert json.load(f)["in_set"] >= 1
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])
