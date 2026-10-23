@@ -14,8 +14,10 @@ X is observable, and models division by zero as all-ones, with no X at all.
 say what Jasper means:
 
   1. every $div/$mod/$divfloor/$modfloor becomes `B == 0 ? 'x : result`
-  2. every constant-X bit is keyed by the first bits it reaches, through the
-     logic, of a signal BOTH copies have (instance prefix stripped)
+  2. every constant-X bit, and every wire bit nothing drives (Jasper's
+     "undriven" X sources, auto-mapped by name like the rest), is keyed by the
+     first bits it reaches, through the logic, of a signal BOTH copies have
+     (instance prefix stripped); an undriven bit of such a signal is its own key
   3. one X in `orig` and one in `mod` with the same key share one new input;
      an X with no partner, or one of several with the same key, gets an input
      of its own; an X that opt_merge had already shared between the copies
@@ -62,10 +64,11 @@ class XReport:
     unpaired: list[str] = field(default_factory=list)  # "<copy>: <key>", free on their own
     ambiguous: list[str] = field(default_factory=list)  # keys with several X in a copy
     unkeyed: int = 0  # reach no signal both copies have
+    undriven: int = 0  # of `bits`: wire bits nothing drives
     inputs: int = 0  # inputs added
 
     def summary(self) -> str:
-        return (f"{self.bits} X bits: {self.paired} paired, {self.merged} already shared, "
+        return (f"{self.bits} X bits ({self.undriven} undriven): {self.paired} paired, {self.merged} already shared, "
                 f"{len(self.unpaired)} unpaired, {len(self.ambiguous)} ambiguous keys, "
                 f"{self.unkeyed} unkeyed; {self.divs} divisions given an X on zero")
 
@@ -113,6 +116,7 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
         cells.append((cell, cell.type.str(), ins, outs))
     conns = [([_snap(b) for b in _bits(lhs)], [_snap(b) for b in _bits(rhs)]) for lhs, rhs in m.connections_]
     wires = [(w.name.str(), w.width) for w in m.wires_.values()]
+    inputs = {w.name.str() for w in m.wires_.values() if w.port_input}
 
     parent: dict[tuple, tuple] = {}
 
@@ -153,6 +157,28 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
                 elif b is X:
                     occ.append(("cell", idx, port, i))
                     start[occ[-1]] = outputs(idx, port, i)
+
+    # Undriven wire bits: no cell drives them, no connection gives them a value,
+    # and they are not an input port. One occurrence per alias class, starting
+    # at the class itself so a signal both copies have keys it by name.
+    driven = set()
+    for _, _, _, outs in cells:
+        driven.update(find(b) for bits in outs.values() for b in bits if isinstance(b, tuple))
+    for lhs, rhs in conns:
+        driven.update(find(lb) for lb, rb in zip(lhs, rhs) if not isinstance(rb, tuple))
+    for name, width in wires:
+        if name in inputs:
+            driven.update(find((name, i)) for i in range(width))
+    undriven = {}
+    for name, width in wires:
+        for i in range(width):
+            r = find((name, i))
+            if r not in driven:
+                undriven.setdefault(r, (name, i))
+    for r, bit in undriven.items():
+        occ.append(("undriven", bit))
+        start[occ[-1]] = [bit]
+    rep.undriven = len(undriven)
 
     copies = defaultdict(set)  # name without the instance prefix -> copies that have it
     for name, _ in wires:
@@ -236,11 +262,14 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
     # ---- rewrite the netlist
     by_port = defaultdict(dict)  # (cell_idx, port) -> {i: SigBit}
     by_conn = defaultdict(dict)  # conn_idx -> {i: SigBit}
+    drive = []  # (wire name, offset, SigBit): undriven bits given their input
     for o, nb in subst.items():
         if o[0] == "cell":
             by_port[(o[1], o[2])][o[3]] = nb
-        else:
+        elif o[0] == "conn":
             by_conn[o[1]][o[2]] = nb
+        else:
+            drive.append((o[1][0], o[1][1], nb))
     for (idx, port), repl in by_port.items():
         cell = cells[idx][0]
         pid = ys.IdString(port)
@@ -253,6 +282,8 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
                 rhs = ys.SigSpec([by_conn[ci].get(i, b) for i, b in enumerate(_bits(rhs))])
             new.append((lhs, rhs))
         m.new_connections(new)
+    for name, off, nb in drive:
+        m.connect(ys.SigSpec(m.wire(ys.IdString(name)), off, 1), ys.SigSpec([nb]))
     m.fixup_ports()
 
     left = sorted({c.name.str() for c in m.cells_.values() for p, s in c.connections_.items()

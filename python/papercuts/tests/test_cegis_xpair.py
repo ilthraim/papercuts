@@ -48,6 +48,12 @@ CASES = {
                "default: q <= 'x; endcase assign y = q;",
         muxed="logic [3:0] q; always_ff @(posedge clk) case (s) 2'd0: q <= a; 2'd1: q <= ~a; "
               "default: q <= pc_sel0 ? 4'b0000 : (pc_sel1 ? 4'b1111 : 'x); endcase assign y = q;"),
+    # A wire nothing drives is an X source too (Jasper: "internal_undriven",
+    # auto-mapped by name). Read in both copies, it pairs by its own name.
+    "undriven": dict(
+        ports="input logic [3:0] a, output logic [3:0] y",
+        golden="logic [3:0] u; assign y = a & u;",
+        muxed="logic [3:0] u; assign y = a & (pc_sel0 ? 4'b0000 : (pc_sel1 ? 4'b1111 : u));"),
     # The X is assigned to `cl`; the muxed copy reads it through a bit-mux
     # companion whose low bits are plain aliases of cl, as papercuts writes them.
     # Keying on the companion would leave the X unpaired, and golden != golden.
@@ -113,6 +119,20 @@ def test_report():
         assert rep.paired == 4 and not rep.unpaired, rep.summary()
         _, rep = verdicts("divide_by_zero", CASES["divide_by_zero"], tmp)
         assert rep.divs >= 1, rep.summary()
+
+
+def test_unread_undriven_companion_bit():
+    # vtr__multiclock_reader_writer: opt removed the driver of a companion bit
+    # nothing reads; the named wire survived, so write_btor gave it an anonymous
+    # input. It must become an ordinary (unpaired, unused) input, not an error.
+    case = dict(
+        ports="input logic [1:0] a, output logic [1:0] y",
+        golden="assign y = a;",
+        muxed="logic [1:0] y_papercuts; assign y_papercuts = {pc_sel0 ? 1'b0 : a[1], a[0]}; "
+              "assign y = {a[1], y_papercuts[0] & ~pc_sel1};")
+    with tempfile.TemporaryDirectory() as tmp:
+        got, rep = verdicts("companion_unread", case, tmp)
+        assert got[0] == "eq", (got, rep.summary())
 
 
 def test_yosys_alone_disagrees():
