@@ -182,19 +182,18 @@ def driver_problems(log_path: str) -> tuple[list[str], list[str]]:
 
 
 def check_drivers(orig: ModuleInfo, muxed: ModuleInfo, suffix: str) -> list[str]:
-    """Problems that make the two copies untrustworthy to compare: conflicting
-    drivers on either side, and wires the muxed copy reads but no longer drives
-    although the golden design drives them (a driver lost to muxing). A wire
-    undriven in the golden design too is ordinary X and stays allowed."""
-    def golden_name(w: str) -> str:
-        mod, _, wire = w.partition(".")
-        return (mod[: -len(suffix)] if suffix and mod.endswith(suffix) else mod) + "." + wire
+    """Conflicting drivers on either side: every checker would resolve them its
+    own way, so the copies cannot be compared.
 
+    Undriven wires are not a problem here. They are X sources, paired across the
+    copies like the rest (xpair.pair_x, the way Jasper maps "undriven" signals),
+    and a driver lost to muxing makes the copies differ with every cut off, which
+    the loop reports as MiterMismatch. Checking them by name gave false positives:
+    yosys names an undriven net by whichever alias it prefers, and the two copies
+    can prefer different ones (opencores rtfsimpleuart: `baud8x` left unconnected
+    in both, reported as `isX8` only in the muxed copy, where a companion reads it)."""
     problems = [f"golden design: multiple conflicting drivers for {w}" for w in orig.conflicts]
     problems += [f"muxed design: multiple conflicting drivers for {w}" for w in muxed.conflicts]
-    golden_undriven = set(orig.undriven)
-    problems += [f"muxed design: {w} is read but has no driver (driven in the golden design)"
-                 for w in muxed.undriven if golden_name(w) not in golden_undriven]
     return problems
 
 
