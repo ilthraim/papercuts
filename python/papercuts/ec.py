@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import os
 import re
 from typing import Dict, List, Tuple, TYPE_CHECKING
 import pyslang
@@ -389,12 +390,19 @@ def _parse_verdict(output: str, returncode: int) -> str:
 
 
 # MARK: Jasper Runner
+def _jg_command() -> str:
+    """The Jasper launcher: `jg`, or $PAPERCUTS_JG (e.g. a wrapper that throttles
+    concurrent runs on a shared license). It runs inside `csh -c`, so the user's
+    .cshrc has already set up Jasper's environment."""
+    return os.environ.get("PAPERCUTS_JG", "jg")
+
+
 async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str = TCL_SCRIPT_NAME):
     # stdin=DEVNULL detaches jg from our controlling terminal; otherwise it puts
     # the inherited tty into raw mode (ONLCR off) and doesn't restore it, making
     # subsequent status prints "stairstep" across the screen.
     process = await asyncio.create_subprocess_shell(
-        f"csh -c 'jg -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
+        f"csh -c '{_jg_command()} -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
