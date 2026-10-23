@@ -187,7 +187,21 @@ class RegPair:
     def value(self, fr: Frame, design: Design) -> tuple[BV, BV]:
         if self.kind == "state":
             return fr.states[self.mod], fr.states[self.orig]
-        return fr.values[design.symbols[self.mod]], fr.values[design.symbols[self.orig]]
+        return _read(fr, design, self.mod), _read(fr, design, self.orig)
+
+
+def _read(fr: Frame, design: Design, name: str) -> BV:
+    """A register's value in a frame: the state itself, or the named node."""
+    return fr.states[name] if name in design.states else fr.values[design.symbols[name]]
+
+
+def _known(design: Design, name: str) -> bool:
+    return name in design.states or name in design.symbols
+
+
+def states_behind(design: Design, name: str) -> set[str]:
+    """The states a register name reads: itself, or the cone of its named node."""
+    return {name} if name in design.states else design.cone_states(design.symbols[name])
 
 
 def _resolve(design: Design, name: str) -> str | None:
@@ -227,14 +241,17 @@ def match_registers(design: Design, registers: list[str] | None = None,
         if ms_ is not None and ms_ == os__ and design.width(m) == design.width(o):
             pairs.append(RegPair(name, "state", ms_, os__))
             continue
-        if m in design.symbols and o in design.symbols and design.width(m) == design.width(o):
+        # A side may be a state while the other is a named node: yosys split one
+        # copy's register into several flip-flops (koios test: the golden pipe_3
+        # became a concatenation of states, the muxed one stayed whole).
+        if _known(design, m) and _known(design, o) and design.width(m) == design.width(o):
             # Prefer the state the register actually lives in. Its read value is
             # a function of exactly one state, and pairing THAT is what makes R
             # inductive: the read passes through the asynchronous reset mux, so
             # two registers holding different values can still read alike while
             # reset is asserted, and equality of the reads alone is not preserved
             # by a step.
-            ms, os_ = design.cone_states(design.symbols[m]), design.cone_states(design.symbols[o])
+            ms, os_ = states_behind(design, m), states_behind(design, o)
             if len(ms) == 1 and len(os_) == 1:
                 ms, os_ = ms.pop(), os_.pop()
                 if design.width(ms) == design.width(os_):
@@ -305,6 +322,6 @@ def power_up(design: Design, registers: list[tuple[str, int]] | None = None) -> 
     def states_of(p: RegPair) -> set[str]:
         if p.kind == "state":
             return {p.mod, p.orig}
-        return design.cone_states(design.symbols[p.mod]) | design.cone_states(design.symbols[p.orig])
+        return states_behind(design, p.mod) | states_behind(design, p.orig)
 
     return PowerUp(consts, [p for p in pairs if not (states_of(p) & set(consts))])

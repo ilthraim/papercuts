@@ -157,6 +157,36 @@ def test_individual_validity_matches_direct_verify():
             assert valid == direct, (name, n, got[n])
 
 
+# mod.r is one 4-bit state; orig.r is a named concatenation of two 2-bit states
+# (yosys split the golden register; koios test's pipe_3)
+SPLIT = """
+1 sort bitvec 1
+2 sort bitvec 2
+3 sort bitvec 4
+4 input 3 d
+5 state 3 mod.r
+6 state 2 orig.r_hi
+7 state 2 orig.r_lo
+8 concat 3 6 7 orig.r
+9 next 3 5 4
+10 slice 2 4 3 2
+11 slice 2 4 1 0
+12 next 2 6 10
+13 next 2 7 11
+14 neq 1 5 8
+15 bad 14
+"""
+
+
+def test_state_paired_with_split_register():
+    from papercuts.cegis.registers import match_registers
+    d = Design.from_string(SPLIT)
+    pairs, unmatched = match_registers(d, ["r"])
+    assert unmatched == [] and len(pairs) == 1 and pairs[0].kind == "symbol", (pairs, unmatched)
+    c = CombCegis(d, verbose=False, selects=[], registers=[("r", 4)])
+    assert c.two_frames and c.verify({}) is None  # the copies agree with R in place
+
+
 def test_anonymous_x_refused():
     try:
         CombCegis(Design.from_string(ANON), verbose=False)
