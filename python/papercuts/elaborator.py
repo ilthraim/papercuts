@@ -1470,12 +1470,16 @@ def build_compilation_from(trees, top=None):
     """Compilation over already-parsed trees, so callers holding them re-use rather
     than re-parse. The trees' SourceManager must outlive the Compilation.
     ``top`` names the top module; without it, every uninstantiated module is one."""
+    opts = CompilationOptions()
+    # Files without a `timescale beside files with one are an error to slang
+    # ("design element does not have a time scale defined but others in the
+    # design do": opencores brisc, ptc, datetime, ...). Timing means nothing to
+    # the formal checks, so unmarked elements get a default, as slang's own
+    # --timescale option does.
+    opts.defaultTimeScale = pyslang.TimeScale.fromString("1ns/1ps")
     if top:
-        opts = CompilationOptions()
         opts.topModules = {top}
-        comp = Compilation(pyslang.Bag([opts]))
-    else:
-        comp = Compilation()
+    comp = Compilation(pyslang.Bag([opts]))
     for tree in trees:
         comp.addSyntaxTree(tree)
     return comp

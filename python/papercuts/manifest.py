@@ -131,7 +131,10 @@ def check_manifest(manifest: dict, muxed_text: dict[str, str] | None = None) -> 
         if muxed_text is not None and name in muxed_text:
             header, body = _split_header(muxed_text[name])
             declared = {int(x) for x in re.findall(r"pc_sel(\d+)\b", header)}
-            used = {int(x) for x in re.findall(r"pc_sel(\d+)\b", body)}
+            # `.pc_selN(` is a CHILD's port in a named connection, not this
+            # module's own select (opencores wb_to_amba, case muxing off: the
+            # parent's reserved case selects 11-15 "were used" by those names)
+            used = {int(x) for x in re.findall(r"(?<!\.)\bpc_sel(\d+)\b", body)}
             if declared != set(range(n)):
                 missing = sorted(set(range(n)) - declared)
                 extra = sorted(declared - set(range(n)))
