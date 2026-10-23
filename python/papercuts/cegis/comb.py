@@ -138,7 +138,11 @@ class CombCegis:
         # inert selects pinned to 0 so they are never reported as valid cuts
         self.zero_names = [n for n in (pin_zero or []) if n in design.inputs]
         self.pinned = {n: z3.BitVecVal(0, design.width(n)) for n in self.zero_names}
-        self.free_names = [n for n in design.input_names() if n not in self.sel_names and n not in self.zero_names]
+        # Clock inputs are ordinary inputs here, recorded in counterexamples like
+        # the rest: a design that also reads its clock as data (opencores cop,
+        # wb_clk_i) gave counterexamples the conflict core could not reproduce.
+        self.free_names = [n for n in design.input_names(exclude_clocks=False)
+                           if n not in self.sel_names and n not in self.zero_names]
         self.sels: dict[str, z3.BoolRef] = {n: z3.Bool(n) for n in self.sel_names}
         self.sel_bv = {n: z3.If(b, z3.BitVecVal(1, 1), z3.BitVecVal(0, 1)) for n, b in self.sels.items()}
         self.synth = z3.Optimize()

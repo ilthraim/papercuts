@@ -282,6 +282,25 @@ endmodule
         DESIGN = saved
 
 
+def test_clock_read_as_data():
+    # opencores cop reads wb_clk_i as data; a counterexample that depended on the
+    # clock's value did not record it, and the conflict core could not reproduce it
+    design = """
+module top(input logic clk, input logic a, input logic [3:0] d, output logic y, output logic [3:0] q);
+    always @(posedge clk) q <= d | 4'h0;
+    assign y = (clk & a) | 1'b0;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])
