@@ -262,8 +262,11 @@ def _flop_bits(design: Design, nid: int, own: str, others: set[str], selects: se
     Peeled: concat, slice, zero extension, and a mux no select steers, where
     exactly one arm is a flip-flop bit (async2sync puts one in front of every
     asynchronous flip-flop, `arst ? value : q`, and every latch, `en ? d : q`).
-    A select-steered mux is a cut and is never peeled, so whatever is reached
-    is the same flip-flop in both copies. A state named as another RTL register
+    A select-steered mux is a cut and is not peeled, so whatever is reached is
+    the same flip-flop in both copies -- except async2sync's own mux, an arm of
+    which IS the state async2sync made: it is that flip-flop's storage whatever
+    steers the mux, and cuts on a reset expression do steer it (opencores cop,
+    ptc: every async register was lost before this exception). A state named as another RTL register
     (`others`) is that register's flip-flop, read combinationally, not one of
     `own`'s: it is paired under its own name."""
     memo: dict[int, list] = {}
@@ -299,6 +302,10 @@ def _flop_bits(design: Design, nid: int, own: str, others: set[str], selects: se
             out = walk(nd.args[0])[nd.args[2]:nd.args[1] + 1]
         elif nd.op == "uext":
             out = walk(nd.args[0]) + [0] * nd.args[1]
+        elif nd.op == "ite" and any(_async2sync_state(design, x) for x in nd.args[1:]):
+            # async2sync's own mux: the register is the arm that IS its state, even
+            # when the other arm reads flip-flops too (a latch's data input)
+            out = walk(next(x for x in nd.args[1:] if _async2sync_state(design, x)))
         elif nd.op == "ite" and unsteered(nd.args[0]):
             out = []
             for a, b in zip(walk(nd.args[1]), walk(nd.args[2])):
@@ -310,6 +317,11 @@ def _flop_bits(design: Design, nid: int, own: str, others: set[str], selects: se
         return out
 
     return walk(nid)
+
+
+def _async2sync_state(design: Design, nid: int) -> bool:
+    nd = design.nodes[nid]
+    return nd.op == "state" and "$async2sync" in (nd.sym or "")
 
 
 def _node(design: Design, name: str) -> int | None:

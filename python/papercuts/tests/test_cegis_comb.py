@@ -231,6 +231,37 @@ def test_combinational_word_of_a_register_is_not_in_r():
     assert c.run() == {"pc_sel0": False}
 
 
+# An asynchronous register whose reset expression carries a cut: async2sync's
+# read mux is steered by a select, but its arm is still async2sync's own state
+# (opencores cop, ptc: every async register went unmatched without this)
+ASYNC_CUT = """
+1 sort bitvec 1
+2 sort bitvec 2
+3 input 1 rst
+4 input 1 pc_sel0
+5 input 2 d
+6 state 2 $auto$async2sync.cc:1$m
+7 state 2 $auto$async2sync.cc:1$o
+8 zero 1
+9 ite 1 4 8 3
+10 zero 2
+11 ite 2 9 10 6 mod.q
+12 ite 2 3 10 7 orig.q
+13 next 2 6 5
+14 next 2 7 5
+15 neq 1 11 12
+16 bad 15
+"""
+
+
+def test_async_register_behind_a_cut_reset():
+    from papercuts.cegis.registers import match_registers
+    d = Design.from_string(ASYNC_CUT)
+    pairs, unmatched = match_registers(d, ["q"], selects={"pc_sel0"})
+    assert unmatched == [] and [(p.mod.state, p.orig.state) for p in pairs] == [
+        ("$auto$async2sync.cc:1$m", "$auto$async2sync.cc:1$o")], (pairs, unmatched)
+
+
 def test_anonymous_x_refused():
     try:
         CombCegis(Design.from_string(ANON), verbose=False)
