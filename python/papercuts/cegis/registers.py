@@ -96,7 +96,20 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
     for cell in m["cells"].values():
         if cell["type"] not in FF_CELL_TYPES:
             continue
-        names = {owner.get(b) for b in cell["connections"].get("Q", [])}
+        q = cell["connections"].get("Q", [])
+        # Name the register by the nets that ARE its output, bit for bit. Only when
+        # no net matches Q exactly (several cells write one wire) is each bit named
+        # by its first owner. Owners alone mislead when another wire shares most of
+        # the bits: in opencores osdvu `assign rx_byte = rx_data` made the golden
+        # register "rx_byte", while in the muxed copy rx_byte reads the companion
+        # and differs at bit 7, so the golden register was paired with a wire and
+        # the muxed rx_data started free (MiterMismatch with every cut off).
+        # One register per cell, named canonically; its other names are aliases.
+        exact = by_bits.get(tuple(q))
+        if exact:
+            names = {min(exact, key=lambda n: (n.endswith("_papercuts"), len(n), n))}
+        else:
+            names = {owner.get(b) for b in q}
         names.discard(None)
         if not names:
             skipped.append(f"{cell['type']} drives no public wire")
