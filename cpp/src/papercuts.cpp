@@ -54,6 +54,12 @@ RangeBounds classifyRange(const RangeSelectSyntax& sel) {
 // Its select is still RESERVED (see insertMuxes), so the cuts after it keep their
 // indices -- the select is simply a port that drives nothing.
 bool canBuildCompanion(const BitShrinkTarget& target) {
+    // An unpacked array (`reg [31:0] mem [0:63]`) would need a companion per
+    // element; the packed-only companion built below reads `mem[31]` as a bit of
+    // one vector, which is an element select and does not compile (opencores
+    // cr_div). The select stays reserved and inert (mux invariant 8).
+    if (!target.decl->dimensions.empty())
+        return false;
     const DataTypeSyntax* type = nullptr;
     if (auto* dataDecl = target.decl->parent->as_if<DataDeclarationSyntax>())
         type = dataDecl->type;
