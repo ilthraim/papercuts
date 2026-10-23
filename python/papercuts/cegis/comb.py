@@ -38,9 +38,8 @@ X sources are inputs the BTOR2 already pairs across the copies
 skipped that pass and is refused.
 
 Counterexample format: {"inputs": [frame0, ...], "init": {state: value}}. It
-has one frame, or two when some register can only be read through a named node
-(RegPair kind "symbol", async2sync designs): R after the step is then read in a
-second frame, whose inputs can matter.
+has one frame, or two when some paired state has no next function: R after the
+step is then read in a second frame.
 
 Copied from smt_ec/src_comb/cegis_comb.py (rewriting repo 12a5a7f + working
 tree, 2026-10-23); the two copies are maintained separately.
@@ -127,14 +126,15 @@ class CombCegis:
         # (RTL path, width) per register (registers.matched_registers); empty
         # means pair by BTOR2 state name, the synchronous case
         self.registers = list(registers or [])
-        self.pairs, self.unmatched = match_registers(design, [p for p, _ in self.registers] or None)
-        # power-up without a reset: ROM contents fixed, every other pair equal (module docstring)
-        self.power = power_up(design, self.registers or None)
-        # R after the step: read off `next` directly when every pair is a state
-        # with a next function, else from a second frame
-        self.two_frames = any(p.kind != "state" or p.mod not in design.next or p.orig not in design.next
-                              for p in self.pairs)
         self.sel_names = list(selects) if selects is not None else design.input_names(sel_re)
+        # a mux steered by a select is a cut, never read through to a flip-flop
+        self.pairs, self.unmatched = match_registers(design, [p for p, _ in self.registers] or None,
+                                                     selects=set(self.sel_names))
+        # power-up without a reset: ROM contents fixed, every other pair equal (module docstring)
+        self.power = power_up(design, self.registers or None, selects=set(self.sel_names))
+        # R after the step: read off `next` directly when every paired state has a
+        # next function, else from a second frame
+        self.two_frames = any(s not in design.next for p in self.pairs for s in p.states())
         # inert selects pinned to 0 so they are never reported as valid cuts
         self.zero_names = [n for n in (pin_zero or []) if n in design.inputs]
         self.pinned = {n: z3.BitVecVal(0, design.width(n)) for n in self.zero_names}
@@ -175,7 +175,7 @@ class CombCegis:
         f0 = tr.frames[0]
         if self.two_frames:
             return correspondence(tr.frames[1], self.pairs, self.d)
-        return _conj([f0.next[p.mod] == f0.next[p.orig] for p in self.pairs])
+        return _conj([x == y for x, y in (p.next_value(f0) for p in self.pairs)])
 
     def _spec(self, tr: Trace) -> tuple[list, z3.BoolRef]:
         """(hypotheses, goal): constraints and R in frame 0  =>  ok(f0) and R after the step."""

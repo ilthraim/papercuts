@@ -186,107 +186,223 @@ def matched_registers(golden: dict[str, int], muxed: dict[str, int]) -> tuple[li
 
 # ---------------------------------------------------------------- BTOR2 side
 @dataclass(frozen=True)
+class Side:
+    """One copy's half of a register pair: bits [lo, lo+width) of `state`, or the
+    constant `const` when that copy has no flip-flop there."""
+
+    state: str | None
+    lo: int
+    width: int
+    const: int | None = None
+
+    def _bits(self, v: BV) -> BV:
+        return v if self.lo == 0 and v.size() == self.width else z3.Extract(self.lo + self.width - 1, self.lo, v)
+
+    def value(self, fr: Frame) -> BV:
+        if self.state is None:
+            return z3.BitVecVal(self.const, self.width)
+        return self._bits(fr.states[self.state])
+
+    def next_value(self, fr: Frame) -> BV:
+        if self.state is None:
+            return z3.BitVecVal(self.const, self.width)
+        return self._bits(fr.next[self.state])
+
+
+@dataclass(frozen=True)
 class RegPair:
-    """One register of the golden design and its twin in the muxed copy, however
-    the BTOR2 happens to name them.
+    """Flip-flop bits of one RTL register in the golden copy and the same bits in
+    the muxed copy: what Jasper maps to each other at power-up, by name.
 
-    `kind` is "state" when both sides are state elements (a synchronous design:
-    the states are literally `mod.q` and `orig.q`) and "symbol" when they are
-    named nodes instead. `async2sync` replaces each asynchronous flip-flop with
-    an auxiliary register of its own naming, so on such a design nothing at the
-    state level relates to the RTL -- but the wire the register drives keeps its
-    name, and `write_btor -s` labels that node. Reading the symbol gives the
-    register's value in whichever frame is asked."""
+    R may equate nothing else. A register's BTOR2 name labels its output net,
+    and that net is not always a plain read of its flip-flops: yosys can turn an
+    array into one wide wire with some words combinational (opencores
+    video_systems qnr: `s_pipe[0] = z`). Equating such a net equated the logic in
+    front of it, cuts included, so R assumed what the cuts change: a bit-shrink
+    of `iz`, which feeds `s_pipe[0]`, became provable, and the joint Jasper check
+    failed from power-up. So pairs are made bit by bit from the states behind
+    the net (`_flop_bits`), and a bit that is not a flip-flop in both copies is
+    left out of R.
 
-    name: str  # the register, without the mod./orig. prefix
-    kind: str  # "state" | "symbol"
-    mod: str
-    orig: str
+    `kind` is "state" (flip-flops on both sides) or "const": a register that is
+    a flip-flop in one copy and a constant net in the other (yosys removed the
+    flip-flop; hls floyd_warshall ap_done_reg). R then holds the flip-flop to
+    the constant; that is not assumed at power-up, so the base case shows it."""
 
-    def value(self, fr: Frame, design: Design) -> tuple[BV, BV]:
-        if self.kind == "state":
-            return fr.states[self.mod], fr.states[self.orig]
-        return _read(fr, design, self.mod), _read(fr, design, self.orig)
+    name: str  # the register, without the mod./orig. prefix; [hi:lo] when partial
+    mod: Side
+    orig: Side
 
+    @property
+    def kind(self) -> str:
+        return "state" if self.mod.state is not None and self.orig.state is not None else "const"
 
-def _read(fr: Frame, design: Design, name: str) -> BV:
-    """A register's value in a frame: the state itself, or the named node."""
-    return fr.states[name] if name in design.states else fr.values[design.symbols[name]]
+    def states(self) -> set[str]:
+        return {s.state for s in (self.mod, self.orig) if s.state is not None}
 
+    def value(self, fr: Frame, design: Design | None = None) -> tuple[BV, BV]:
+        return self.mod.value(fr), self.orig.value(fr)
 
-def _known(design: Design, name: str) -> bool:
-    return name in design.states or name in design.symbols
-
-
-def states_behind(design: Design, name: str) -> set[str]:
-    """The states a register name reads: itself, or the cone of its named node."""
-    return {name} if name in design.states else design.cone_states(design.symbols[name])
+    def next_value(self, fr: Frame) -> tuple[BV, BV]:
+        return self.mod.next_value(fr), self.orig.next_value(fr)
 
 
-def _resolve(design: Design, name: str) -> str | None:
-    """The one state a register name stands for: itself if it is a state, else
-    the single state in the cone of the node it labels, else None."""
+def _bare(name: str, prefixes: tuple[str, str]) -> str:
+    for p in prefixes:
+        if name.startswith(p):
+            return name[len(p):]
+    return name
+
+
+def _flop_bits(design: Design, nid: int, own: str, others: set[str], selects: set[str],
+               prefixes: tuple[str, str]) -> list:
+    """Per bit of node `nid`, LSB first: (state, bit) when the bit is a plain read
+    of a flip-flop of register `own`, an int when it is a constant, else None.
+
+    Peeled: concat, slice, zero extension, and a mux no select steers, where
+    exactly one arm is a flip-flop bit (async2sync puts one in front of every
+    asynchronous flip-flop, `arst ? value : q`, and every latch, `en ? d : q`).
+    A select-steered mux is a cut and is never peeled, so whatever is reached
+    is the same flip-flop in both copies. A state named as another RTL register
+    (`others`) is that register's flip-flop, read combinationally, not one of
+    `own`'s: it is paired under its own name."""
+    memo: dict[int, list] = {}
+
+    def unsteered(c: int) -> bool:  # no select in the condition's cone (within the frame)
+        seen, stack = set(), [c]
+        while stack:
+            n = stack.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            nd = design.nodes[n]
+            if nd.op == "input" and nd.sym in selects:
+                return False
+            if nd.op in ("input", "const", "state"):
+                continue
+            stack.extend(nd.args[:1] if nd.op in ("slice", "uext", "sext") else nd.args)
+        return True
+
+    def walk(n: int) -> list:
+        if n in memo:
+            return memo[n]
+        nd = design.nodes[n]
+        w = nd.sort
+        if nd.op == "state":
+            bare = _bare(nd.sym, prefixes)
+            out = [None] * w if bare != own and bare in others else [(nd.sym, i) for i in range(w)]
+        elif nd.op == "const":
+            out = [(nd.args[0] >> i) & 1 for i in range(w)]
+        elif nd.op == "concat":
+            out = walk(nd.args[1]) + walk(nd.args[0])
+        elif nd.op == "slice":
+            out = walk(nd.args[0])[nd.args[2]:nd.args[1] + 1]
+        elif nd.op == "uext":
+            out = walk(nd.args[0]) + [0] * nd.args[1]
+        elif nd.op == "ite" and unsteered(nd.args[0]):
+            out = []
+            for a, b in zip(walk(nd.args[1]), walk(nd.args[2])):
+                flops = {x for x in (a, b) if isinstance(x, tuple)}
+                out.append(flops.pop() if len(flops) == 1 else None)
+        else:
+            out = [None] * w
+        memo[n] = out
+        return out
+
+    return walk(nid)
+
+
+def _node(design: Design, name: str) -> int | None:
     if name in design.states:
-        return name
-    if name in design.symbols:
-        cone = design.cone_states(design.symbols[name])
-        if len(cone) == 1:
-            return next(iter(cone))
-    return None
+        return design.states[name][0]
+    return design.symbols.get(name)
+
+
+def _runs(name: str, mb: list, ob: list, own: tuple[str, str]) -> tuple[list[RegPair], list[int]]:
+    """Group a register's per-bit classification (`_flop_bits` of each copy) into
+    RegPairs of contiguous bits. Returns (pairs, bits that are a flip-flop in one
+    copy only and so stay out of R).
+
+    A flip-flop bit is paired with a constant bit only when the flip-flop is the
+    register's own named state (`own`, per copy), the ap_done_reg case. An
+    anonymous flip-flop facing a constant may be another register read through
+    a cut (a bit-shrink makes the read constant), and R must not hold that."""
+    def cls(m, o):
+        if isinstance(m, tuple) and isinstance(o, tuple):
+            return ("ff", m[0], m[1], o[0], o[1])
+        if isinstance(m, tuple) and isinstance(o, int) and m[0] == own[0]:
+            return ("mc", m[0], m[1], None, o)
+        if isinstance(o, tuple) and isinstance(m, int) and o[0] == own[1]:
+            return ("cm", None, m, o[0], o[1])
+        return None
+
+    def follows(c, prev):  # c continues the run ending with prev
+        if c is None or prev is None or c[0] != prev[0] or c[1] != prev[1] or c[3] != prev[3]:
+            return False
+        return ((c[1] is None or c[2] == prev[2] + 1) and (c[3] is None or c[4] == prev[4] + 1))
+
+    classes = [cls(m, o) for m, o in zip(mb, ob)]
+    pairs, lost, k, w = [], [], 0, len(mb)
+    while k < w:
+        c = classes[k]
+        if c is None:
+            if isinstance(mb[k], tuple) or isinstance(ob[k], tuple):
+                lost.append(k)
+            k += 1
+            continue
+        j = k + 1
+        while j < w and follows(classes[j], classes[j - 1]):
+            j += 1
+        n = j - k
+
+        def side(st, first, bits):
+            if st is not None:
+                return Side(st, first, n)
+            return Side(None, 0, n, sum(bits[i] << (i - k) for i in range(k, j)))
+        label = name if (k, j) == (0, w) else f"{name}[{j - 1}:{k}]"
+        pairs.append(RegPair(label, side(c[1], c[2], mb), side(c[3], c[4], ob)))
+        k = j
+    return pairs, lost
 
 
 def match_registers(design: Design, registers: list[str] | None = None,
-                    prefixes: tuple[str, str] = ("mod.", "orig.")) -> tuple[list[RegPair], list[str]]:
+                    prefixes: tuple[str, str] = ("mod.", "orig."),
+                    selects: set[str] | frozenset[str] = frozenset()) -> tuple[list[RegPair], list[str]]:
     """Pair each register of the two copies. Returns (pairs, unmatched).
 
     `registers` is the RTL register list (paths relative to either copy, from
-    register_paths); with it, symbols are searched as well as states, which is
-    what makes this work on an asynchronous-reset design. Given nothing, only
-    the state names are used, which is the synchronous case.
+    register_paths); without it the BTOR2 state names are the list, the
+    synchronous case. Each name is looked up as a state or a named node in both
+    copies and paired bit by bit through `_flop_bits` (RegPair says why).
+    `selects` are the cut selects: a mux they steer is a cut, never peeled.
+    `unmatched` names registers, or bits of them, that are a flip-flop in one
+    copy and nothing pairable in the other: they start free in both copies.
     """
     a, b = prefixes
     names = list(registers) if registers is not None else sorted(
         {n[len(a):] for n in design.states if n.startswith(a)}
         | {n[len(b):] for n in design.states if n.startswith(b)})
+    others = set(names)
     pairs, unmatched = [], []
     for name in names:
         m, o = f"{a}{name}", f"{b}{name}"
-        if m in design.states and o in design.states and design.width(m) == design.width(o):
-            pairs.append(RegPair(name, "state", m, o))
+        mn, on = _node(design, m), _node(design, o)
+        if mn is None or on is None or design.nodes[mn].sort != design.nodes[on].sort:
+            unmatched.append(name)
             continue
-        # One side a state, the other a name reading only that state: yosys merged
-        # the two copies' identical registers into one. Equal by construction.
-        ms_, os__ = _resolve(design, m), _resolve(design, o)
-        if ms_ is not None and ms_ == os__ and design.width(m) == design.width(o):
-            pairs.append(RegPair(name, "state", ms_, os__))
-            continue
-        # A side may be a state while the other is a named node: yosys split one
-        # copy's register into several flip-flops (koios test: the golden pipe_3
-        # became a concatenation of states, the muxed one stayed whole).
-        if _known(design, m) and _known(design, o) and design.width(m) == design.width(o):
-            # Prefer the state the register actually lives in. Its read value is
-            # a function of exactly one state, and pairing THAT is what makes R
-            # inductive: the read passes through the asynchronous reset mux, so
-            # two registers holding different values can still read alike while
-            # reset is asserted, and equality of the reads alone is not preserved
-            # by a step.
-            ms, os_ = states_behind(design, m), states_behind(design, o)
-            if len(ms) == 1 and len(os_) == 1:
-                ms, os_ = ms.pop(), os_.pop()
-                if design.width(ms) == design.width(os_):
-                    pairs.append(RegPair(name, "state", ms, os_))
-                    continue
-            pairs.append(RegPair(name, "symbol", m, o))
-            continue
-        unmatched.append(name)
+        got, lost = _runs(name, _flop_bits(design, mn, name, others, selects, prefixes),
+                          _flop_bits(design, on, name, others, selects, prefixes), (m, o))
+        pairs += got
+        if lost:
+            unmatched.append(name if len(lost) == design.nodes[mn].sort else f"{name} bits {lost}")
     return pairs, unmatched
 
 
-def correspondence(fr: Frame, pairs: list[RegPair], design: Design) -> z3.BoolRef:
+def correspondence(fr: Frame, pairs: list[RegPair], design: Design | None = None) -> z3.BoolRef:
     """R: every matched register holds the same value in this frame."""
     out = []
     for p in pairs:
-        x, y = p.value(fr, design)
+        x, y = p.value(fr)
         out.append(x == y)
     return _conj(out)
 
@@ -311,7 +427,7 @@ class PowerUp:
     def constraints(self, fr: Frame, design: Design) -> list[z3.BoolRef]:
         out = [fr.states[s] == z3.BitVecVal(v, design.width(s)) for s, v in self.consts.items() if s in fr.states]
         for p in self.equal:
-            x, y = p.value(fr, design)
+            x, y = p.value(fr)
             out.append(x == y)
         return out
 
@@ -331,20 +447,14 @@ def rom_values(design: Design) -> dict[str, int]:
     return out
 
 
-def power_up(design: Design, registers: list[tuple[str, int]] | None = None) -> PowerUp:
+def power_up(design: Design, registers: list[tuple[str, int]] | None = None,
+             selects: set[str] | frozenset[str] = frozenset()) -> PowerUp:
     """The PowerUp for this miter. `registers` is the RTL (path, width) list
     (matched_registers); without it the BTOR2 state names are the paths, the
     synchronous case."""
     consts = rom_values(design)
-    pairs, _ = match_registers(design, [p for p, _ in registers] if registers else None)
+    pairs, _ = match_registers(design, [p for p, _ in registers] if registers else None, selects=selects)
     # Only flip-flops on both sides power up "arbitrary but equal" (Jasper's
-    # auto-mapping pairs flops). A side with no state behind it -- a net yosys
-    # folded to a constant -- does not, so such a pair is left to the base case.
-    pairs = [p for p in pairs if states_behind(design, p.mod) and states_behind(design, p.orig)]
-
-    def states_of(p: RegPair) -> set[str]:
-        if p.kind == "state":
-            return {p.mod, p.orig}
-        return states_behind(design, p.mod) | states_behind(design, p.orig)
-
-    return PowerUp(consts, [p for p in pairs if not (states_of(p) & set(consts))])
+    # auto-mapping pairs flops). A constant side -- a net yosys folded to a
+    # constant -- does not, so such a pair is left to the base case.
+    return PowerUp(consts, [p for p in pairs if p.kind == "state" and not (p.states() & set(consts))])

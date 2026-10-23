@@ -117,8 +117,8 @@ def test_counterexample_need_not_be_reachable():
     cex = c.verify({"pc_sel0": True, "pc_sel1": False})
     assert cex is not None and len(cex["inputs"]) == 1
     p = c.pairs[0]
-    assert cex["init"][p.mod] >> 7 & 1
-    assert cex["init"][p.mod] == cex["init"][p.orig]
+    assert cex["init"][p.mod.state] >> 7 & 1
+    assert cex["init"][p.mod.state] == cex["init"][p.orig.state]
 
 
 def test_base_case_catches_rom_mismatch():
@@ -182,9 +182,53 @@ def test_state_paired_with_split_register():
     from papercuts.cegis.registers import match_registers
     d = Design.from_string(SPLIT)
     pairs, unmatched = match_registers(d, ["r"])
-    assert unmatched == [] and len(pairs) == 1 and pairs[0].kind == "symbol", (pairs, unmatched)
+    # paired flip-flop to flip-flop, slice by slice
+    assert unmatched == [] and [(p.kind, p.orig.state) for p in pairs] == [("state", "orig.r_lo"), ("state", "orig.r_hi")], pairs
     c = CombCegis(d, verbose=False, selects=[], registers=[("r", 4)])
-    assert c.two_frames and c.verify({}) is None  # the copies agree with R in place
+    assert c.verify({}) is None  # the copies agree with R in place
+
+
+# Register `w` is one net whose high half is a flip-flop and whose low half is
+# combinational: a read of register `a`, which the muxed copy reads through a
+# bit-shrink of a[1] (opencores video_systems qnr: s_pipe[0] = z = iz). a[1] is
+# always 0 after the first cycle but free at power-up, so the cut is invalid
+# from power-up (Jasper's cex). Equating the whole of `w` put a[1] == 0 into R
+# and the cut came out valid.
+COMB_WORD = """
+1 sort bitvec 1
+2 sort bitvec 2
+3 sort bitvec 4
+4 input 2 d
+5 input 1 pc_sel0
+6 state 2 mod.a
+7 state 2 orig.a
+8 state 2 mod.wff
+9 state 2 orig.wff
+10 slice 1 4 0 0
+11 uext 2 10 1
+12 next 2 6 11
+13 next 2 7 11
+14 slice 1 6 1 1
+15 zero 1
+16 ite 1 5 15 14
+17 slice 1 6 0 0
+18 concat 2 16 17
+19 concat 3 8 18 mod.w
+20 concat 3 9 7 orig.w
+21 next 2 8 18
+22 next 2 9 7
+23 neq 1 8 9
+24 bad 23
+"""
+
+
+def test_combinational_word_of_a_register_is_not_in_r():
+    from papercuts.cegis.registers import match_registers
+    d = Design.from_string(COMB_WORD)
+    pairs, unmatched = match_registers(d, ["a", "w"], selects={"pc_sel0"})
+    assert sorted(p.name for p in pairs) == ["a", "w[3:2]"] and unmatched == [], (pairs, unmatched)
+    c = CombCegis(d, verbose=False, selects=["pc_sel0"], registers=[("a", 2), ("w", 4)])
+    assert c.run() == {"pc_sel0": False}
 
 
 def test_anonymous_x_refused():
