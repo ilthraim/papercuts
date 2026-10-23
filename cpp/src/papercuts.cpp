@@ -53,6 +53,62 @@ RangeBounds classifyRange(const RangeSelectSyntax& sel) {
 // parameterized dimension (`[W-1:0]`) is enumerated as a cut but cannot be muxed.
 // Its select is still RESERVED (see insertMuxes), so the cuts after it keep their
 // indices -- the select is simply a port that drives nothing.
+// Names written by a blocking procedural assignment (`x = ...` or `x += ...` in an
+// always/initial/final block). A companion wire `x_papercuts` follows the
+// register, so a read placed after such a write in the same block would see the
+// old value where the original sees the new one: the muxed design then differs
+// from the original with every select off (opencores osdvu,
+// `tx_clk_divider = tx_clk_divider - 1; if (!tx_clk_divider)`). Companion muxers
+// leave such signals inert. Conservative: every identifier in the left-hand side
+// counts, index expressions included.
+class BlockingWriteCollector : public SyntaxVisitor<BlockingWriteCollector> {
+    struct NameCollector : public SyntaxVisitor<NameCollector> {
+        std::unordered_set<std::string>& out;
+        explicit NameCollector(std::unordered_set<std::string>& out) : out(out) {}
+        void handle(const IdentifierNameSyntax& n) { out.emplace(n.identifier.valueText()); }
+        void handle(const IdentifierSelectNameSyntax& n) {
+            out.emplace(n.identifier.valueText());
+            visitDefault(n);
+        }
+    };
+
+    static bool inProcedure(const SyntaxNode& node) {
+        for (const SyntaxNode* p = node.parent; p; p = p->parent) {
+            switch (p->kind) {
+                case SyntaxKind::AlwaysBlock:
+                case SyntaxKind::AlwaysCombBlock:
+                case SyntaxKind::AlwaysFFBlock:
+                case SyntaxKind::AlwaysLatchBlock:
+                case SyntaxKind::InitialBlock:
+                case SyntaxKind::FinalBlock:
+                    return true;
+                case SyntaxKind::ContinuousAssign:
+                    return false;
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
+
+public:
+    std::unordered_set<std::string> names;
+    void handle(const BinaryExpressionSyntax& node) {
+        if (SyntaxFacts::isAssignmentOperator(node.kind) &&
+            node.kind != SyntaxKind::NonblockingAssignmentExpression && inProcedure(node)) {
+            NameCollector nc(names);
+            node.left->visit(nc);
+        }
+        visitDefault(node);
+    }
+};
+
+std::unordered_set<std::string> blockingProceduralTargets(const std::shared_ptr<SyntaxTree>& tree) {
+    BlockingWriteCollector c;
+    tree->root().visit(c);
+    return std::move(c.names);
+}
+
 bool canBuildCompanion(const BitShrinkTarget& target) {
     // An unpacked array (`reg [31:0] mem [0:63]`) would need a companion per
     // element; the packed-only companion built below reads `mem[31]` as a bit of
@@ -785,13 +841,15 @@ void BitMuxer::initialize(const std::shared_ptr<SyntaxTree> tree,
     // to the cutter and invisible here, and the two band widths diverge.
     BitShrinkCollector collector(symbolicRanges);
     shrinkNodes = collector.getFoundNodes(tree);
+    auto blocking = blockingProceduralTargets(tree);
     for (size_t i = 0; i < shrinkNodes.size(); ++i) {
         // `i` is the target's position in the cut order and fixes its select, so a
         // target that cannot be muxed still consumes its index. It must NOT reach
         // muxedNames, though: that set redirects reads onto the companion wire, and
         // redirecting onto a wire no declaration was emitted for produces source
         // that references an undeclared signal.
-        if (!canBuildCompanion(shrinkNodes[i]))
+        if (!canBuildCompanion(shrinkNodes[i]) ||
+            blocking.contains(std::string(shrinkNodes[i].decl->name.valueText())))
             continue;
         targetsByDecl[shrinkNodes[i].decl].push_back(i);
         muxedNames.insert(std::string(shrinkNodes[i].decl->name.valueText()));
@@ -1101,7 +1159,10 @@ void ConstForceMuxer::initialize(const std::shared_ptr<SyntaxTree> tree, const P
     ConstForceCollector collector;
     auto found = collector.getFoundNodes(tree);
     declCount = found.size();
+    auto blocking = blockingProceduralTargets(tree);  // see BlockingWriteCollector
     for (size_t i = 0; i < found.size(); ++i) {
+        if (blocking.contains(std::string(found[i]->name.valueText())))
+            continue;  // reserved, inert
         ordinalByDecl[found[i]] = i;
         muxedNames.insert(std::string(found[i]->name.valueText()));
     }

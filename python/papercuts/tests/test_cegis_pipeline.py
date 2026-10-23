@@ -187,6 +187,30 @@ endmodule
         DESIGN = saved
 
 
+def test_blocking_read_after_write():
+    # opencores osdvu: a read after a blocking write in the same block, through a
+    # companion, differed from the original with every cut off (MiterMismatch)
+    design = """
+module top(input logic clk, input logic rst, output logic z, output logic [3:0] c);
+    reg [3:0] cnt;
+    always @(posedge clk) begin
+        if (rst) cnt = 4'd9;
+        else cnt = cnt - 1;
+        z <= (cnt == 4'd0) & 1'b1;
+    end
+    assign c = cnt;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])
