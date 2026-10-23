@@ -42,7 +42,7 @@ import sys
 from dataclasses import dataclass
 
 import pyslang
-from pyslang.ast import ASTContext, Compilation, InstanceSymbol, LookupLocation
+from pyslang.ast import ASTContext, Compilation, CompilationOptions, InstanceSymbol, LookupLocation
 from pyslang.parsing import PreprocessorOptions
 from pyslang.syntax import SyntaxTree
 
@@ -1261,18 +1261,24 @@ def make_parse_env(incdirs=(), defines=()):
     return sm, opts
 
 
-def build_compilation_from(trees):
+def build_compilation_from(trees, top=None):
     """Compilation over already-parsed trees, so callers holding them re-use rather
-    than re-parse. The trees' SourceManager must outlive the Compilation."""
-    comp = Compilation()
+    than re-parse. The trees' SourceManager must outlive the Compilation.
+    ``top`` names the top module; without it, every uninstantiated module is one."""
+    if top:
+        opts = CompilationOptions()
+        opts.topModules = {top}
+        comp = Compilation(pyslang.Bag([opts]))
+    else:
+        comp = Compilation()
     for tree in trees:
         comp.addSyntaxTree(tree)
     return comp
 
 
-def build_compilation(files, incdirs=(), defines=()):
+def build_compilation(files, incdirs=(), defines=(), top=None):
     sm, opts = make_parse_env(incdirs, defines)
-    return build_compilation_from(SyntaxTree.fromFile(p, sm, opts) for p in files)
+    return build_compilation_from((SyntaxTree.fromFile(p, sm, opts) for p in files), top=top)
 
 
 def report_diagnostics(comp):
@@ -1334,7 +1340,7 @@ class ElaboratedDesign:
 
 
 def elaborate_design(files, *, flatten=True, ignore=(),
-                     fold_constants=True, incdirs=(), defines=()):
+                     fold_constants=True, incdirs=(), defines=(), top=None):
     """Elaborate ``files`` and re-emit the whole design as one source blob.
 
     ``ignore`` accepts fnmatch globs or bare names; matching module definitions
@@ -1346,9 +1352,12 @@ def elaborate_design(files, *, flatten=True, ignore=(),
     :class:`ElaborationError` on compilation errors and ``EmitError`` on an
     unhandled construct -- callers gate on both.
 
+    ``top`` picks the top module when the sources leave more than one module
+    uninstantiated (helpers nothing uses); only its hierarchy is elaborated.
+
     Returns an :class:`ElaboratedDesign` carrying the source and the top module
     name (the pipeline needs the top to wire the elaborated-vs-original gate)."""
-    comp = build_compilation(files, incdirs=incdirs, defines=defines)
+    comp = build_compilation(files, incdirs=incdirs, defines=defines, top=top)
     if report_diagnostics(comp):
         raise ElaborationError("input has compilation errors; aborting")
 

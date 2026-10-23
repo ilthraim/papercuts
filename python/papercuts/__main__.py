@@ -621,11 +621,11 @@ async def main():
         "--top",
         default=None,
         metavar="NAME",
-        help="Name of the design top. Only used with --in-situ, where it makes the "
-        "read-only elaboration optional: without it the top is discovered by "
-        "elaborating, with it a design that cannot be elaborated is still cuttable "
-        "(bit-shrinks on parameterized ranges are then skipped, since their real "
-        "widths are unknown).",
+        help="Name of the design top, for sources that leave more than one module "
+        "uninstantiated (unused helpers): only its hierarchy is elaborated and cut. "
+        "Under --in-situ it also makes the read-only elaboration optional: a design "
+        "that cannot be elaborated is still cuttable (bit-shrinks on parameterized "
+        "ranges are then skipped, since their real widths are unknown).",
     )
     parser.add_argument(
         "--fold-constants",
@@ -738,9 +738,6 @@ async def main():
     elif args.iterative_bitshrink is None:
         args.iterative_bitshrink = True
 
-    if args.top and not args.in_situ:
-        parser.error("--top only applies to --in-situ; the elaborated front end "
-                     "discovers the top itself.")
 
     backend = backend_cls.from_args(args) if args.check_equivalence else None
 
@@ -882,13 +879,14 @@ async def main():
         try:
             elab = elaborate_design(args.input_files, flatten=True, ignore=exclude_patterns,
                                     fold_constants=args.fold_constants,
-                                    incdirs=incdirs, defines=defines)
+                                    incdirs=incdirs, defines=defines, top=args.top)
         except (ElaborationError, EmitError) as e:
             raise SystemExit(f"FATAL: elaboration failed: {e}")
 
         if len(elab.tops) != 1:
             raise SystemExit(
-                f"FATAL: expected exactly one top-level instance, got {elab.tops or 'none'}."
+                f"FATAL: expected exactly one top-level instance, got {elab.tops or 'none'}. "
+                f"Pass --top NAME to choose one."
             )
         top_name = elab.top
         status(f"Elaborated top: {top_name}")
