@@ -40,6 +40,15 @@ FRONT_END = ("plugin -i slang; read_slang {files} --top {top}; prep -top {top} -
              "chformal -lower; async2sync; opt -nodffe -nosdff; dffunmap; write_rtlil {out}")
 
 
+def script_file(script: str, path: str) -> str:
+    """Write a yosys script (`;`-separated commands) to `path`, one per line. A
+    design elaborated into hundreds of module files does not fit on a command
+    line (opencores tiny_aes_128: "Argument list too long: 'yosys'")."""
+    with open(path, "w") as f:
+        f.write("\n".join(c.strip() for c in script.split(";")) + "\n")
+    return path
+
+
 class DesignAssertsPresent(ValueError):
     pass
 
@@ -66,7 +75,8 @@ def module_info(sv_files: list[str], top: str, workdir: str) -> ModuleInfo:
     out = os.path.join(workdir, f"{top}.json")
     log = os.path.join(workdir, f"{top}.yosys.log")
     script = f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top}; prep -top {top}; write_json {out}"
-    r = subprocess.run(["yosys", "-q", "-l", log, "-p", script], capture_output=True, text=True)
+    r = subprocess.run(["yosys", "-q", "-l", log, "-s", script_file(script, os.path.join(workdir, f"{top}.ys"))],
+                       capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):
         raise RuntimeError(f"yosys failed elaborating {top} from {sv_files}:\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
     with open(out) as f:
@@ -201,8 +211,8 @@ def build_btor(rtl: list[str], top: str, out_base: str) -> XReport:
     Also left behind: `<out_base>.il` (the front end's RTLIL), `<out_base>_x.il`
     (after X pairing), `<out_base>.xpair.json` (the XReport) and
     `<out_base>.pyosys.log`."""
-    r = subprocess.run(["yosys", "-q", "-p", FRONT_END.format(files=" ".join(rtl), top=top, out=f"{out_base}.il")],
-                       capture_output=True, text=True)
+    script = FRONT_END.format(files=" ".join(rtl), top=top, out=f"{out_base}.il")
+    r = subprocess.run(["yosys", "-q", "-s", script_file(script, f"{out_base}.front.ys")], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"yosys front end failed on {top}:\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
     d = ys.Design()

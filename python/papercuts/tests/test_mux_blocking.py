@@ -36,7 +36,25 @@ def run():
     assert "r_papercuts" in text, text
     reserved = [i for i, (t, _) in enumerate(cuts) if t.startswith(("bitshrink", "force-const"))]
     assert set(reserved) - set(inserted), (reserved, sorted(inserted))  # cnt's selects are inert
-    print("test_mux_blocking: OK (blocking-written signal inert, nonblocking one muxed)")
+    # a function-local variable gets no companion: its `assign` would land inside
+    # the function (opencores aes_cipher mix_col, video_systems_qnr assign_s)
+    fsrc = """
+module f(input logic [7:0] a, output logic [7:0] y);
+    function automatic logic [7:0] g(input logic [7:0] x);
+        reg [7:0] t;
+        t = x ^ 8'h0F;
+        g = t;
+    endfunction
+    assign y = g(a);
+endmodule
+"""
+    from papercuts.elaborator import build_compilation_from, report_diagnostics
+    ftree, _ = insert_muxes_report(SyntaxTree.fromText(fsrc), True, True, True, caseMux=True,
+                                   binopMux=True, constForceMux=True)
+    ftext = print_tree(ftree)
+    assert "t_papercuts" not in ftext, ftext
+    assert not report_diagnostics(build_compilation_from([SyntaxTree.fromText(ftext)])), ftext
+    print("test_mux_blocking: OK (blocking-written signal inert, nonblocking one muxed, function local inert)")
 
 
 if __name__ == "__main__":

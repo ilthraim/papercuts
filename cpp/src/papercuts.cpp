@@ -103,6 +103,33 @@ public:
     }
 };
 
+// A companion is a module-level wire with a continuous assign. A declarator in
+// a function, task or procedural block cannot get one: the inserted `assign`
+// lands inside the subroutine and the muxed source no longer compiles (opencores
+// aes_cipher mix_col, video_systems_qnr assign_s).
+bool atModuleScope(const DeclaratorSyntax& decl) {
+    for (const SyntaxNode* p = decl.parent; p; p = p->parent) {
+        switch (p->kind) {
+            case SyntaxKind::FunctionDeclaration:
+            case SyntaxKind::TaskDeclaration:
+            case SyntaxKind::SequentialBlockStatement:
+            case SyntaxKind::ParallelBlockStatement:
+            case SyntaxKind::AlwaysBlock:
+            case SyntaxKind::AlwaysCombBlock:
+            case SyntaxKind::AlwaysFFBlock:
+            case SyntaxKind::AlwaysLatchBlock:
+            case SyntaxKind::InitialBlock:
+            case SyntaxKind::FinalBlock:
+                return false;
+            case SyntaxKind::ModuleDeclaration:
+                return true;
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
 std::unordered_set<std::string> blockingProceduralTargets(const std::shared_ptr<SyntaxTree>& tree) {
     BlockingWriteCollector c;
     tree->root().visit(c);
@@ -848,7 +875,7 @@ void BitMuxer::initialize(const std::shared_ptr<SyntaxTree> tree,
         // muxedNames, though: that set redirects reads onto the companion wire, and
         // redirecting onto a wire no declaration was emitted for produces source
         // that references an undeclared signal.
-        if (!canBuildCompanion(shrinkNodes[i]) ||
+        if (!canBuildCompanion(shrinkNodes[i]) || !atModuleScope(*shrinkNodes[i].decl) ||
             blocking.contains(std::string(shrinkNodes[i].decl->name.valueText())))
             continue;
         targetsByDecl[shrinkNodes[i].decl].push_back(i);
@@ -1161,7 +1188,7 @@ void ConstForceMuxer::initialize(const std::shared_ptr<SyntaxTree> tree, const P
     declCount = found.size();
     auto blocking = blockingProceduralTargets(tree);  // see BlockingWriteCollector
     for (size_t i = 0; i < found.size(); ++i) {
-        if (blocking.contains(std::string(found[i]->name.valueText())))
+        if (blocking.contains(std::string(found[i]->name.valueText())) || !atModuleScope(*found[i]))
             continue;  // reserved, inert
         ordinalByDecl[found[i]] = i;
         muxedNames.insert(std::string(found[i]->name.valueText()));

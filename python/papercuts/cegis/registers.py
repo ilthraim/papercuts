@@ -77,7 +77,9 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
     out = os.path.join(workdir, f"regs_{tag or top}.json")
     script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top}; "
               f"prep -top {top} -flatten; memory_map; write_json {out}")
-    r = subprocess.run(["yosys", "-q", "-p", script], capture_output=True, text=True)
+    from papercuts.cegis.netlist import script_file
+    r = subprocess.run(["yosys", "-q", "-s", script_file(script, os.path.join(workdir, f"regs_{tag or top}.ys"))],
+                       capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):
         raise RuntimeError(f"yosys failed listing registers of {top}:\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
     with open(out) as f:
