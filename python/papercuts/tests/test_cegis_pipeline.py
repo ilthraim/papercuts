@@ -233,6 +233,32 @@ endmodule
         DESIGN = saved
 
 
+def test_full_case_pragma():
+    # opencores datetime: `// synopsys full_case` makes uncovered values
+    # don't-cares; the elaborator must keep it, and the CEGIS side must still see
+    # the muxed copy equal to the original with every cut off
+    design = """
+module top(input logic [1:0] s, input logic [3:0] a, output logic [3:0] y);
+    always @(s or a)
+        case (s) // synopsys full_case parallel_case
+            2'd0: y = a;
+            2'd1: y = a & 4'hF;
+            2'd2: y = ~a;
+        endcase
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+            with open(os.path.join(tmp, "outputs", "elab", "top_elaborated.sv")) as f:
+                assert "synopsys full_case parallel_case" in f.read()
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])

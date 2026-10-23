@@ -1112,7 +1112,7 @@ class Emitter:
         keyword = CASE_KEYWORD[stmt.condition.name]
         check = UNIQUE_PRIORITY[stmt.check.name]
         inside = " inside" if stmt.condition.name == "Inside" else ""
-        self.emit(f"{check}{keyword} ({self.expr(stmt.expr)}){inside}")
+        self.emit(f"{check}{keyword} ({self.expr(stmt.expr)}){inside}{self._case_pragma(stmt)}")
         self.level += 1
         for item in stmt.items:
             labels = ", ".join(self.expr(e) for e in item.expressions)
@@ -1121,6 +1121,21 @@ class Emitter:
             self._emit_statement_open(stmt.defaultCase, prefix="default: ")
         self.level -= 1
         self.emit("endcase")
+
+    _CASE_PRAGMA = re.compile(r"(?://|/\*)\s*(synopsys|synthesis)\s+((?:full_case|parallel_case)(?:\s+(?:full_case|parallel_case))*)")
+
+    def _case_pragma(self, stmt):
+        """`// synopsys full_case parallel_case` on the original case line, which
+        the tools honor: uncovered values are don't-cares instead of a latch. It
+        is a comment -- trivia of the first item -- so a re-emitted case lost it,
+        and the elaborated design inferred a latch the original does not have
+        (opencores datetime: gate cex; 39 dataset designs use the pragma)."""
+        syn = getattr(stmt, "syntax", None)
+        items = getattr(syn, "items", None) if syn is not None else None
+        if not items:
+            return ""
+        m = self._CASE_PRAGMA.search(str(items[0]).split(":", 1)[0])
+        return f"  // {m.group(1)} {m.group(2)}" if m else ""
 
     def _stmt_ForLoop(self, stmt):
         inits = ", ".join(self._assignment_inner(i) for i in stmt.initializers)
