@@ -580,6 +580,8 @@ class Emitter:
             self._emit_procedural_block(m)
         elif k == "Instance":
             self._emit_instance(m)
+        elif k == "PrimitiveInstance":
+            self._emit_primitive(m)
         elif k == "GenerateBlockArray":
             self._emit_generate_array(m)
         elif k == "GenerateBlock":
@@ -594,6 +596,39 @@ class Emitter:
             return
         else:
             raise EmitError(f"unsupported module member kind: {k!r}")
+
+    # --- gate primitives -----------------------------------------------------
+
+    # Gate primitives (gate-level netlists such as ISCAS85) are emitted as the
+    # continuous assigns they are equivalent to, which makes their logic
+    # cuttable like any other expression. The elaboration gate proves the
+    # rewrite on every run. Tristate (bufif/notif), switch and user-defined
+    # primitives, primitive arrays and drive strengths have no such plain form
+    # and are refused.
+    _GATE_OPS = {"and": ("&", False), "nand": ("&", True), "or": ("|", False),
+                 "nor": ("|", True), "xor": ("^", False), "xnor": ("^", True)}
+
+    def _emit_primitive(self, m):
+        name = m.primitiveType.name
+        if list(m.arrayPath):
+            raise EmitError(f"unsupported primitive instance array: {name} {m.arrayName}")
+        if any(s is not None for s in (m.driveStrength or ())):
+            raise EmitError(f"unsupported drive strength on primitive {name} {m.name}")
+        conns = list(m.portConnections)
+
+        def target(c):  # output terminals arrive as `out = <empty>` assignments
+            return self.expr(c.left if kind(c) == "Assignment" else c)
+
+        if name in self._GATE_OPS:
+            op, invert = self._GATE_OPS[name]
+            body = f" {op} ".join(f"({self.expr(c)})" for c in conns[1:])
+            self.emit(f"assign {target(conns[0])} = {f'~({body})' if invert else body};")
+        elif name in ("buf", "not"):
+            src = f"({self.expr(conns[-1])})"
+            for c in conns[:-1]:
+                self.emit(f"assign {target(c)} = {src if name == 'buf' else '~' + src};")
+        else:
+            raise EmitError(f"unsupported primitive: {name} {m.name}")
 
     # --- declarations --------------------------------------------------------
 
