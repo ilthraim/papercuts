@@ -1324,11 +1324,13 @@ ExpressionSyntax& ExprMuxer::muxPredicate(const ConditionalPredicateSyntax& pred
     std::string sel1 = "pc_sel" + std::to_string(sel + 1);
 
     // The original predicate expression is reused as a node, so a mux nested inside
-    // it still resolves when the tree is cloned.
-    auto& inner = makeBinary(SyntaxKind::BinaryAndExpression, makeNot(makeIdentExpr(sel0)),
-                             TokenKind::And, "&", makeParen(*pred.conditions[0]->expr, true));
-    return makeParen(makeBinary(SyntaxKind::BinaryOrExpression, makeIdentExpr(sel1), TokenKind::Or,
-                                "|", makeParen(inner, true)));
+    // it still resolves when the tree is cloned. Logical operators, not bitwise: a
+    // condition is true when ANY bit is set, and `!sel0 & (cond)` with a multi-bit
+    // cond kept only bit 0 (`if (tx_bits_remaining)` false at 4; opencores osdvu).
+    auto& inner = makeBinary(SyntaxKind::LogicalAndExpression, makeNot(makeIdentExpr(sel0)),
+                             TokenKind::DoubleAnd, "&&", makeParen(*pred.conditions[0]->expr, true));
+    return makeParen(makeBinary(SyntaxKind::LogicalOrExpression, makeIdentExpr(sel1), TokenKind::DoubleOr,
+                                "||", makeParen(inner, true)));
 }
 
 void ExprMuxer::handle(const ConditionalExpressionSyntax& node) {

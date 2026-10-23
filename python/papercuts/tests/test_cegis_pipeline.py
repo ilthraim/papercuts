@@ -211,6 +211,28 @@ endmodule
         DESIGN = saved
 
 
+def test_multibit_conditions():
+    # opencores osdvu: the if/ternary mux guard `sel1 | (!sel0 & (cond))` kept only
+    # bit 0 of a multi-bit cond, so the muxed design differed with every cut off
+    design = """
+module top(input logic clk, input logic [3:0] n, input logic [5:0] c, output logic [1:0] y, output logic z);
+    always @(posedge clk) begin
+        if (n) z <= 1'b1;
+        else z <= 1'b0;
+    end
+    assign y = c ? 2'd2 : 2'd0;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])
