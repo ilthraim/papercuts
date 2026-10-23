@@ -51,6 +51,7 @@ class Selection:
     miter_sv: str
     btor: str
     xpair: XReport
+    control_net: list[Cut] = field(default_factory=list)  # testable, but reach a clock/async control: held off
     registers: list[tuple[str, int]] = field(default_factory=list)  # compared, as (path, width)
     registers_dropped: list[str] = field(default_factory=list)  # and why each other one was not
     stats: list[dict] = field(default_factory=list)  # per loop iteration
@@ -121,8 +122,12 @@ def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: floa
     unknown = sorted(set(pin_off) - {c.id for c in man.testable})
     if unknown:
         raise ManifestError(f"pin_off names cuts that are not testable: {unknown[:10]}")
-    testable = [c for c in man.testable if c.id not in set(pin_off)]
-    pinned = [c for c in man.testable if c.id in set(pin_off)]
+    # selects reaching a clock or asynchronous control are invisible to the model
+    # (netlist.control_inputs): held off like pin_off, reported separately
+    control = [c for c in man.testable if c.port in set(xrep.control_inputs) and c.id not in set(pin_off)]
+    held = set(pin_off) | {c.id for c in control}
+    testable = [c for c in man.testable if c.id not in held]
+    pinned = [c for c in man.testable if c.id in held]
     missing = [c.port for c in testable + pinned if c.port not in design.inputs]
     if missing:
         raise ManifestError(f"select port(s) the manifest marks inserted are not inputs of the miter's "
@@ -155,7 +160,9 @@ def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: floa
     return Selection(
         on_cuts=sorted((man.cut_of(p) for p, v in res.items() if v), key=key),
         off_cuts=sorted((man.cut_of(p) for p, v in res.items() if not v), key=key),
-        untested=sorted(man.untested, key=key), pinned_off=sorted(pinned, key=key), manifest=man,
+        untested=sorted(man.untested, key=key), manifest=man,
+        pinned_off=sorted((c for c in pinned if c not in control), key=key),
+        control_net=sorted(control, key=key),
         base_ok=bool(loop.base_ok), base_evidence=loop.base_evidence,
         miter_sv=miter_sv, btor=base + ".btor", xpair=xrep, registers=registers,
         registers_dropped=unpaired, stats=loop.stats, total_s=loop.total_s, workdir=workdir,

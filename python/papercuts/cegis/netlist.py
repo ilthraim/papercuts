@@ -36,8 +36,68 @@ from papercuts.elaborator import ident
 # memory_map: btor2z3 has no array sorts. async2sync + dffunmap: every flip-flop
 # becomes a plain synchronous state, which BTOR2's state/next/init model needs.
 # opt runs before dffunmap so it cannot re-merge enables.
+# {pre} is written before async2sync/dffunmap erase clocks: control_inputs reads it.
 FRONT_END = ("plugin -i slang; read_slang {files} --top {top}; prep -top {top} -flatten; memory_map; "
-             "chformal -lower; async2sync; opt -nodffe -nosdff; dffunmap; write_rtlil {out}")
+             "chformal -lower; write_rtlil {pre}; async2sync; opt -nodffe -nosdff; dffunmap; write_rtlil {out}")
+
+# Flip-flop and latch pins that decide WHEN a cell changes, not what it stores.
+_CONTROL_PORTS = {"CLK", "ARST", "SET", "CLR", "ALOAD"}
+_LATCHES = {"$dlatch", "$adlatch", "$dlatchsr"}
+
+
+def control_inputs(design) -> list[str]:
+    """Top-level inputs that reach a flip-flop's clock, asynchronous set/reset or
+    load, or a latch's enable, through any logic, registers included.
+
+    The BTOR2 model steps every register once per step (async2sync + dffunmap),
+    so logic that only decides when a register changes is invisible to it: a cut
+    there looks free and is not. opencores ptc: three cuts rewrote clock-select
+    muxes (`cntr_clk = rptc_ctrl[1] ? eclk_gate : wb_clk_i` -> `eclk_gate`); the
+    loop accepted them and the joint Jasper check found the difference. A select
+    in this set must not be searched."""
+    m = design.top_module()
+    parent: dict[tuple, tuple] = {}
+
+    def find(k):
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def bits(sig):
+        return [(b.wire.name.str(), b.offset) for b in sig.to_sigbit_vector() if b.wire is not None]
+
+    for lhs, rhs in m.connections_:
+        for lb, rb in zip(lhs.to_sigbit_vector(), rhs.to_sigbit_vector()):
+            if lb.wire is not None and rb.wire is not None:
+                parent[find((lb.wire.name.str(), lb.offset))] = find((rb.wire.name.str(), rb.offset))
+    driver: dict[tuple, list] = {}  # alias root -> input bits of the cell driving it
+    starts = []
+    for cell in m.cells_.values():
+        ins, outs = [], []
+        for port, sig in cell.connections_.items():
+            (ins if cell.input(port) else outs).extend(bits(sig))
+            name = port.str().lstrip("\\")
+            if cell.input(port) and (name in _CONTROL_PORTS or (name == "EN" and cell.type.str() in _LATCHES)):
+                starts.extend(bits(sig))
+        for b in outs:
+            driver.setdefault(find(b), []).extend(ins)
+    inputs = {}
+    for w in m.wires_.values():
+        if w.port_input:
+            for i in range(w.width):
+                inputs[find((w.name.str(), i))] = w.name.str().lstrip("\\")
+    seen, found, todo = set(), set(), [find(b) for b in starts]
+    while todo:
+        r = todo.pop()
+        if r in seen:
+            continue
+        seen.add(r)
+        if r in inputs:
+            found.add(inputs[r])
+        todo.extend(find(b) for b in driver.get(r, ()))
+    return sorted(found)
 
 
 def script_file(script: str, path: str) -> str:
@@ -211,14 +271,19 @@ def build_btor(rtl: list[str], top: str, out_base: str) -> XReport:
     Also left behind: `<out_base>.il` (the front end's RTLIL), `<out_base>_x.il`
     (after X pairing), `<out_base>.xpair.json` (the XReport) and
     `<out_base>.pyosys.log`."""
-    script = FRONT_END.format(files=" ".join(rtl), top=top, out=f"{out_base}.il")
+    script = FRONT_END.format(files=" ".join(rtl), top=top, pre=f"{out_base}.pre.il", out=f"{out_base}.il")
     r = subprocess.run(["yosys", "-q", "-s", script_file(script, f"{out_base}.front.ys")], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"yosys front end failed on {top}:\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
+    pre = ys.Design()
+    with _stdout_to(f"{out_base}.pyosys.log"):
+        ys.run_pass(f"read_rtlil {out_base}.pre.il", pre)
+        control = control_inputs(pre)
     d = ys.Design()
     with _stdout_to(f"{out_base}.pyosys.log"):
         ys.run_pass(f"read_rtlil {out_base}.il", d)
         rep = pair_x(d)
+        rep.control_inputs = control
         ys.run_pass(f"write_rtlil {out_base}_x.il", d)
         ys.run_pass(f"write_btor -s -x -i {out_base}.info {out_base}.btor", d)
     with open(f"{out_base}.xpair.json", "w") as f:

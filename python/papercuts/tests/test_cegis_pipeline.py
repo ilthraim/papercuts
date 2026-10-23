@@ -325,6 +325,30 @@ endmodule
         DESIGN = saved
 
 
+def test_clock_select_cuts_are_held_off():
+    # opencores ptc: cuts on a clock-select mux looked free to the model (every
+    # register steps once per model step) and the joint check refuted them
+    design = """
+module top(input logic clk, input logic eclk, input logic sel, input logic [3:0] d, output logic [3:0] q);
+    wire cclk = sel ? eclk : clk;
+    always @(posedge cclk) q <= d;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+            cuts = [r for r in results(tmp) if r["phase"] == "cuts"]
+            ternary = [r for r in cuts if r["type"].startswith("ternary")]
+            assert ternary and all(r["verdict"] == "untested" and not r["in_set"] for r in ternary), ternary
+            with open(os.path.join(tmp, "outputs", "cegis", "summary.json")) as f:
+                assert json.load(f)["control_net"] == len(ternary)
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])

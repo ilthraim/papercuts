@@ -67,6 +67,9 @@ class XReport:
     unkeyed: int = 0  # reach no signal both copies have
     undriven: int = 0  # of `bits`: wire bits nothing drives
     inputs: int = 0  # inputs added
+    # set by netlist.build_btor, not by pair_x: top inputs reaching a clock,
+    # asynchronous control or latch enable (netlist.control_inputs)
+    control_inputs: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         return (f"{self.bits} X bits ({self.undriven} undriven): {self.paired} paired, {self.merged} already shared, "

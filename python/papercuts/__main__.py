@@ -381,10 +381,12 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
     sel_s = time.time() - t0
 
     on = set(sel.ids)
+    control_ids = {c.id for c in sel.control_net}
     for cid, (mod, run) in by_id.items():
         ctype, line = mod.cut_infos[run.index]
         run.in_set = cid in on
-        if cid not in testable:
+        if cid not in testable or cid in control_ids:
+            # control-net cuts were never searched: the model cannot see them
             run.valid, run.verdict = False, "untested"
         elif sel.individual is None:
             run.valid, run.verdict = False, "not-checked"
@@ -399,8 +401,9 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
         })
     untested = sum(1 for cid in by_id if cid not in testable)
     summary = [
-        f"method cegis-comb: {len(on)} cuts in the selected set, of {len(by_id) - untested} searched "
-        f"({untested} untested: their select drives nothing); selection {sel_s:.1f}s",
+        f"method cegis-comb: {len(on)} cuts in the selected set, of {len(by_id) - untested - len(control_ids)} "
+        f"searched ({untested} untested: their select drives nothing; {len(control_ids)} untested: they reach "
+        f"a clock or asynchronous control, which the model cannot see); selection {sel_s:.1f}s",
         "valid = the cut on its own under the combinational spec (registers equal => outputs and "
         "next states equal)" + ("" if sel.individual is not None else "; not checked (--no-cegis-individual)"),
         f"power-up: {'holds' if sel.base_ok else 'DOES NOT HOLD'} ({sel.base_evidence})",
@@ -426,7 +429,7 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
     record = {
         "top": top_name, "mode": "in-situ" if args.in_situ else "elaborated",
         "cuts": len(by_id) + len(noop_ids), "noops": len(noop_ids), "untested": untested,
-        "searched": len(by_id) - untested, "in_set": len(on),
+        "control_net": len(control_ids), "searched": len(by_id) - untested - len(control_ids), "in_set": len(on),
         "individually_valid": None if sel.individual is None else sum(sel.individual.values()),
         "by_family": by_family,
         "iterations": len(sel.stats), "loop_s": sel.total_s, "individual_s": sel.individual_s,
