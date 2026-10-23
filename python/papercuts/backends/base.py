@@ -86,6 +86,24 @@ class ECBackend(ABC):
         """
         return set()
 
+    async def check_from_power_up(self, run: Run) -> bool:
+        """Equivalence-check a run from every power-up state the two designs
+        share, with no reset: each register starts at an arbitrary value, the
+        same in both designs, and the proof covers all time from there.
+
+        This is what ``--method cegis-comb`` claims for its consolidated design
+        (its spec: equal registers give equal outputs and equal next states),
+        and it implies equivalence under any reset sequence. Checking the claim
+        with a reset instead can fail spuriously: a formal tool's reset
+        analysis simulates the reset with every other input unknown, so a
+        register whose reset value depends on an input comes out unknown in one
+        design and constant in the other, and the two then start apart
+        (opencores__gost28147-89__mac, 2026-10-23).
+
+        A backend that cannot run such a check cannot serve cegis-comb.
+        """
+        raise NotImplementedError(f"backend {self.name!r} has no power-up check (needed by --method cegis-comb)")
+
     @abstractmethod
     async def check(self, run: Run) -> bool:
         """Equivalence-check a single run.

@@ -45,6 +45,10 @@ def make_stub(calls, refute_joint=False):
             run.valid, run.verdict = ok, "proven" if ok else "cex"
             return ok
 
+        async def check_from_power_up(self, run):
+            run.power_up = True
+            return await self.check(run)
+
     return Stub
 
 
@@ -83,6 +87,8 @@ def test_elaborated():
         assert [c.index for c in calls] == [0, 0, -1], [c.impl_module_path for c in calls]
         joint = calls[-1]
         assert joint.is_top and joint.impl_module_path.endswith("joint/top_consolidated.sv")
+        # the joint check starts from power-up; the gates keep the reset
+        assert getattr(joint, "power_up", False) and not any(getattr(c, "power_up", False) for c in calls[:-1])
         with open(os.path.join(tmp, joint.impl_module_path)) as f:
             text = f.read()
         assert all(f"module {m}" in text for m in ("top", "top_c0", "top_c1")), text

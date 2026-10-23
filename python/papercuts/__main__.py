@@ -300,7 +300,10 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
     3. every module gets its share of the set applied (and is re-pruned), and
        the backend checks the WHOLE consolidated design against the golden one
        once. Per-module checks would be wrong here: the set is valid jointly, and
-       one module's share of it need not be valid alone.
+       one module's share of it need not be valid alone. The check starts from
+       every shared power-up state with no reset (ECBackend.check_from_power_up):
+       that is what the spec proves, and a reset-based check can fail on the
+       backend's own reset analysis instead.
 
     A failed joint check is fatal. The set was proven on the muxed design, so a
     consolidated design that is not equivalent means the cut and mux paths
@@ -463,12 +466,12 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
     joint = Run(top_module_path=f"{ctree_dir}/{top_name}.sv", spec_lib_path=ctree_dir,
                 impl_module_path=joint_path, impl_module_folder=joint_dir, is_top=True, index=-1)
 
-    status("Verifying the whole consolidated design...")
+    status("Verifying the whole consolidated design (from power-up, no reset)...")
     tracker.set_phase("consolidate")
     tracker.start(id(joint), "consolidate", "joint")
     t0 = time.time()
     try:
-        await backend.check(joint)
+        await backend.check_from_power_up(joint)
     finally:
         tracker.finish(id(joint), joint.verdict, joint.valid)
         append_result(results_path, {

@@ -229,6 +229,8 @@ def generate_jasper_wrapper(
 #: Filename of the TCL script the Jasper backend writes and `jg` is pointed at.
 #: Written to (and invoked from) the current working directory.
 TCL_SCRIPT_NAME = "pcjg.tcl"
+#: The same check with no reset (see ECBackend.check_from_power_up).
+TCL_POWER_UP_SCRIPT_NAME = "pcjg_power_up.tcl"
 
 
 def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
@@ -387,12 +389,12 @@ def _parse_verdict(output: str, returncode: int) -> str:
 
 
 # MARK: Jasper Runner
-async def run_jasper(run: pc_core.Run, print_output: bool = False):
+async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str = TCL_SCRIPT_NAME):
     # stdin=DEVNULL detaches jg from our controlling terminal; otherwise it puts
     # the inherited tty into raw mode (ONLCR off) and doesn't restore it, making
     # subsequent status prints "stairstep" across the screen.
     process = await asyncio.create_subprocess_shell(
-        f"csh -c 'jg -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {TCL_SCRIPT_NAME} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
+        f"csh -c 'jg -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
