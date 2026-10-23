@@ -301,6 +301,30 @@ endmodule
         DESIGN = saved
 
 
+def test_memory_out_of_range_read():
+    # opencores wb_lcd: a 67-word memory read with a 7-bit address; memory_map
+    # gives each missing word undriven bits, many per output bit and so ambiguous
+    # by key alone; they pair by structural name instead
+    design = """
+module top(input logic clk, input logic we, input logic [2:0] wa, input logic [2:0] ra,
+           input logic [3:0] d, output logic [3:0] q);
+    reg [3:0] ram [0:4];
+    always @(posedge clk) begin
+        if (we) ram[wa] <= d;
+        q <= ram[ra] & 4'hF;
+    end
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])

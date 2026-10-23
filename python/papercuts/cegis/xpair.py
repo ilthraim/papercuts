@@ -37,6 +37,7 @@ input; one that is left is an error.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -239,6 +240,24 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
     def describe(k):
         return ", ".join(f"{n}[{i}]" for n, i in sorted(k)) or "(no signal both copies have)"
 
+    def structural_name(o):
+        """The X's own name with the copy and yosys's running counter removed, so
+        the same construct in both copies matches: undriven bits of memory_map's
+        out-of-range words (opencores wb_lcd: 61 per output bit) are
+        `$memory\\orig.lcd.ram$rdmux[0][1][0]$b$2344` and the same with
+        `mod.` and another counter."""
+        if o[0] == "undriven":
+            name, off = o[1]
+        elif o[0] == "conn":
+            name, off = start[o][0] if isinstance(start[o][0], tuple) else (None, None)
+        else:
+            name, off = f"{cells[o[1]][0].name.str()}{o[2]}", o[3]
+        if name is None:
+            return None
+        for pre in prefixes:
+            name = name.replace(f"\\{pre}.", "\\").replace(f"${pre}.", "$")
+        return (re.sub(r"\$\d+$", "", name), off)
+
     a_name, b_name = prefixes
     for k, by in groups.items():
         for o in by.get("both", []):
@@ -253,7 +272,25 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
             rep.paired += 1
             continue
         if a and b:
-            rep.ambiguous.append(f"{describe(k)}: {len(a)} X in {a_name}, {len(b)} in {b_name}")
+            # Several X per copy behind one key: pair those whose structural
+            # names match one to one (structural_name), leave the rest free.
+            ka, kb = defaultdict(list), defaultdict(list)
+            for o in a:
+                ka[structural_name(o)].append(o)
+            for o in b:
+                kb[structural_name(o)].append(o)
+            left = []
+            for sk in set(ka) | set(kb):
+                if sk is not None and len(ka.get(sk, [])) == 1 and len(kb.get(sk, [])) == 1:
+                    subst[ka[sk][0]] = subst[kb[sk][0]] = new_input()
+                    rep.paired += 1
+                else:
+                    left += ka.get(sk, []) + kb.get(sk, [])
+            if left:
+                rep.ambiguous.append(f"{describe(k)}: {len(left)} of {len(a) + len(b)} X left free")
+            for o in left:
+                subst[o] = new_input()
+            continue
         else:
             rep.unpaired += [f"{a_name if a else b_name}: {describe(k)}"] * len(a + b)
         for o in a + b:
