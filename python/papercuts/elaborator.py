@@ -1205,11 +1205,27 @@ class Emitter:
     def _expr_Conversion(self, node):
         return self.expr(node.operand)
 
+    def _select_base(self, node):
+        """The text a select applies to. Folding turns a parameter into its
+        literal, and `6'b100101[i]` is not SystemVerilog (opencores
+        configurable_crc_core). When the select itself did not fold, a parameter
+        base is referenced by name instead: the emitted module declares it, with
+        its specialized value. Only a parameter of the module body itself is
+        declared under its own name, so any other one is refused."""
+        base = node.value
+        if kind(base) == "NamedValue" and kind(base.symbol) == "Parameter" and self.fold_constants:
+            sym = base.symbol
+            if self._eval_body is None or sym.hierarchicalPath != f"{self._eval_body.hierarchicalPath}.{sym.name}":
+                raise EmitError(f"cannot select with a variable index from parameter {sym.hierarchicalPath!r} "
+                                f"declared outside the module body")
+            return sym.name
+        return self.expr(base)
+
     def _expr_ElementSelect(self, node):
-        return f"{self.expr(node.value)}[{self.expr(node.selector)}]"
+        return f"{self._select_base(node)}[{self.expr(node.selector)}]"
 
     def _expr_RangeSelect(self, node):
-        value = self.expr(node.value)
+        value = self._select_base(node)
         left = self.expr(node.left)
         right = self.expr(node.right)
         sel = node.selectionKind.name
@@ -1231,7 +1247,13 @@ class Emitter:
         return f"{self.expr(node.value)}.{node.member.name}"
 
     def _expr_Concatenation(self, node):
-        return "{" + ", ".join(self.expr(o) for o in node.operands) + "}"
+        # A zero-count replication (`{{W-16}{1'b0}}` with W = 16) is legal only as
+        # a concatenation operand and contributes nothing; slang types it void,
+        # and folded it would print as `null` (opencores wb_mcs51). Drop it.
+        ops = [o for o in node.operands if not o.type.isVoid]
+        if not ops:
+            raise EmitError("concatenation of nothing but zero-width operands")
+        return "{" + ", ".join(self.expr(o) for o in ops) + "}"
 
     def _expr_Replication(self, node):
         return "{" + self.expr(node.count) + self.expr(node.concat) + "}"
