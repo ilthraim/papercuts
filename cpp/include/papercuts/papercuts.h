@@ -466,6 +466,9 @@ private:
     // Binop -> (keep-left select, keep-right select). Shifts collect keep-left only,
     // so the second is absent for those.
     std::unordered_map<const BinaryExpressionSyntax*, std::pair<size_t, std::optional<size_t>>> binopSel;
+    // Binop targets left without a mux (their selects stay reserved, inert): too
+    // many other binop targets inside their operands. See kBinopNestLimit.
+    std::unordered_set<const BinaryExpressionSyntax*> binopTooDeep;
     // Case statement -> {prunable item index -> its select}. The default item is
     // never prunable and so never appears here.
     std::unordered_map<const CaseStatementSyntax*, std::unordered_map<size_t, size_t>> caseSel;

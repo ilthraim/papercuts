@@ -1313,6 +1313,9 @@ std::shared_ptr<SyntaxTree> ExprMuxer::insertExprMuxes(const std::shared_ptr<Syn
     return transform(tree);
 }
 
+// See ExprMuxer::initialize: at most this many binop targets inside a muxed binop.
+static constexpr size_t kBinopNestLimit = 10;
+
 void ExprMuxer::initialize(const std::shared_ptr<SyntaxTree> tree, bool ternaryMux,
                            size_t baseTernary, bool ifMux, size_t baseIf, bool binopMux,
                            size_t baseBinop, bool binopsInConditionsOnly, bool caseMux,
@@ -1320,6 +1323,7 @@ void ExprMuxer::initialize(const std::shared_ptr<SyntaxTree> tree, bool ternaryM
     ternarySel.clear();
     ifSel.clear();
     binopSel.clear();
+    binopTooDeep.clear();
     caseSel.clear();
 
     if (ternaryMux) {
@@ -1346,6 +1350,31 @@ void ExprMuxer::initialize(const std::shared_ptr<SyntaxTree> tree, bool ternaryM
             else
                 binopSel[node].second = baseBinop + i;
         }
+        // A binop mux repeats both operands (`sel ? L : (sel2 ? R : L op R)`), so
+        // muxing every level of a nested chain doubles it per level: a 25-deep
+        // `|` chain in an HLS if-condition grew past 300 GB (hls gemm, jacobi_1d;
+        // opencores ae18). A target with more than kBinopNestLimit other targets
+        // in its operands gets no mux; its selects stay reserved and inert
+        // (invariant 8), the targets inside it keep theirs.
+        std::unordered_map<const SyntaxNode*, size_t> below;
+        std::function<size_t(const SyntaxNode&)> count = [&](const SyntaxNode& n) -> size_t {
+            if (auto it = below.find(&n); it != below.end())
+                return it->second;
+            size_t c = 0;
+            for (size_t i = 0; i < n.getChildCount(); ++i) {
+                if (auto* ch = n.childNode(i)) {
+                    c += count(*ch);
+                    if (ch->kind != SyntaxKind::Unknown && BinaryExpressionSyntax::isKind(ch->kind) &&
+                        binopSel.contains(&ch->as<BinaryExpressionSyntax>()))
+                        c += 1;
+                }
+            }
+            below[&n] = c;
+            return c;
+        };
+        for (const auto& [node, _] : binopSel)
+            if (count(*node) > kBinopNestLimit)
+                binopTooDeep.insert(node);
     }
     if (caseMux) {
         CaseCollector CC;
@@ -1470,7 +1499,7 @@ void ExprMuxer::handle(const CaseStatementSyntax& node) {
 }
 
 void ExprMuxer::handle(const BinaryExpressionSyntax& node) {
-    if (auto it = binopSel.find(&node); it != binopSel.end()) {
+    if (auto it = binopSel.find(&node); it != binopSel.end() && !binopTooDeep.contains(&node)) {
         auto [selL, selR] = it->second;
 
         // The operator is rebuilt rather than reused: splicing `node` itself back in
