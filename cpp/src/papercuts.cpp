@@ -580,14 +580,18 @@ std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
                               const std::vector<BitShrinkTarget>& narrow);
 
 // One packed dimension of a declaration targeted by the intermediate-wire
-// strategy, in declared-index terms. `high`/`low` are the most- and
-// least-significant ends whichever way the range was written ([7:0] and [0:7]
-// both give high=7, low=0), `inner` is how many bits one position at this
-// dimension spans (the product of every dimension below it), and `drop` is how
-// many positions this cut removes off the high end (0 = dimension untouched).
+// strategy. Positions count significance, p = 0 the least significant and
+// p = width-1 the most, and `index(p)` is the declared index there: the LEFT
+// index is the MSB whichever way the range runs, so [7:0] has index(7) = 7 and
+// [1:48] has index(47) = 1. Treating the numerically highest index as the MSB
+// dropped the wrong end of an ascending range and rotated its bits even with
+// every cut off (opencores des: `{K_sub[48], K_sub[1:47]}` for `[1:48]`).
+// `inner` is how many bits one position at this dimension spans (the product of
+// every dimension below it), and `drop` is how many positions this cut removes
+// off the most-significant end (0 = dimension untouched).
 struct IntermediateDim {
-    int high, low, width, inner, drop;
-    bool descending;
+    int left, right, width, inner, drop;
+    int index(int pos) const { return left >= right ? right + pos : right - pos; }
     // Name of the select that gates this dimension's cut. Empty for the cutter,
     // which applies the cut unconditionally; the muxer fills it in so the dropped
     // bits become a choice between the shrunk value and the original.
@@ -616,9 +620,8 @@ std::optional<std::vector<IntermediateDim>> describeDims(
         int l = tokenToInt(sel->left->as<LiteralExpressionSyntax>().literal);
         int r = tokenToInt(sel->right->as<LiteralExpressionSyntax>().literal);
         IntermediateDim d{};
-        d.descending = l >= r;
-        d.high = std::max(l, r);
-        d.low = std::min(l, r);
+        d.left = l;
+        d.right = r;
         d.width = std::abs(l - r) + 1;
         d.inner = 1;
         d.drop = 0;
@@ -657,8 +660,9 @@ std::string signFillBit(const std::string& name, const std::vector<IntermediateD
         return name + prefix; // a single bit
 
     const auto& d = dims[level];
+    int top = d.width - 1;
     if (level > 0 && d.drop > 0) {
-        std::string orig = signFillBit(name, dims, level + 1, prefix + "[" + std::to_string(d.high) + "]");
+        std::string orig = signFillBit(name, dims, level + 1, prefix + "[" + std::to_string(d.index(top)) + "]");
         if (d.select.empty())
             return "1'b0";
         return "(" + d.select + " ? 1'b0 : " + orig + ")";
@@ -666,33 +670,33 @@ std::string signFillBit(const std::string& name, const std::vector<IntermediateD
     // At the outermost dimension the drop has already chosen the new top position;
     // deeper untouched dimensions keep theirs.
     return signFillBit(name, dims, level + 1,
-                       prefix + "[" + std::to_string(d.high - (level == 0 ? d.drop : 0)) + "]");
+                       prefix + "[" + std::to_string(d.index(top - (level == 0 ? d.drop : 0))) + "]");
 }
 
 std::string buildIntermediateValue(const std::string& name,
                                    const std::vector<IntermediateDim>& dims, size_t level,
                                    const std::string& prefix, const std::string& fillBit);
 
-// Render positions [hi..lo] of dimension `level`, most-significant first. With no
-// cut below them they are contiguous, so one range select covers the lot; if a
-// deeper dimension is cut each position has to be rebuilt on its own.
+// Render positions hi..lo (significance, hi >= lo) of dimension `level`,
+// most-significant first. With no cut below them they are contiguous, so one
+// range select covers the lot -- [index(hi):index(lo)] runs in the declared
+// direction either way; if a deeper dimension is cut each position has to be
+// rebuilt on its own.
 std::string renderPositions(const std::string& name, const std::vector<IntermediateDim>& dims,
                             size_t level, const std::string& prefix, int hi, int lo,
                             bool cutBelow) {
     const auto& d = dims[level];
     if (!cutBelow) {
         if (hi == lo)
-            return name + prefix + "[" + std::to_string(hi) + "]";
-        return name + prefix +
-               (d.descending ? "[" + std::to_string(hi) + ":" + std::to_string(lo) + "]"
-                             : "[" + std::to_string(lo) + ":" + std::to_string(hi) + "]");
+            return name + prefix + "[" + std::to_string(d.index(hi)) + "]";
+        return name + prefix + "[" + std::to_string(d.index(hi)) + ":" + std::to_string(d.index(lo)) + "]";
     }
     std::string out;
-    for (int i = hi; i >= lo; --i) {
+    for (int p = hi; p >= lo; --p) {
         // Positions below the outermost dimension are unsigned, so they zero-fill.
         out += buildIntermediateValue(name, dims, level + 1,
-                                      prefix + "[" + std::to_string(i) + "]", "1'b0");
-        if (i != lo)
+                                      prefix + "[" + std::to_string(d.index(p)) + "]", "1'b0");
+        if (p != lo)
             out += ", ";
     }
     // A lone position is already a self-contained expression; don't wrap it.
@@ -714,8 +718,8 @@ std::string buildIntermediateValue(const std::string& name,
     if (d.drop == 0 && !cutBelow)
         return name + prefix; // nothing cut at or below here; pass the subarray through
 
-    int keepHigh = d.high - d.drop;
-    std::string retained = renderPositions(name, dims, level, prefix, keepHigh, d.low, cutBelow);
+    int keepHigh = d.width - 1 - d.drop;
+    std::string retained = renderPositions(name, dims, level, prefix, keepHigh, 0, cutBelow);
     if (d.drop == 0)
         return retained; // only deeper dimensions are cut, and those are applied already
 
@@ -724,7 +728,7 @@ std::string buildIntermediateValue(const std::string& name,
         d.select.empty()
             ? fill
             : "(" + d.select + " ? " + fill + " : " +
-                  renderPositions(name, dims, level, prefix, d.high, keepHigh + 1, cutBelow) + ")";
+                  renderPositions(name, dims, level, prefix, d.width - 1, keepHigh + 1, cutBelow) + ")";
     return "{" + dropped + ", " + retained + "}";
 }
 
