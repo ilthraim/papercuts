@@ -74,17 +74,18 @@ class Selection:
 
 def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: float | None = None,
                 individual: bool = True, pin_off: list[str] = (), verbose: bool = False,
-                on_event: Callable[..., None] | None = None) -> Selection:
+                on_event: Callable[..., None] | None = None, slang_args: tuple[str, ...] = ()) -> Selection:
     """`pin_off`: ids of testable cuts to hold off rather than search (the
-    pipeline's no-ops, whose cut source would not match what the mux does)."""
+    pipeline's no-ops, whose cut source would not match what the mux does).
+    `slang_args`: extra read_slang options for every netlist built here."""
     workdir = os.path.abspath(workdir)
     os.makedirs(workdir, exist_ok=True)
     emit = on_event or (lambda kind, **fields: None)
 
     # ---- 1. elaborate and check
     emit("stage", name="elaborate", top=man.top)
-    orig = module_info(man.golden_files, man.top, workdir)
-    muxed = module_info(man.muxed_files + man.golden_files, man.muxed_top, workdir)
+    orig = module_info(man.golden_files, man.top, workdir, slang_args)
+    muxed = module_info(man.muxed_files + man.golden_files, man.muxed_top, workdir, slang_args)
     asserts = list(dict.fromkeys(orig.asserts + muxed.asserts))
     if asserts:
         raise DesignAssertsPresent(
@@ -100,9 +101,9 @@ def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: floa
         raise ManifestError(f"{man.path} does not describe {man.muxed_top}:\n  " + "\n  ".join(problems))
 
     # ---- 2. registers
-    golden_regs, gold_skipped = register_paths(man.golden_files, man.top, workdir, "golden")
+    golden_regs, gold_skipped = register_paths(man.golden_files, man.top, workdir, "golden", slang_args)
     muxed_regs, muxed_skipped = register_paths(man.muxed_files + man.golden_files, man.muxed_top,
-                                               workdir, "muxed")
+                                               workdir, "muxed", slang_args)
     registers, dropped_regs = matched_registers(golden_regs, muxed_regs)
     unpaired = dropped_regs + gold_skipped + muxed_skipped
     emit("stage", name="registers", matched=len(registers), dropped=len(unpaired))
@@ -114,7 +115,7 @@ def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: floa
     with open(miter_sv, "w") as f:
         f.write(miter_text(man.top, man.muxed_top, orig, muxed, selects, miter_name))
     base = os.path.join(workdir, miter_name)
-    xrep = build_btor(man.golden_files + man.muxed_files + [miter_sv], miter_name, base)
+    xrep = build_btor(man.golden_files + man.muxed_files + [miter_sv], miter_name, base, slang_args)
     emit("stage", name="btor2", xpair=xrep.summary())
     design = Design.from_file(base + ".btor", base + ".info")
 

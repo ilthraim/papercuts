@@ -52,7 +52,7 @@ from papercuts.elaborator import ident
 # merging was already off).
 PREP = ("hierarchy -check -top {top}; proc; setattr -unset init; flatten; future; opt_expr -keepdc; "
         "opt_clean; check; opt -noff -keepdc; opt_clean; memory_collect; opt -noff -keepdc -fast; check")
-FRONT_END = ("plugin -i slang; read_slang {files} --top {top}; " + PREP + "; memory_map; "
+FRONT_END = ("plugin -i slang; read_slang {files} --top {top} {slang_args}; " + PREP + "; memory_map; "
              "chformal -lower; write_rtlil {pre}; async2sync; opt -noff -keepdc; dffunmap; write_rtlil {out}")
 
 # Flip-flop and latch pins that decide WHEN a cell changes, not what it stores.
@@ -145,11 +145,12 @@ class ModuleInfo:
     undriven: list[str] = field(default_factory=list)  # "<module>.<wire>" used but driven by nothing
 
 
-def module_info(sv_files: list[str], top: str, workdir: str) -> ModuleInfo:
+def module_info(sv_files: list[str], top: str, workdir: str, slang_args: tuple[str, ...] = ()) -> ModuleInfo:
     """Ports of `top` and the formal cells anywhere below it, via yosys JSON."""
     out = os.path.join(workdir, f"{top}.json")
     log = os.path.join(workdir, f"{top}.yosys.log")
-    script = f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top}; prep -top {top}; write_json {out}"
+    script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top} {' '.join(slang_args)}; "
+              f"prep -top {top}; write_json {out}")
     r = subprocess.run(["yosys", "-q", "-l", log, "-s", script_file(script, os.path.join(workdir, f"{top}.ys"))],
                        capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):
@@ -279,13 +280,14 @@ def _stdout_to(path: str):
             os.close(saved)
 
 
-def build_btor(rtl: list[str], top: str, out_base: str) -> XReport:
+def build_btor(rtl: list[str], top: str, out_base: str, slang_args: tuple[str, ...] = ()) -> XReport:
     """golden + muxed + miter sources -> `<out_base>.btor` and `.info` (clock list).
 
     Also left behind: `<out_base>.il` (the front end's RTLIL), `<out_base>_x.il`
     (after X pairing), `<out_base>.xpair.json` (the XReport) and
     `<out_base>.pyosys.log`."""
-    script = FRONT_END.format(files=" ".join(rtl), top=top, pre=f"{out_base}.pre.il", out=f"{out_base}.il")
+    script = FRONT_END.format(files=" ".join(rtl), top=top, slang_args=" ".join(slang_args),
+                              pre=f"{out_base}.pre.il", out=f"{out_base}.il")
     r = subprocess.run(["yosys", "-q", "-s", script_file(script, f"{out_base}.front.ys")], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"yosys front end failed on {top}:\n{r.stdout[-2000:]}{r.stderr[-2000:]}")

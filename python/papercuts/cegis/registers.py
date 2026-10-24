@@ -49,7 +49,8 @@ class Registers(dict):
         self.nets: dict[str, int] = {}  # every public net: name -> width
 
 
-def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -> tuple[Registers, list[str]]:
+def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "",
+                   slang_args: tuple[str, ...] = ()) -> tuple[Registers, list[str]]:
     """Every register in `top`'s flattened hierarchy, as {path: width}, plus the
     ones that had to be skipped.
 
@@ -77,7 +78,7 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
     out = os.path.join(workdir, f"regs_{tag or top}.json")
     from papercuts.cegis.netlist import PREP, script_file
     # the miter's own `prep` (netlist.PREP): the same flip-flops survive here
-    script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top}; "
+    script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top} {' '.join(slang_args)}; "
               f"{PREP.format(top=top)}; memory_map; write_json {out}")
     r = subprocess.run(["yosys", "-q", "-s", script_file(script, os.path.join(workdir, f"regs_{tag or top}.ys"))],
                        capture_output=True, text=True)

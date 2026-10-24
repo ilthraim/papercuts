@@ -372,7 +372,8 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
         sel = await asyncio.to_thread(
             select_cuts, man, f"{output_dir}/cegis", solver=args.cegis_solver, timeout=args.cegis_timeout,
             individual=args.cegis_individual, pin_off=[c for c in noop_ids if c in testable],
-            verbose=args.verbose, on_event=on_event)
+            verbose=args.verbose, on_event=on_event,
+            slang_args=("--ignore-initial",) if args.cegis_ignore_initial else ())
     except (DesignAssertsPresent, DesignMalformed, MiterMismatch, ManifestError, AnonymousX,
             XPairingError) as e:
         tracker.finish(id(sel_task), "error", False)
@@ -695,6 +696,14 @@ async def main():
         metavar="SECONDS",
         help="--method cegis-comb: limit per solver call. A call that runs out "
         "stops the run with an error; default: no limit.",
+    )
+    parser.add_argument(
+        "--cegis-ignore-initial",
+        action="store_true",
+        help="--method cegis-comb: build the CEGIS netlists with read_slang "
+        "--ignore-initial, for designs whose initial blocks it rejects (e.g. "
+        "`mem[i] <= $random`). Jasper ignores initial constructs too; ROM contents "
+        "loaded in an initial block are then free in the CEGIS model as well.",
     )
     parser.add_argument(
         "--cegis-individual",
