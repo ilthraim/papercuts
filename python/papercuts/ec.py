@@ -244,16 +244,11 @@ def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
         String containing the TCL script
     """
 
-    # -bbox_a: Jasper blackboxes arrays above a small default size and then checks
-    # every write into the blackbox, read or not -- stricter than equivalence: the
-    # joint check of hls covariance failed on remd_tmp[48], written but never read
-    # (ISSUES.md 81). A blackbox only adds behaviours, so raising the limit turns
-    # such false failures into exact answers and leaves every pass standing.
     tcl_script = f"# TCL script for formal verification of {wrapper_name}\n"
     tcl_script += "if {[catch {\n"
     tcl_script += f"    analyze -sv -y . {wrapper_name}.sv +libext+.sv +define+FORMAL\n"
     tcl_script += """
-    elaborate -top wrapper  -bbox_mul 64 -bbox_div 64 -bbox_mod 64 -bbox_a 65536
+    elaborate -top wrapper  -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     clock -none
     reset -none
 
@@ -275,7 +270,8 @@ def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
     return tcl_script
 
 def generate_jasper_tcl_script(clock: "str | None" = None,
-                               reset: "str | None" = None) -> str:
+                               reset: "str | None" = None,
+                               bbox_array: "int | None" = None) -> str:
     """Render the SEC script, optionally declaring a clock and a reset.
 
     ``clock`` is a top-level signal name and ``reset`` a top-level expression,
@@ -285,6 +281,13 @@ def generate_jasper_tcl_script(clock: "str | None" = None,
     Every check elaborates at the design top in both compile contexts (see the
     ``is_top`` branch below), so a single pair of top-level names is correct for
     every run -- per-cut, consolidated, and the two load-bearing gates alike.
+
+    ``bbox_array`` raises Jasper's array black-box limit (``elaborate -bbox_a``).
+    Jasper black-boxes arrays above a small default size and compares every
+    write into the box, read or not, which is stricter than equivalence (hls
+    covariance, ISSUES.md 81); a higher limit models them instead, at a large
+    memory cost on array-heavy designs (koios, ISSUES.md 93), so it is per
+    design, not the default.
     """
     tcl_script = "# TCL script for formal verification of wrapper module\n"
     tcl_script += """\n
@@ -301,11 +304,11 @@ if {[catch {
     } else {
         analyze -sv17 -v [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     }
-    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 -bbox_a 65536
+    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 BBOX_A
     # Analyze and elaborate the implementation design
     check_sec -compile_context imp
     analyze -sv -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
-    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 -bbox_a 65536
+    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 BBOX_A
     # Setup verification environment
 """
     # A reset expression routinely contains spaces (e.g. "rst == 1'b1"), which
@@ -341,7 +344,8 @@ if {[catch {
     exit 1
 }"""
 
-    return tcl_script
+    bbox = f" -bbox_a {bbox_array}" if bbox_array else ""
+    return tcl_script.replace(" BBOX_A", bbox)
 
 # Verdict marker printed by the generated TCL; see generate_jasper_tcl_script.
 _VERDICT_MARKER = "__PC_VERDICT__:"

@@ -15,13 +15,22 @@ class JasperBackend(ECBackend):
 
     name = "jg"
 
+    def __init__(self, clock: "str | None" = None, reset: "str | None" = None,
+                 bbox_array: "int | None" = None) -> None:
+        super().__init__(clock=clock, reset=reset)
+        self.bbox_array = bbox_array
+
+    @classmethod
+    def from_args(cls, args) -> "JasperBackend":
+        return cls(clock=args.clock, reset=args.reset, bbox_array=getattr(args, "jasper_bbox_array", None))
+
     def prepare(self) -> None:
         with open(TCL_SCRIPT_NAME, "w") as f:
-            f.write(generate_jasper_tcl_script(clock=self.clock, reset=self.reset))
+            f.write(generate_jasper_tcl_script(clock=self.clock, reset=self.reset, bbox_array=self.bbox_array))
         # The power-up check: same clock, `reset -none`; every flop is then a
         # reset-X value that check_sec -auto_map_reset_x_values pairs by name.
         with open(TCL_POWER_UP_SCRIPT_NAME, "w") as f:
-            f.write(generate_jasper_tcl_script(clock=self.clock, reset=None))
+            f.write(generate_jasper_tcl_script(clock=self.clock, reset=None, bbox_array=self.bbox_array))
 
     async def check(self, run: Run) -> bool:
         await run_jasper(run)

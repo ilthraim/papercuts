@@ -698,6 +698,17 @@ async def main():
         "stops the run with an error; default: no limit.",
     )
     parser.add_argument(
+        "--jasper-bbox-array",
+        type=int,
+        default=None,
+        metavar="BITS",
+        help="Jasper: black-box only arrays larger than BITS (elaborate -bbox_a). "
+        "Jasper's default black-boxes much smaller arrays and then compares every "
+        "write into them, read or not, which can fail a check on a valid cut "
+        "(hls covariance). Raising it models the arrays instead, at a large memory "
+        "cost on array-heavy designs; off by default.",
+    )
+    parser.add_argument(
         "--cegis-ignore-initial",
         action="store_true",
         help="--method cegis-comb: build the CEGIS netlists with read_slang "
