@@ -366,7 +366,14 @@ def prune_dead_source(source, top, *, protect_modules=(), clean_decls=True,
             emitter.ignore = protect
             emitter.prune_paths = values | decls
             emitter.prune_bits = dead_bits
-            new_source = emitter.run(comp)
+            # Emit from a fresh compilation of the same source: analyze_dead froze
+            # `comp`, and constant folding on a frozen compilation trips slang's
+            # `!isFrozen()` assertion as soon as a fold needs a new constant
+            # (opencores cavlc). The prune sets are hierarchical-path strings, so
+            # they carry over.
+            ecomp, _esm = _compile(best, top)
+            ecomp.getAllDiagnostics()
+            new_source = emitter.run(ecomp)
         except EmitError:
             break
         if new_source == best:
