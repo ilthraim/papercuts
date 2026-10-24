@@ -244,16 +244,11 @@ def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
         String containing the TCL script
     """
 
-    # -bbox_a: Jasper blackboxes arrays above a small default size and then checks
-    # every write into the blackbox, read or not -- stricter than equivalence: the
-    # joint check of hls covariance failed on remd_tmp[48], written but never read
-    # (ISSUES.md 81). A blackbox only adds behaviours, so raising the limit turns
-    # such false failures into exact answers and leaves every pass standing.
     tcl_script = f"# TCL script for formal verification of {wrapper_name}\n"
     tcl_script += "if {[catch {\n"
     tcl_script += f"    analyze -sv -y . {wrapper_name}.sv +libext+.sv +define+FORMAL\n"
     tcl_script += """
-    elaborate -top wrapper  -bbox_mul 64 -bbox_div 64 -bbox_mod 64 -bbox_a 65536
+    elaborate -top wrapper  -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     clock -none
     reset -none
 
@@ -301,11 +296,11 @@ if {[catch {
     } else {
         analyze -sv17 -v [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     }
-    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 -bbox_a 65536
+    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     # Analyze and elaborate the implementation design
     check_sec -compile_context imp
     analyze -sv -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
-    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 -bbox_a 65536
+    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     # Setup verification environment
 """
     # A reset expression routinely contains spaces (e.g. "rst == 1'b1"), which
