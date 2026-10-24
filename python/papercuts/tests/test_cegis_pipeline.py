@@ -374,6 +374,32 @@ endmodule
         DESIGN = saved
 
 
+def test_two_x_arms_of_one_case():
+    # hls floyd_warshall, nussinov, trisolv: slang's front end folds a case's
+    # `'x` arm into its `'x` default (one X per bit), the muxed copy -- the case
+    # turned into an if-chain -- keeps both. Left free, the copies differed with
+    # every cut off; tied to one value they agree (ISSUES.md 70).
+    design = """
+module top(input logic [1:0] s, input logic [3:0] a, input logic [3:0] b, output logic [3:0] y);
+    always @(s or a or b)
+        case (s)
+            2'd0: y = a;
+            2'd1: y = 'x;
+            2'd2: y = b & 4'hF;
+            default: y = 'x;
+        endcase
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+    finally:
+        DESIGN = saved
+
+
 def test_in_situ():
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, ["--in-situ"])

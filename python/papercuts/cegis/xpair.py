@@ -231,6 +231,47 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
         groups[k]["none" if not k and side != "both" else side].append(o)
     rep.bits = len(occ)
 
+    # A key is the set of shared signals an X reaches first, and a copy can carry
+    # an alias the other lacks: muxing moves a read onto a companion wire, so the
+    # muxed copy's X reaches `{u0.K_sub[0], u1.K_sub[0]}` where the golden one
+    # reaches `{K_sub[0], u0.K_sub[0], u1.K_sub[0]}` (opencores des; hls seidel_2d
+    # A_address1). A group present in one copy only is the same X sources as the
+    # groups its key overlaps: each connected component of the overlap around
+    # such a group (one to one, or several on a side, opencores nextz80) becomes
+    # one group, paired or tied below like any other. Groups that already have
+    # both copies are only drawn in by a one-copy group overlapping them.
+    a_name, b_name = prefixes
+    one = [(k, c) for k, by in groups.items() for c in (a_name, b_name)
+           if k and by.get(c) and not by.get("both") and not by.get(b_name if c == a_name else a_name)]
+    lone = {k for k, _ in one}
+    two = [k for k, by in groups.items() if k and k not in lone and by.get(a_name) and by.get(b_name)]
+    parent = {k: k for k in list(lone) + two}
+
+    def root(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for ka, ca in one:
+        for kb, cb in one:
+            if ca == a_name and cb == b_name and ka & kb:
+                parent[root(ka)] = root(kb)
+        for kb in two:
+            if ka & kb:
+                parent[root(ka)] = root(kb)
+    comps = defaultdict(list)
+    for k in parent:
+        comps[root(k)].append(k)
+    for keys in comps.values():
+        if len(keys) < 2 or not any(k in lone for k in keys):
+            continue
+        merged = defaultdict(list)
+        for k in keys:
+            for c, os_ in groups.pop(k).items():
+                merged[c].extend(os_)
+        groups[frozenset().union(*keys)] = merged
+
     # ---- one input per X source
     subst = {}  # occurrence -> SigBit of its input
 
@@ -261,7 +302,6 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
             name = name.replace(f"\\{pre}.", "\\").replace(f"${pre}.", "$")
         return (re.sub(r"\$\d+$", "", name), off)
 
-    a_name, b_name = prefixes
     for k, by in groups.items():
         for o in by.get("both", []):
             subst[o] = new_input()
@@ -289,10 +329,18 @@ def pair_x(design, prefixes: tuple[str, str] = ("orig", "mod")) -> XReport:
                     rep.paired += 1
                 else:
                     left += ka.get(sk, []) + kb.get(sk, [])
+            # The rest share ONE value. A copy may have merged X sources the other
+            # keeps apart: slang's front end folds a case's `'x` arm into the
+            # `'x` default (one X), while the muxed copy, its case an if-chain,
+            # keeps both (hls floyd_warshall, nussinov, trisolv, seidel: every
+            # cut off differed). Golden then equals the muxed copy only if all of
+            # them are one value. Jasper may keep them apart; anything that leans
+            # on the tie fails the joint check, loudly.
             if left:
-                rep.ambiguous.append(f"{describe(k)}: {len(left)} of {len(a) + len(b)} X left free")
-            for o in left:
-                subst[o] = new_input()
+                rep.ambiguous.append(f"{describe(k)}: {len(left)} of {len(a) + len(b)} X tied to one value")
+                shared = new_input()
+                for o in left:
+                    subst[o] = shared
             continue
         else:
             rep.unpaired += [f"{a_name if a else b_name}: {describe(k)}"] * len(a + b)
