@@ -2082,14 +2082,20 @@ std::string Papercutter::cutIndexText(std::vector<size_t> indicesToCut,
     auto stabilized = SyntaxPrinter::printFile(*newTree);
 
     if (shrinkWithIntermediate) {
-        newTree = SyntaxTree::fromText(stabilized, tree->sourceManager());
+        // Re-parse into a private SourceManager: the tree only serves to print the
+        // text again, and the design tree's own SourceManager lives as long as the
+        // design -- re-parsing into it kept one copy of the module per cut, and
+        // the no-op scan of a 74k-cut design passed 64 GB. `scratch` is declared
+        // before the trees that read it, so they are destroyed first.
+        slang::SourceManager scratch;
+        auto reparsed = SyntaxTree::fromText(stabilized, scratch);
         auto finalNodesToShrink = nodesToShrink;
         clearState();
         auto parentSetter = ParentSetter();
-        parentSetter.visit(newTree->root());
+        parentSetter.visit(reparsed->root());
         nodesToShrink = finalNodesToShrink;
-        newTree = transform(newTree);
-        stabilized = SyntaxPrinter::printFile(*newTree);
+        auto shrunk = transform(reparsed);
+        stabilized = SyntaxPrinter::printFile(*shrunk);
     }
 
     return stabilized;
