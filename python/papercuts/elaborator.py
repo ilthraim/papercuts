@@ -42,6 +42,8 @@ import re
 import sys
 from dataclasses import dataclass
 
+import hashlib
+
 import pyslang
 from pyslang.ast import ASTContext, Compilation, CompilationOptions, InstanceSymbol, LookupLocation
 from pyslang.parsing import PreprocessorOptions
@@ -99,6 +101,10 @@ unique unique0 unsigned until until_with untyped use uwire var vectored virtual 
 wait wait_order wand weak weak0 weak1 while wildcard wire with within wor xnor xor
 """.split())
 _SIMPLE_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
+
+# Longest generated module name; see Emitter._make_module_name.
+MAX_MODULE_NAME = 200
 
 
 def ident(name: str) -> str:
@@ -390,6 +396,13 @@ class Emitter:
         # named by their hierarchical path so identical definitions with
         # different parameterizations don't collide.
         base = inst.body.name if top else self._mangle_path(inst.hierarchicalPath)
+        # The name becomes a file name (<name>.sv, and <name>_muxed.sv /
+        # _consolidated beside it), which may not exceed 255 bytes; deep paths
+        # did (koios clstm_like: "File name too long"). Long names keep a prefix
+        # and a hash of the whole path, so they stay deterministic and distinct.
+        if len(base) > MAX_MODULE_NAME:
+            digest = hashlib.sha1(base.encode()).hexdigest()[:8]
+            base = f"{base[:MAX_MODULE_NAME - 9]}_{digest}"
         name, n = base, 1
         while name in used_names:
             n += 1
