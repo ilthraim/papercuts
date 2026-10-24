@@ -1253,6 +1253,13 @@ void ConstForceMuxer::handle(const IdentifierNameSyntax& node) {
 }
 
 void ConstForceCollector::handle(const DeclaratorSyntax& node) {
+    // An unpacked array (`wire logic w[8:0]`) is not one bit whatever its packed
+    // type: forcing it is no cut (a literal in place of an array read does not
+    // compile, nor does the muxed companion `w_papercuts = sel ? 1'b1 : w`;
+    // opencores pid_controller). The cutter and the muxer share this collector,
+    // so cut indices stay aligned.
+    if (!node.dimensions.empty())
+        return;
     const DataTypeSyntax* type = nullptr;
     if (auto* dataDecl = node.parent->as_if<DataDeclarationSyntax>()) {
         auto kind = dataDecl->type->kind;
