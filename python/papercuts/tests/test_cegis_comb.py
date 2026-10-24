@@ -262,6 +262,38 @@ def test_async_register_behind_a_cut_reset():
         ("$auto$async2sync.cc:1$m", "$auto$async2sync.cc:1$o")], (pairs, unmatched)
 
 
+# `w` is a wire around an anonymous flip-flop q; in the muxed copy w[1] reads
+# q[1] through a bit-shrink's select, so q[1] is reachable through `w` in the
+# golden copy only (hls nussinov sub_ln21). q[0] pairs, which identifies the
+# flip-flop, and then q[1] pairs with it.
+SHRUNK_READ = """
+1 sort bitvec 1
+2 sort bitvec 2
+3 input 2 d
+4 input 1 pc_sel0
+5 state 2 qm
+6 state 2 qo
+7 next 2 5 3
+8 next 2 6 3
+9 slice 1 5 1 1
+10 zero 1
+11 ite 1 4 10 9
+12 slice 1 5 0 0
+13 concat 2 11 12 mod.w
+14 uext 2 6 0 orig.w
+15 neq 1 13 14
+16 bad 15
+"""
+
+
+def test_flip_flop_paired_whole_once_identified():
+    from papercuts.cegis.registers import match_registers
+    d = Design.from_string(SHRUNK_READ)
+    pairs, unmatched = match_registers(d, ["w"], selects={"pc_sel0"})
+    assert unmatched == [] and any(p.mod.state == "qm" and p.orig.state == "qo" and p.mod.width == 2
+                                   for p in pairs), (pairs, unmatched)
+
+
 def test_anonymous_x_refused():
     try:
         CombCegis(Design.from_string(ANON), verbose=False)

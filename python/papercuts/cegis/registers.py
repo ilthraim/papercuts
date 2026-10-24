@@ -395,18 +395,47 @@ def match_registers(design: Design, registers: list[str] | None = None,
         {n[len(a):] for n in design.states if n.startswith(a)}
         | {n[len(b):] for n in design.states if n.startswith(b)})
     others = set(names)
-    pairs, unmatched = [], []
+    pairs, unmatched, partial = [], [], []
     for name in names:
         m, o = f"{a}{name}", f"{b}{name}"
         mn, on = _node(design, m), _node(design, o)
         if mn is None or on is None or design.nodes[mn].sort != design.nodes[on].sort:
             unmatched.append(name)
             continue
-        got, lost = _runs(name, _flop_bits(design, mn, name, others, selects, prefixes),
-                          _flop_bits(design, on, name, others, selects, prefixes), (m, o))
+        mb = _flop_bits(design, mn, name, others, selects, prefixes)
+        ob = _flop_bits(design, on, name, others, selects, prefixes)
+        got, lost = _runs(name, mb, ob, (m, o))
         pairs += got
         if lost:
-            unmatched.append(name if len(lost) == design.nodes[mn].sort else f"{name} bits {lost}")
+            partial.append((name, lost, mb, ob))
+
+    # A flip-flop is one cell: once some of its bits pair with the same bits of
+    # an equally wide flip-flop in the other copy, the two are the same register,
+    # and its other bits pair too. Needed where a bit is reachable through the
+    # register's name in one copy only (hls nussinov: `sub_ln21` is
+    # {q[9:0], 2'b00}, and the muxed net reads q[9] through a bit-shrink's
+    # select). Only an unambiguous, aligned correspondence counts.
+    seen: dict[str, set] = {}
+    for p in pairs:
+        if p.kind == "state":
+            seen.setdefault(p.mod.state, set()).add((p.orig.state, p.mod.lo - p.orig.lo))
+    same = {ms: next(iter(v))[0] for ms, v in seen.items()
+            if len(v) == 1 and next(iter(v))[1] == 0 and design.width(ms) == design.width(next(iter(v))[0])}
+    if len(set(same.values())) != len(same):  # an orig state claimed twice: trust neither
+        dup = {os for os in same.values() if list(same.values()).count(os) > 1}
+        same = {ms: os for ms, os in same.items() if os not in dup}
+    whole = {(p.mod.state, p.orig.state) for p in pairs
+             if p.kind == "state" and p.mod.lo == 0 and p.mod.width == design.width(p.mod.state)}
+    for ms, os in sorted(same.items()):
+        if (ms, os) not in whole:
+            pairs.append(RegPair(f"{_bare(ms, prefixes)}~{_bare(os, prefixes)}",
+                                 Side(ms, 0, design.width(ms)), Side(os, 0, design.width(os))))
+    rev = {os: ms for ms, os in same.items()}
+    for name, lost, mb, ob in partial:
+        left = [k for k in lost if not ((isinstance(mb[k], tuple) and mb[k][0] in same)
+                                        or (isinstance(ob[k], tuple) and ob[k][0] in rev))]
+        if left:
+            unmatched.append(name if len(left) == len(mb) else f"{name} bits {left}")
     return pairs, unmatched
 
 
