@@ -37,8 +37,23 @@ from papercuts.elaborator import ident
 # becomes a plain synchronous state, which BTOR2's state/next/init model needs.
 # opt runs before dffunmap so it cannot re-merge enables.
 # {pre} is written before async2sync/dffunmap erase clocks: control_inputs reads it.
-FRONT_END = ("plugin -i slang; read_slang {files} --top {top}; prep -top {top} -flatten; memory_map; "
-             "chformal -lower; write_rtlil {pre}; async2sync; opt -nodffe -nosdff; dffunmap; write_rtlil {out}")
+# The netlist sees power-up as Jasper does. Jasper ignores initial values
+# ("'initial' construct is ignored") and starts every flip-flop free, mapped to
+# its twin. yosys honours them, and with a known power-up value it folds a
+# flip-flop whose D is that constant (wreduce, opt_dff) and merges flip-flops
+# that start and stay alike (opt_merge). A cut that only matters while the
+# register holds something else then looked valid: hls nussinov, `initial
+# ap_done_reg = 0` and never set, folded in the golden copy only, joint check
+# cex in 2 cycles; hls bicg, two submodules' ap_done_reg merged in the golden
+# copy only (ISSUES.md 64). So `init` is dropped right after `proc` (memory
+# contents, $meminit, are not touched: ROMs keep theirs), every opt runs with
+# -keepdc (an undefined init then blocks merging and folding), `prep` is spelled
+# out without wreduce, and the last opt skips opt_dff (-noff; its dffe/sdff
+# merging was already off).
+PREP = ("hierarchy -check -top {top}; proc; setattr -unset init; flatten; future; opt_expr -keepdc; "
+        "opt_clean; check; opt -noff -keepdc; opt_clean; memory_collect; opt -noff -keepdc -fast; check")
+FRONT_END = ("plugin -i slang; read_slang {files} --top {top}; " + PREP + "; memory_map; "
+             "chformal -lower; write_rtlil {pre}; async2sync; opt -noff -keepdc; dffunmap; write_rtlil {out}")
 
 # Flip-flop and latch pins that decide WHEN a cell changes, not what it stores.
 _CONTROL_PORTS = {"CLK", "ARST", "SET", "CLR", "ALOAD"}

@@ -259,9 +259,34 @@ endmodule
         DESIGN = saved
 
 
+def test_register_initialised_and_never_set_is_free_at_power_up():
+    # hls nussinov: `initial ap_done_reg = 0`, never set. yosys folded the golden
+    # flip-flop to 0 and R held the muxed one to it, so a cut that only matters
+    # while the register is 1 came out valid; Jasper starts it free and found the
+    # cex in 2 cycles. The flip-flop must survive, paired, in both copies.
+    design = """
+module top(input logic clk, input logic a, input logic b, output logic y);
+    reg r = 1'b0;
+    always @(posedge clk) r <= 1'b0;
+    assign y = r ? a : b;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+            cuts = [r for r in results(tmp) if r["phase"] == "cuts" and r["type"].startswith("ternary")]
+            assert cuts and not any(c["in_set"] for c in cuts), cuts
+    finally:
+        DESIGN = saved
+
+
 def test_register_constant_in_golden():
-    # hls floyd_warshall: yosys folds the golden `done` flop to a constant 0, the
-    # muxed copy's muxes keep it a flip-flop; unpaired it started free in one copy
+    # hls floyd_warshall: yosys folded the golden `done` flop to a constant 0 while
+    # the muxed copy's muxes kept it a flip-flop; unpaired it started free in one
+    # copy. The front end now keeps every flip-flop, so both are paired.
     design = """
 module top(input logic clk, input logic a, input logic [3:0] d, output logic done, output logic [3:0] q);
     reg r = 1'b0;

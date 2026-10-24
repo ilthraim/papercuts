@@ -75,9 +75,10 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "") -
     kept in `Registers.aliases` for matched_registers.
     """
     out = os.path.join(workdir, f"regs_{tag or top}.json")
+    from papercuts.cegis.netlist import PREP, script_file
+    # the miter's own `prep` (netlist.PREP): the same flip-flops survive here
     script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top}; "
-              f"prep -top {top} -flatten; memory_map; write_json {out}")
-    from papercuts.cegis.netlist import script_file
+              f"{PREP.format(top=top)}; memory_map; write_json {out}")
     r = subprocess.run(["yosys", "-q", "-s", script_file(script, os.path.join(workdir, f"regs_{tag or top}.ys"))],
                        capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):
@@ -166,10 +167,11 @@ def matched_registers(golden: dict[str, int], muxed: dict[str, int]) -> tuple[li
         name = g if g in common else (mname if mname in common else sorted(common)[0])
         pairs.append((name, golden[g]))
     # A register in one copy only, where the other copy has a public net of that
-    # name and width: yosys removed the other copy's flip-flop as constant
-    # (hls floyd_warshall: golden ap_done_reg is a constant 0, the muxed copy's
-    # muxes keep it a flip-flop). Pair them: R then holds the register to the
-    # net's value, and an unpaired register would start free in one copy only.
+    # name and width: the other copy's flip-flop may sit behind that net under no
+    # name of its own (opencores rtfsimpleuart: golden rxdsum's state is
+    # anonymous). The name is put forward; match_registers pairs it only where
+    # flip-flops stand behind it in both copies and reports it unmatched
+    # otherwise.
     paired = {n for n, _ in pairs}
     for n in sorted(set(muxed) - used):
         if getattr(golden, "nets", {}).get(n) == muxed[n] and n not in paired:
@@ -187,25 +189,19 @@ def matched_registers(golden: dict[str, int], muxed: dict[str, int]) -> tuple[li
 # ---------------------------------------------------------------- BTOR2 side
 @dataclass(frozen=True)
 class Side:
-    """One copy's half of a register pair: bits [lo, lo+width) of `state`, or the
-    constant `const` when that copy has no flip-flop there."""
+    """One copy's half of a register pair: bits [lo, lo+width) of `state`."""
 
-    state: str | None
+    state: str
     lo: int
     width: int
-    const: int | None = None
 
     def _bits(self, v: BV) -> BV:
         return v if self.lo == 0 and v.size() == self.width else z3.Extract(self.lo + self.width - 1, self.lo, v)
 
     def value(self, fr: Frame) -> BV:
-        if self.state is None:
-            return z3.BitVecVal(self.const, self.width)
         return self._bits(fr.states[self.state])
 
     def next_value(self, fr: Frame) -> BV:
-        if self.state is None:
-            return z3.BitVecVal(self.const, self.width)
         return self._bits(fr.next[self.state])
 
 
@@ -224,10 +220,12 @@ class RegPair:
     the net (`_flop_bits`), and a bit that is not a flip-flop in both copies is
     left out of R.
 
-    `kind` is "state" (flip-flops on both sides) or "const": a register that is
-    a flip-flop in one copy and a constant net in the other (yosys removed the
-    flip-flop; hls floyd_warshall ap_done_reg). R then holds the flip-flop to
-    the constant; that is not assumed at power-up, so the base case shows it."""
+    There is no flip-flop-to-constant pair. One copy's flip-flop facing a
+    constant in the other means yosys picked that flip-flop's power-up value
+    (opt_dff, now kept off by `opt -keepdc`); R holding the other copy's
+    flip-flop to the constant assumed that value, and Jasper starts both free
+    (hls nussinov: a 2-cycle cex through ap_done_reg; ISSUES.md 64). Such a bit
+    is reported unmatched instead."""
 
     name: str  # the register, without the mod./orig. prefix; [hi:lo] when partial
     mod: Side
@@ -235,10 +233,10 @@ class RegPair:
 
     @property
     def kind(self) -> str:
-        return "state" if self.mod.state is not None and self.orig.state is not None else "const"
+        return "state"
 
     def states(self) -> set[str]:
-        return {s.state for s in (self.mod, self.orig) if s.state is not None}
+        return {self.mod.state, self.orig.state}
 
     def value(self, fr: Frame, design: Design | None = None) -> tuple[BV, BV]:
         return self.mod.value(fr), self.orig.value(fr)
@@ -330,28 +328,19 @@ def _node(design: Design, name: str) -> int | None:
     return design.symbols.get(name)
 
 
-def _runs(name: str, mb: list, ob: list, own: tuple[str, str]) -> tuple[list[RegPair], list[int]]:
+def _runs(name: str, mb: list, ob: list) -> tuple[list[RegPair], list[int]]:
     """Group a register's per-bit classification (`_flop_bits` of each copy) into
-    RegPairs of contiguous bits. Returns (pairs, bits that are a flip-flop in one
-    copy only and so stay out of R).
-
-    A flip-flop bit is paired with a constant bit only when the flip-flop is the
-    register's own named state (`own`, per copy), the ap_done_reg case. An
-    anonymous flip-flop facing a constant may be another register read through
-    a cut (a bit-shrink makes the read constant), and R must not hold that."""
+    RegPairs of contiguous bits, flip-flop against flip-flop only (RegPair says
+    why). Returns (pairs, bits that are a flip-flop in one copy only and so stay
+    out of R)."""
     def cls(m, o):
         if isinstance(m, tuple) and isinstance(o, tuple):
             return ("ff", m[0], m[1], o[0], o[1])
-        if isinstance(m, tuple) and isinstance(o, int) and m[0] == own[0]:
-            return ("mc", m[0], m[1], None, o)
-        if isinstance(o, tuple) and isinstance(m, int) and o[0] == own[1]:
-            return ("cm", None, m, o[0], o[1])
         return None
 
     def follows(c, prev):  # c continues the run ending with prev
-        if c is None or prev is None or c[0] != prev[0] or c[1] != prev[1] or c[3] != prev[3]:
-            return False
-        return ((c[1] is None or c[2] == prev[2] + 1) and (c[3] is None or c[4] == prev[4] + 1))
+        return (c is not None and prev is not None and c[1] == prev[1] and c[3] == prev[3]
+                and c[2] == prev[2] + 1 and c[4] == prev[4] + 1)
 
     classes = [cls(m, o) for m, o in zip(mb, ob)]
     pairs, lost, k, w = [], [], 0, len(mb)
@@ -365,14 +354,8 @@ def _runs(name: str, mb: list, ob: list, own: tuple[str, str]) -> tuple[list[Reg
         j = k + 1
         while j < w and follows(classes[j], classes[j - 1]):
             j += 1
-        n = j - k
-
-        def side(st, first, bits):
-            if st is not None:
-                return Side(st, first, n)
-            return Side(None, 0, n, sum(bits[i] << (i - k) for i in range(k, j)))
         label = name if (k, j) == (0, w) else f"{name}[{j - 1}:{k}]"
-        pairs.append(RegPair(label, side(c[1], c[2], mb), side(c[3], c[4], ob)))
+        pairs.append(RegPair(label, Side(c[1], c[2], j - k), Side(c[3], c[4], j - k)))
         k = j
     return pairs, lost
 
@@ -404,7 +387,7 @@ def match_registers(design: Design, registers: list[str] | None = None,
             continue
         mb = _flop_bits(design, mn, name, others, selects, prefixes)
         ob = _flop_bits(design, on, name, others, selects, prefixes)
-        got, lost = _runs(name, mb, ob, (m, o))
+        got, lost = _runs(name, mb, ob)
         pairs += got
         if lost:
             partial.append((name, lost, mb, ob))
@@ -495,7 +478,6 @@ def power_up(design: Design, registers: list[tuple[str, int]] | None = None,
     synchronous case."""
     consts = rom_values(design)
     pairs, _ = match_registers(design, [p for p, _ in registers] if registers else None, selects=selects)
-    # Only flip-flops on both sides power up "arbitrary but equal" (Jasper's
-    # auto-mapping pairs flops). A constant side -- a net yosys folded to a
-    # constant -- does not, so such a pair is left to the base case.
-    return PowerUp(consts, [p for p in pairs if p.kind == "state" and not (p.states() & set(consts))])
+    # every pair is flip-flop against flip-flop, "arbitrary but equal" at power-up
+    # (Jasper's auto-mapping), except ROM contents, which are fixed
+    return PowerUp(consts, [p for p in pairs if not (p.states() & set(consts))])
