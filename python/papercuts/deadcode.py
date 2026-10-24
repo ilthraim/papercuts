@@ -134,6 +134,43 @@ def analyze_dead(comp: Compilation, *, protect_modules=(), clean_decls=True):
     comp.freeze()
     mgr.analyze(comp)
 
+    # Signals named in an instance's port connection are never pruned. The
+    # emitter re-emits connections as they are, so a pruned signal's declaration
+    # went while `.data_o({a, dead[7:6], b})` still named it (opencores mesi_isc;
+    # slang accepts it as an implicit net, Jasper does not parse it).
+    connected: set[str] = set()
+
+    def named(expr, depth=0):
+        if expr is None or depth > 64:
+            return
+        sym = getattr(expr, "symbol", None)
+        if sym is not None and getattr(expr.kind, "name", "") == "NamedValue":
+            hp = getattr(sym, "hierarchicalPath", None)
+            if hp:
+                connected.add(hp)
+        for attr in ("operand", "value", "left", "right", "selector", "expr"):
+            sub = getattr(expr, attr, None)
+            if sub is not None and hasattr(sub, "kind"):
+                named(sub, depth + 1)
+        for sub in getattr(expr, "operands", None) or ():
+            named(sub, depth + 1)
+
+    def walk(scope):
+        for m in scope:
+            k = m.kind.name
+            if k == "Instance":
+                for conn in m.portConnections:
+                    try:
+                        named(conn.expression)
+                    except Exception:  # best-effort, like the rest of the prune
+                        continue
+                walk(m.body)
+            elif k in ("GenerateBlockArray", "GenerateBlock"):
+                walk(m)
+
+    for inst in comp.getRoot().topInstances:
+        walk(inst.body)
+
     values: set[str] = set()
     decls: set[str] = set()
     d: Diagnostic
@@ -154,7 +191,7 @@ def analyze_dead(comp: Compilation, *, protect_modules=(), clean_decls=True):
         hp: str | None = getattr(sym, "hierarchicalPath", None)
         if not hp:
             continue
-        if _module_def_name(sym) in protect:
+        if _module_def_name(sym) in protect or hp in connected:
             continue
         (values if is_value else decls).add(hp)
     return values, decls
@@ -335,6 +372,17 @@ def prune_dead_source(source, top, *, protect_modules=(), clean_decls=True,
         if new_source == best:
             # Nothing actually changed (e.g. only unremovable/concat targets were
             # flagged) -- converged.
+            break
+        # A prune is only taken if its result still compiles. Checking at the top
+        # of the next iteration was too late: the broken source had already
+        # become `best` and was returned (opencores mesi_isc: a dead wire's
+        # declaration was dropped while an instance's output concat still named
+        # it, and Jasper could not even parse the elaborated design).
+        try:
+            check, _check_sm = _compile(new_source, top)
+            if any(d.isError() for d in check.getAllDiagnostics()):
+                break
+        except Exception:
             break
         stats.iters += 1
         stats.signals += len(values)

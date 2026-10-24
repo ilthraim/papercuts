@@ -1456,8 +1456,30 @@ class Emitter:
         # values (SVInt, real, string) render fine via str().
         if getattr(value, "isContainer", None) is not None and value.isContainer():
             return "'{" + ", ".join(self._render_constant(e) for e in value.value) + "}"
+        v = getattr(value, "value", None)
+        if isinstance(v, pyslang.SVInt):
+            return _int_literal(v)
         return str(value)
 
+
+
+def _int_literal(v) -> str:
+    """An integer constant spelled out in full: slang's own choice of base
+    (SVInt::toString's heuristics) without its abbreviation of wide values, which
+    str() applies and which is not a literal (`195'd2510840694...e21`, opencores
+    ecg), and with unknown bits always exact (slang falls back to a lossy base
+    above 64 bits)."""
+    w, signed, unk = v.bitWidth, v.isSigned, v.hasUnknown
+    all_xz = unk and (v.countXs() == w or v.countZs() == w)
+    B = pyslang.LiteralBase
+    if (w < 8 and not signed) or (unk and not all_xz):
+        base = B.Binary
+    elif w <= 32 or signed or all_xz:
+        base = B.Decimal
+    else:
+        base = B.Hex
+    include_base = base != B.Decimal or w != 32 or not signed or unk
+    return v.toString(base, include_base)
 
 # A Compilation references its trees' SourceManager for its whole lifetime. When
 # we build trees with an explicitly-created SourceManager (to add include dirs /
