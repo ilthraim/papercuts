@@ -721,6 +721,18 @@ async def main():
         "cost on array-heavy designs; off by default.",
     )
     parser.add_argument(
+        "--jasper-engines",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Jasper: proof-engine jobs one check may run at once "
+        "(set_proofgrid_max_local_jobs; one job per engine). A check runs its whole "
+        "engine portfolio in parallel, ~28 engines and up to ~50 processes, so the "
+        "machine load is about -j times that. 0 (default) leaves the portfolio "
+        "whole; the proof strategy needs at least 4, and a cap drops engines, which "
+        "can make a hard check far slower (a deep cex: 81 s uncapped, >15 min at 16).",
+    )
+    parser.add_argument(
         "--cegis-ignore-initial",
         action="store_true",
         help="--method cegis-comb: build the CEGIS netlists with read_slang "

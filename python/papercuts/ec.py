@@ -271,7 +271,8 @@ def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
 
 def generate_jasper_tcl_script(clock: "str | None" = None,
                                reset: "str | None" = None,
-                               bbox_array: "int | None" = None) -> str:
+                               bbox_array: "int | None" = None,
+                               engines: int = 0) -> str:
     """Render the SEC script, optionally declaring a clock and a reset.
 
     ``clock`` is a top-level signal name and ``reset`` a top-level expression,
@@ -288,6 +289,11 @@ def generate_jasper_tcl_script(clock: "str | None" = None,
     covariance, ISSUES.md 81); a higher limit models them instead, at a large
     memory cost on array-heavy designs (koios, ISSUES.md 93), so it is per
     design, not the default.
+
+    ``engines`` caps the proof-engine jobs of one check
+    (``set_proofgrid_max_local_jobs``; 0 = the whole portfolio, Jasper's own
+    default, stated explicitly), always at one job per engine. Both settings are
+    written so the load of a check is set here, not by Jasper's defaults.
     """
     tcl_script = "# TCL script for formal verification of wrapper module\n"
     tcl_script += """\n
@@ -328,6 +334,8 @@ if {[catch {
     report -summary
     check_sec -interface
     # Run proof and check results
+    set_proofgrid_per_engine_max_local_jobs 1
+    set_proofgrid_max_local_jobs ENGINES
     set res [check_sec -prove -strategy proof]
     report -summary
     #do_sum
@@ -351,7 +359,9 @@ if {[catch {
 }"""
 
     bbox = f" -bbox_a {bbox_array}" if bbox_array else ""
-    return tcl_script.replace(" BBOX_A", bbox)
+    if engines and engines < 4:
+        raise ValueError("--jasper-engines: the proof strategy needs at least 4 (0 = no cap)")
+    return tcl_script.replace(" BBOX_A", bbox).replace("ENGINES", str(engines))
 
 # Verdict marker printed by the generated TCL; see generate_jasper_tcl_script.
 _VERDICT_MARKER = "__PC_VERDICT__:"
