@@ -75,3 +75,6 @@ class Run:
     #: combinational spec, which neither implies nor follows from membership.
     #: None under --method fv.
     in_set: "bool | None" = None
+    #: A Tcl file of check_sec mapping commands the backend applies after setup
+    #: (the elaboration gate: names the elaborator changed). None: none.
+    map_script: "str | None" = None

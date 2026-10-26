@@ -31,6 +31,7 @@ from dataclasses import asdict, dataclass, field
 from pyosys import libyosys as ys
 
 from papercuts.cegis.xpair import XReport, pair_x
+from papercuts.pragmas import READ_SLANG_ARGS
 from papercuts.elaborator import ident
 
 # memory_map: btor2z3 has no array sorts. async2sync + dffunmap: every flip-flop
@@ -52,7 +53,9 @@ from papercuts.elaborator import ident
 # merging was already off).
 PREP = ("hierarchy -check -top {top}; proc; setattr -unset init; flatten; future; opt_expr -keepdc; "
         "opt_clean; check; opt -noff -keepdc; opt_clean; memory_collect; opt -noff -keepdc -fast; check")
-FRONT_END = ("plugin -i slang; read_slang {files} --top {top} {slang_args}; " + PREP + "; memory_map; "
+# every read of the sources: translate_off regions as Jasper skips them (papercuts.pragmas)
+READ_SLANG = "plugin -i slang; read_slang {files} --top {top} " + READ_SLANG_ARGS + " {slang_args}"
+FRONT_END = (READ_SLANG + "; " + PREP + "; memory_map; "
              "chformal -lower; write_rtlil {pre}; async2sync; opt -noff -keepdc; dffunmap; write_rtlil {out}")
 
 # Flip-flop and latch pins that decide WHEN a cell changes, not what it stores.
@@ -149,8 +152,8 @@ def module_info(sv_files: list[str], top: str, workdir: str, slang_args: tuple[s
     """Ports of `top` and the formal cells anywhere below it, via yosys JSON."""
     out = os.path.join(workdir, f"{top}.json")
     log = os.path.join(workdir, f"{top}.yosys.log")
-    script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top} {' '.join(slang_args)}; "
-              f"prep -top {top}; write_json {out}")
+    script = (READ_SLANG.format(files=" ".join(sv_files), top=top, slang_args=" ".join(slang_args))
+              + f"; prep -top {top}; write_json {out}")
     r = subprocess.run(["yosys", "-q", "-l", log, "-s", script_file(script, os.path.join(workdir, f"{top}.ys"))],
                        capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):

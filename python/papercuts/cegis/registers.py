@@ -76,10 +76,10 @@ def register_paths(sv_files: list[str], top: str, workdir: str, tag: str = "",
     kept in `Registers.aliases` for matched_registers.
     """
     out = os.path.join(workdir, f"regs_{tag or top}.json")
-    from papercuts.cegis.netlist import PREP, script_file
+    from papercuts.cegis.netlist import PREP, READ_SLANG, script_file
     # the miter's own `prep` (netlist.PREP): the same flip-flops survive here
-    script = (f"plugin -i slang; read_slang {' '.join(sv_files)} --top {top} {' '.join(slang_args)}; "
-              f"{PREP.format(top=top)}; memory_map; write_json {out}")
+    script = (READ_SLANG.format(files=" ".join(sv_files), top=top, slang_args=" ".join(slang_args))
+              + f"; {PREP.format(top=top)}; memory_map; write_json {out}")
     r = subprocess.run(["yosys", "-q", "-s", script_file(script, os.path.join(workdir, f"regs_{tag or top}.ys"))],
                        capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):

@@ -25,6 +25,7 @@ from papercuts.elaborator import (
     EmitError,
     build_compilation_from,
     elaborate_design,
+    gate_map_script,
     make_parse_env,
 )
 from papercuts.manifest import build_manifest, check_manifest, write_manifest
@@ -489,10 +490,21 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
     write_record()
     if not joint.valid:
         raise SystemExit(
-            f"FATAL: the consolidated design is not equivalent to the golden one (verdict={joint.verdict}), "
+            f"FATAL: the consolidated design {_failed_as(joint.verdict)} the golden one (verdict={joint.verdict}), "
             f"although the selected set was proven on the muxed design. The cut and mux paths disagree, "
             f"or the CEGIS model and the backend read the design differently. See {joint_dir}.")
     status(f"Consolidated design PROVEN ({len(on)} cuts); results written to {log_path}")
+
+
+def _failed_as(verdict) -> str:
+    """How a failed check relates the two designs. Only a cex shows them unequal;
+    an `error` verdict means the backend never got to a proof (an elaborated
+    file Jasper could not compile was reported as "not equivalent")."""
+    if verdict == "cex":
+        return "is not equivalent to"
+    if verdict == "error":
+        return "could not be checked (backend error, no proof ran) against"
+    return "was not proven equal to"
 
 
 # MARK: Main
@@ -855,6 +867,7 @@ async def main():
     # those of multi-packed-dim vectors. Empty => those stay uncut.
     symbolic_ranges: dict[str, dict[str, list[tuple[int, int]]]] = {}
     elab_blob_path = None
+    gate_map_path = None  # check_sec commands pairing what elaboration renamed
     # Dead-code prune summary for the elaborated blob (None => pruning not run,
     # e.g. --no-prune-dead or --in-situ). Recorded into papercuts.log.
     prune_stats = None
@@ -959,6 +972,15 @@ async def main():
         # lib. split_tree yields (name, tree); the pipeline consumes (tree, name).
         blob_tree = SyntaxTree.fromText(elab_source)
         conc_trees = [(tree, name) for name, tree in chipper.split_tree(blob_tree)]
+
+        # Jasper pairs uninitialized flops, blackboxes and X sources by name, and
+        # flattening a generate scope renames them (ISSUES 96): the gate gets the map.
+        # The is_top script reads impl_module_path (this blob) as Jasper's spec.
+        map_text = gate_map_script(elab.renames, build_compilation_from([blob_tree]), spec_is_original=False)
+        if map_text:
+            gate_map_path = os.path.abspath(f"{elab_dir}/gate_map.tcl")
+            with open(gate_map_path, "w") as f:
+                f.write(map_text)
 
         # The elaborator emits an excluded module AND its whole subtree verbatim
         # (an opaque boundary), so the uncut set is exactly what it emitted
@@ -1075,6 +1097,7 @@ async def main():
             impl_module_folder=gate_dir,
             is_top=True,
             index=0,
+            map_script=gate_map_path,
         )
         tracker.set_phase("gate")
         tracker.start(id(gate_run), "gate", "elab-gate")
@@ -1095,7 +1118,7 @@ async def main():
         if not gate_run.valid:
             verdict = getattr(gate_run, "verdict", "not-proven")
             raise SystemExit(
-                f"FATAL: elaborated design is not equivalent to the original "
+                f"FATAL: elaborated design {_failed_as(verdict)} the original "
                 f"(verdict={verdict}). The elaboration cannot be trusted as "
                 f"canonical; aborting. See {gate_dir} for the run artifacts."
             )

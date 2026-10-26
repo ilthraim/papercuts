@@ -291,7 +291,8 @@ def generate_jasper_tcl_script(clock: "str | None" = None,
     """
     tcl_script = "# TCL script for formal verification of wrapper module\n"
     tcl_script += """\n
-#Arguments are : (5) top_module_path, (6) spec_lib_path, (7) imp_module_path, (8) is_top
+#Arguments are : (5) top_module_path, (6) spec_lib_path, (7) imp_module_path, (8) is_top,
+#                (9) a Tcl file of mapping commands, or "-"
 
 set is_top [lindex $argv 8]
 
@@ -319,6 +320,11 @@ if {[catch {
     tcl_script += f"    clock {clock if clock else '-none'}\n"
     tcl_script += """    check_sec -setup
     check_sec -auto_map_reset_x_values on
+    # Names the elaborator changed (Run.map_script); auto-mapping re-runs with them
+    if {[lindex $argv 9] ne "-"} {
+        source [lindex $argv 9]
+        check_sec -map -auto
+    }
     report -summary
     check_sec -interface
     # Run proof and check results
@@ -410,8 +416,9 @@ async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str =
     # stdin=DEVNULL detaches jg from our controlling terminal; otherwise it puts
     # the inherited tty into raw mode (ONLCR off) and doesn't restore it, making
     # subsequent status prints "stairstep" across the screen.
+    map_script = run.map_script or "-"
     process = await asyncio.create_subprocess_shell(
-        f"csh -c '{_jg_command()} -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top}'",
+        f"csh -c '{_jg_command()} -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top} {map_script}'",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

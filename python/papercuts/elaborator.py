@@ -49,6 +49,8 @@ from pyslang.ast import ASTContext, Compilation, CompilationOptions, InstanceSym
 from pyslang.parsing import PreprocessorOptions
 from pyslang.syntax import SyntaxTree
 
+from papercuts import pragmas
+
 INDENT = "    "
 
 
@@ -268,7 +270,8 @@ class Emitter:
         members = list(body)
         pm = {}
         self._build_path_map(members, "", pm, "_" if self.flatten else ".")
-        raws = set(pm.values()) | {m.name for m in members if kind(m) in ("Port", "Parameter", "Subroutine")}
+        raws = set(pm.values()) | {m.name for m in members if kind(m) in ("Port", "Parameter", "Subroutine")
+                                   and not _empty_port(m)}
         if not self.flatten:
             raws = {c for r in raws for c in r.split(".")}
         taken = {r for r in raws if _SIMPLE_ID.fullmatch(r) and r not in SV_KEYWORDS}
@@ -523,7 +526,7 @@ class Emitter:
         is_top = body.hierarchicalPath in self._top_paths
 
         params = [m for m in members if kind(m) == "Parameter" and m.isPortParam]
-        ports = [m for m in members if kind(m) == "Port"]
+        ports = [m for m in members if kind(m) == "Port" and not _empty_port(m)]
 
         if params:
             self.emit(f"module {ident(name)} #(")
@@ -562,6 +565,12 @@ class Emitter:
             if k == "Parameter" and m.isPortParam:
                 continue
             if k in ("Net", "Variable") and m.name in port_names:
+                # declared by the port header; a non-ANSI `wire [55:0] y = ...;`
+                # beside `output [55:0] y;` still drives it (opencores double_fpu)
+                if getattr(m, "initializer", None) is not None:
+                    if k == "Variable":
+                        raise EmitError(f"initializer on variable port {m.name!r} is not re-emitted")
+                    self.emit(f"assign {self._name(self._decl_name(m))} = {self.expr(m.initializer)};")
                 continue
             if k == "Genvar":
                 continue
@@ -851,7 +860,7 @@ class Emitter:
             return child.get(n) or ident(n)
 
         params = [m for m in body if kind(m) == "Parameter" and m.isPortParam]
-        conns = inst.portConnections
+        conns = [c for c in inst.portConnections if not _empty_port(c.port)]  # see _empty_port
 
         if params:
             self.emit(f"{def_name} #(")
@@ -907,6 +916,56 @@ class Emitter:
                 label = self._gen_block_label(m)
                 self._build_path_map(list(m), prefix + label + gen_sep,
                                      out, gen_sep)
+
+    # --- renames, for the gate -------------------------------------------------
+
+    def rename_map(self, compilation):
+        """What the emitted design names differently from the original, below the
+        top: (kind, original path, emitted path), kind "instance" or "signal",
+        paths relative to the top. Flattening a generate scope renames what it
+        holds (`STAGEN[0].stage` -> `STAGEN_0_stage`); Jasper pairs uninitialized
+        flops, blackboxes and X sources between the copies by name, so without
+        this map the gate leaves them unpaired and free on each side."""
+        out = []
+        for top in compilation.getRoot().topInstances:
+            self._renames(top, "", "", out)
+        return out
+
+    def _renames(self, inst, spec, imp, out):
+        body = inst.body
+        if body.name in self.ignore:
+            return  # emitted verbatim, names untouched
+        pm = {}
+        self._build_path_map(list(body), "", pm, "_" if self.flatten else ".")
+        names = self._name_map_for(body)
+        base = inst.hierarchicalPath + "."
+
+        def emitted(path):
+            if self.flatten:
+                return names.get(path, path)
+            return ".".join(names.get(c, c) for c in path.split("."))
+
+        children = {c.hierarchicalPath: c for c in self._scope_instances(body)}
+        inside = tuple(hp + "." for hp in children)  # a child's own names: its recursion
+        for hp, path in pm.items():
+            if hp.startswith(inside):
+                continue
+            rel, new = hp[len(base):], emitted(path)
+            if rel != new:
+                out.append(("instance" if hp in children else "signal", spec + rel, imp + new))
+        for hp, child in children.items():
+            self._renames(child, spec + hp[len(base):] + ".", imp + emitted(pm[hp]) + ".", out)
+
+    def _scope_instances(self, scope):
+        for m in scope:
+            k = kind(m)
+            if k == "Instance":
+                yield m
+            elif k == "GenerateBlockArray":
+                for _, blk in self._array_blocks(m):
+                    yield from self._scope_instances(blk)
+            elif k == "GenerateBlock" and not getattr(m, "isUninstantiated", False):
+                yield from self._scope_instances(m)
 
     def _check_flatten_collisions(self, module_name):
         by_name = {}
@@ -1245,6 +1304,8 @@ class Emitter:
                 raise _LiveRef
             if k == "LValueReference":
                 raise _LiveRef
+            if _unsized_unknown(n):
+                raise _LiveRef  # slang's fold would zero-extend it (_lit)
 
         try:
             node.visit(check)
@@ -1322,9 +1383,16 @@ class Emitter:
         # Regular literals expose a folded .constant; unbased-unsized ('0/'1/'x)
         # leave .constant None but carry the resolved sized .value.
         c = getattr(node, "constant", None)
-        if c is not None:
-            return str(c)
-        return str(node.value)
+        v = c.value if c is not None else node.value
+        if not isinstance(v, pyslang.SVInt):
+            return str(c if c is not None else node.value)
+        if _unsized_unknown(node):
+            # stays unsized: its x/z top bit extends to the width of the context
+            # (IEEE 1800 5.7.1, as Jasper reads it), where a sized one, and
+            # slang's own 32-bit value, zero-extends (`'bx` into 34 bits came out
+            # `32'dx`, two bits 0 where the original had X; hls jacobi)
+            return ("'sb" if v.isSigned else "'b") + v.toString(pyslang.LiteralBase.Binary, False)
+        return _int_literal(v)  # spelled out: str() abbreviates wide values
 
     def _expr_IntegerLiteral(self, node):
         return self._lit(node)
@@ -1337,7 +1405,7 @@ class Emitter:
 
     def _expr_StringLiteral(self, node):
         raw = node.value if hasattr(node, "value") else str(node.constant)
-        return '"' + str(raw).replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return _string_literal(str(raw))
 
     def _expr_UnaryOp(self, node):
         op = node.op.name
@@ -1476,6 +1544,81 @@ class Emitter:
 
 
 
+_JASPER_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*(\[\d+\])*(\.[A-Za-z_][A-Za-z0-9_$]*(\[\d+\])*)*")
+
+
+def gate_map_script(renames, comp, spec_is_original: bool) -> str:
+    """check_sec commands pairing what the elaborator renamed (Emitter.rename_map)
+    for the elaboration gate, given the compiled design the gate checks (after the
+    dead-code prune, which may have removed a renamed signal). `spec_is_original`:
+    which design Jasper's spec context reads; a rule maps spec names to imp names.
+
+    Measured on Jasper 2026.03 (runs/cegis_comb_dataset/ISSUES.md 96):
+    `-hierarchy` rules make a renamed instance's contents map by name, its
+    uninitialized flops included, once `check_sec -map -auto` re-runs; a renamed
+    flop needs `-init` (a plain map is a connection, one free value driving both
+    sides). `-init` on a wire only warns and maps nothing. Deeper rules come first
+    so an enclosing rule never claims their names. An escaped name is left out:
+    how Jasper spells it is not known, and unmapped fails the gate loudly where a
+    wrong spelling could pair the wrong flop."""
+    present = set()
+    for top in comp.getRoot().topInstances:
+        base = top.hierarchicalPath + "."
+
+        def walk(sym):
+            k = sym.kind.name
+            if k in ("Net", "Variable", "Instance"):
+                present.add(sym.hierarchicalPath[len(base):])
+            if k == "Instance":
+                for m in sym.body:
+                    walk(m)
+
+        for m in top.body:
+            walk(m)
+    keep = [(k, o, e) if spec_is_original else (k, e, o)
+            for k, o, e in renames if e in present and _JASPER_PATH.fullmatch(o)]
+    rules = sorted((r for r in keep if r[0] == "instance"), key=lambda r: -r[1].count("."))
+    lines = [f"check_sec -map -hierarchy -spec {{{s}}} -imp {{{i}}}" for _, s, i in rules]
+    lines += [f"check_sec -map -init -spec {{{s}}} -imp {{{i}}}" for k, s, i in keep if k == "signal"]
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def _empty_port(port) -> bool:
+    """An empty port (`module m(a, , b)`, or a trailing comma in a non-ANSI port
+    list: opencores pipelined_fft_256): it carries nothing and connects to
+    nothing. It is dropped from the header and from every connection; the
+    elaborator connects by name, so no position shifts."""
+    return kind(port) == "Port" and port.name == "" and getattr(port, "internalSymbol", None) is None
+
+
+def _string_literal(s: str) -> str:
+    """`s` (the string's value, escapes already resolved) as a string literal.
+    Every character that is not printable ASCII is escaped: a raw newline ends
+    the literal (`$display("...\\n")` broke the elaborated irda, uart16550,
+    vga_lcd, ...)."""
+    out = []
+    for ch in s:
+        if ch in '\\"':
+            out.append("\\" + ch)
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif " " <= ch <= "~":
+            out.append(ch)
+        else:  # octal, one escape per byte of the source's UTF-8
+            out.extend(f"\\{b:03o}" for b in ch.encode("utf-8"))
+    return '"' + "".join(out) + '"'
+
+
+def _unsized_unknown(node) -> bool:
+    """An unsized integer literal (`'bx`, `'h1z`) with x/z bits."""
+    if node.kind.name != "IntegerLiteral" or not node.isDeclaredUnsized:
+        return False
+    c = node.constant
+    return c is not None and isinstance(c.value, pyslang.SVInt) and c.value.hasUnknown
+
+
 def _int_literal(v) -> str:
     """An integer constant spelled out in full: slang's own choice of base
     (SVInt::toString's heuristics) without its abbreviation of wide values, which
@@ -1517,7 +1660,7 @@ def make_parse_env(incdirs=(), defines=()):
     pp = PreprocessorOptions()
     if defines:
         pp.predefines = list(defines)
-    opts = pyslang.Bag([pp])
+    opts = pyslang.Bag([pp, pragmas.lexer_options()])  # translate_off regions skipped as Jasper does
     _PARSE_ENV_KEEPALIVE.append((sm, opts))  # keep alive for the Compilation
     return sm, opts
 
@@ -1602,6 +1745,7 @@ class ElaboratedDesign:
     top: str               # top module name (empty if there is no top instance)
     tops: list             # all top-instance names (usually exactly one)
     verbatim: set          # module names emitted verbatim (the opaque/uncut region)
+    renames: list          # Emitter.rename_map: (kind, original path, emitted path)
 
 
 def elaborate_design(files, *, flatten=True, ignore=(),
@@ -1638,6 +1782,7 @@ def elaborate_design(files, *, flatten=True, ignore=(),
         top=tops[0] if tops else "",
         tops=tops,
         verbatim=set(emitter.verbatim),
+        renames=emitter.rename_map(comp),
     )
 
 
