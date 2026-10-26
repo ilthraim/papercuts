@@ -721,6 +721,15 @@ async def main():
         "cost on array-heavy designs; off by default.",
     )
     parser.add_argument(
+        "--jasper-time-limit",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Jasper: time budget of each per-cut check (check_sec -prove "
+        "-time_limit); a check that runs out is inconclusive and the cut is not "
+        "applied. Gates and consolidation checks are not limited. Default: none.",
+    )
+    parser.add_argument(
         "--jasper-engines",
         type=int,
         default=0,
@@ -1346,6 +1355,9 @@ async def main():
                 impl_module_folder=cur_dir,
                 is_top=is_top,
                 index=idx,
+                # one refuted output settles a cut; the rest of the proof is waste
+                cex_limit=1,
+                time_limit=f"{args.jasper_time_limit}s" if args.jasper_time_limit else None,
                 )
             mod.runs.append(run)
             all_runs.append(run)

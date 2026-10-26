@@ -299,6 +299,7 @@ def generate_jasper_tcl_script(clock: "str | None" = None,
     tcl_script += """\n
 #Arguments are : (5) top_module_path, (6) spec_lib_path, (7) imp_module_path, (8) is_top,
 #                (9) a Tcl file of mapping commands, or "-"
+#                (10) check_sec -prove -time_limit, or "-"  (11) -cex_limit, or "-"
 
 set is_top [lindex $argv 8]
 
@@ -336,7 +337,10 @@ if {[catch {
     # Run proof and check results
     set_proofgrid_per_engine_max_local_jobs 1
     set_proofgrid_max_local_jobs ENGINES
-    set res [check_sec -prove -strategy proof]
+    set prove_limits {}
+    if {[lindex $argv 10] ni {"" "-"}} { lappend prove_limits -time_limit [lindex $argv 10] }
+    if {[lindex $argv 11] ni {"" "-"}} { lappend prove_limits -cex_limit [lindex $argv 11] }
+    set res [check_sec -prove -strategy proof {*}$prove_limits]
     report -summary
     #do_sum
     # prove -wait
@@ -427,8 +431,9 @@ async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str =
     # the inherited tty into raw mode (ONLCR off) and doesn't restore it, making
     # subsequent status prints "stairstep" across the screen.
     map_script = run.map_script or "-"
+    limits = f"{run.time_limit or '-'} {run.cex_limit or '-'}"
     process = await asyncio.create_subprocess_shell(
-        f"csh -c '{_jg_command()} -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top} {map_script}'",
+        f"csh -c '{_jg_command()} -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top} {map_script} {limits}'",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

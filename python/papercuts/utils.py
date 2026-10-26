@@ -78,3 +78,8 @@ class Run:
     #: A Tcl file of check_sec mapping commands the backend applies after setup
     #: (the elaboration gate: names the elaborator changed). None: none.
     map_script: "str | None" = None
+    #: check_sec -prove limits for this run (None: none). A per-cut check stops at
+    #: its first counterexample (cex_limit 1: any refuted output settles the cut)
+    #: and, with --jasper-time-limit, after that budget ("600s"; inconclusive).
+    time_limit: "str | None" = None
+    cex_limit: "int | None" = None
