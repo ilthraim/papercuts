@@ -51,8 +51,15 @@ def _force_idxs(pc, line, polarity):
 
 
 def run():
-    tree = SyntaxTree.fromText(SRC)
-    pc = Papercutter(tree)
+    # Both bit-shrink modes: cegis-comb always uses the intermediate-wire one, and
+    # the substitution once ran only in narrow mode, so every force-const cut there
+    # was identical to the source (runs/cegis_comb_dataset/ISSUES.md 103).
+    for wire_mode in (False, True):
+        n = _check(Papercutter(SyntaxTree.fromText(SRC), wire_mode))
+    print(f"test_force_const: OK ({n} force-const cuts, narrow and intermediate-wire modes)")
+
+
+def _check(pc):
     info = pc.cut_info()
     fc = [i for i, (t, _) in enumerate(info) if t.startswith("force-const")]
 
@@ -81,7 +88,7 @@ def run():
     assert "dout[7] = 1'b0;" in outc, f"read of lhs0 not forced:\n{outc}"
     assert "{lhs0, dout[6:0]} = din;" in outc, "lhs0 in LHS concat must not be substituted"
 
-    print(f"test_force_const: OK ({len(fc)} force-const cuts)")
+    return len(fc)
 
 
 if __name__ == "__main__":

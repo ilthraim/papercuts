@@ -2569,16 +2569,19 @@ static bool isAssignmentWriteTarget(const SyntaxNode& node, const PortDirections
 }
 
 void Papercutter::handle(const IdentifierNameSyntax& node) {
-    // Narrow mode never renames reads for bit-shrink, but const-force substitutes
-    // matching reads with a 1-bit literal here (the declaration stays intact).
-    if (!shrinkWithIntermediate) {
-        if (!constForceActive.empty()) {
-            auto it = constForceActive.find(std::string(node.identifier.valueText()));
-            if (it != constForceActive.end() && !isAssignmentWriteTarget(node, &portDirections)) {
-                this->replace(node, makeIntLiteral(it->second ? "1'b1" : "1'b0", node.identifier.trivia()));
-                return;
-            }
+    // Const-force substitutes matching reads with a 1-bit literal (the declaration
+    // and its driver stay intact), in either bit-shrink mode. It once ran only in
+    // narrow mode, so under --shrink-with-intermediate (always on for cegis-comb)
+    // every force-const cut came out identical to the source.
+    if (!constForceActive.empty()) {
+        auto it = constForceActive.find(std::string(node.identifier.valueText()));
+        if (it != constForceActive.end() && !isAssignmentWriteTarget(node, &portDirections)) {
+            this->replace(node, makeIntLiteral(it->second ? "1'b1" : "1'b0", node.identifier.trivia()));
+            return;
         }
+    }
+    // Narrow mode never renames reads for bit-shrink.
+    if (!shrinkWithIntermediate) {
         visitDefault(node);
         return;
     }

@@ -143,6 +143,21 @@ def _body(text):
     return re.sub(r"=\s*(.+?);", lambda m: "= (" + m.group(1) + ");", t)
 
 
+def _companions_folded(text, sigs):
+    """Replace each read of a force-const companion `<sig>_papercuts` with its
+    folded driver (a literal, or `sig` itself: atoms, so no parentheses), leaving
+    the companion's own declaration and assign for _body to drop."""
+    out = []
+    for l in text.splitlines():
+        if not re.match(r"\s*(?:(?:logic|reg|bit|wire|tri)\b.*|assign \w+)_papercuts\s*[;=]", l):
+            for sig in sigs:
+                v = _fold(_rhs(text, sig))
+                assert re.fullmatch(r"1'b[01]|\w+", v), f"companion {sig} folds to {v}, not an atom"
+                l = re.sub(r"\b%s_papercuts\b" % re.escape(sig), v, l)
+        out.append(l)
+    return "\n".join(out)
+
+
 def _force(text, i, nsel):
     """Drive pc_sel<i> high and every other select low."""
     for k in range(nsel):
@@ -301,6 +316,19 @@ def _check(name, src):
                 got = _fold(_rhs(forced, sig))
                 want = lit if i in sels else sig
                 assert got == want, f"{name} cut[{i}] {sig}: got {got}, want {want}"
+            # The cut itself must read what the forced mux reads: each companion
+            # read becomes its folded value. Checking only the mux side let every
+            # force-const cut come out identical to the source in this
+            # (intermediate-wire) mode, unnoticed (runs/cegis_comb_dataset/ISSUES.md 103).
+            # A blocking-written target has no companion (its selects stay inert;
+            # test_mux_blocking), so there is no mux to compare it with.
+            if not any(i in sels for sels in cf_owner.values()):
+                continue
+            got = _norm(_reduce(_body(_companions_folded(forced, cf_owner))))
+            want = _norm(_reduce(_body(pc.cut_index_text([i]))))
+            assert got == want, f"{name} cut[{i}] {label}:\n  mux: {got}\n  cut: {want}"
+            assert _norm(_body(pc.cut_index_text([i]))) != _norm(_body(src)), \
+                f"{name} cut[{i}] {label}: the cut is identical to the source"
 
     return len(info)
 

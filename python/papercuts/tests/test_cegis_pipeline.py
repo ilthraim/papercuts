@@ -144,6 +144,36 @@ endmodule
         DESIGN = saved
 
 
+def test_force_const_consolidates():
+    # `t` is always 1, so forcing its reads to 1'b1 is valid and selected. Under
+    # cegis-comb (intermediate-wire bit-shrink) every force-const cut used to come
+    # out identical to the source: a no-op, held off, never in a set
+    # (runs/cegis_comb_dataset/ISSUES.md 103).
+    design = """
+module top(input logic a, input logic b, input logic c, output logic y);
+    wire t;
+    assign t = a | ~a;
+    assign y = t ? b : c;
+endmodule
+"""
+    global DESIGN
+    saved, DESIGN = DESIGN, design
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls, exit_ = pipeline(tmp, [])
+            assert exit_ is None, exit_
+            cuts = [r for r in results(tmp) if r["phase"] == "cuts"]
+            fc = {r["type"]: r for r in cuts if r["type"].startswith("force-const")}
+            assert set(fc) == {"force-const(0)", "force-const(1)"}, cuts
+            assert all(r["verdict"] != "noop" for r in fc.values()), fc
+            assert fc["force-const(1)"]["in_set"] and not fc["force-const(0)"]["valid"], fc
+            with open(os.path.join(tmp, calls[-1].impl_module_path)) as f:
+                text = f.read()
+            assert "t ?" not in text, text  # the read of t is gone from the joint check's design
+    finally:
+        DESIGN = saved
+
+
 def test_memory_words_are_paired():
     # opencores cr_div: memory words were not listed as registers, so they started
     # apart in the two copies and the run stopped with MiterMismatch, cuts all off
@@ -368,8 +398,12 @@ endmodule
             cuts = [r for r in results(tmp) if r["phase"] == "cuts"]
             ternary = [r for r in cuts if r["type"].startswith("ternary")]
             assert ternary and all(r["verdict"] == "untested" and not r["in_set"] for r in ternary), ternary
+            # forcing cclk to a constant reaches the clock too (these were no-ops
+            # until force-const worked in intermediate-wire mode)
+            force = [r for r in cuts if r["type"].startswith("force-const")]
+            assert len(force) == 2 and all(r["verdict"] == "untested" and not r["in_set"] for r in force), force
             with open(os.path.join(tmp, "outputs", "cegis", "summary.json")) as f:
-                assert json.load(f)["control_net"] == len(ternary)
+                assert json.load(f)["control_net"] == len(ternary) + len(force)
     finally:
         DESIGN = saved
 
