@@ -334,6 +334,25 @@ if {[catch {
     }
     report -summary
     check_sec -interface
+    # A cut that gives an uninitialized flop (or one bit of it) a constant input
+    # makes Jasper treat that flop as a constant from power-up and leave it out of
+    # the reset_x auto-mapping, so the imp's copy starts free and the check fails
+    # on a power-up value. Pair every imp reset_x signal still unmapped with the
+    # spec signal of the same name and width, as auto-mapping does for the rest
+    # (and as CEGIS's power-up model does). One that the spec does not have stays
+    # unmapped: it really is one-sided. (hls correlation, ISSUES.md 102)
+    set imp_top "[check_sec -get_imp_top_instance]."
+    set init_maps 0
+    foreach i [check_sec -interface -unmapped -imp -signal_type reset_x] {
+        if {[string first $imp_top $i] != 0} { error "unmapped imp signal outside $imp_top: $i" }
+        set s [string range $i [string length $imp_top] end]
+        if {[catch {get_signal_info -width $s} spec_width]} { continue }
+        if {$spec_width != [get_signal_info -width $i]} { continue }
+        check_sec -map -init -spec $s -imp $i
+        puts "__PC_INIT_MAP__:$s"
+        incr init_maps
+    }
+    if {$init_maps} { check_sec -interface }
     # Run proof and check results
     set_proofgrid_per_engine_max_local_jobs 1
     set_proofgrid_max_local_jobs ENGINES
