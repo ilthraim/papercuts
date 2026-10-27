@@ -168,8 +168,28 @@ def analyze_dead(comp: Compilation, *, protect_modules=(), clean_decls=True):
             elif k in ("GenerateBlockArray", "GenerateBlock"):
                 walk(m)
 
+    # Signals named in an assignment whose target is not a single signal (a
+    # concatenation such as `assign {op, rd, ra} = ir;`) are never pruned
+    # either. The emitter drops an assignment only when its sole target is
+    # pruned, so the concatenation stayed while the declaration went. In a
+    # continuous assign the name then became an implicit 1-bit net, which
+    # shortened the concatenation and moved every other field onto the wrong
+    # bits (opencores aemb edk32: the FV gate failed on `assign {wOPC, wRD, wRA,
+    # wRB, wALT} = xIREG` with wRD and wALT pruned).
+    def lvalue_names(node):
+        if node.kind.name != "Assignment":
+            return
+        left = node.left
+        k = left.kind.name
+        while k in ("ElementSelect", "RangeSelect", "MemberAccess", "Conversion"):
+            left = left.operand if k == "Conversion" else left.value
+            k = left.kind.name
+        if k != "NamedValue":
+            named(node.left)
+
     for inst in comp.getRoot().topInstances:
         walk(inst.body)
+        inst.body.visit(lvalue_names)
 
     values: set[str] = set()
     decls: set[str] = set()
