@@ -58,6 +58,31 @@ def child_port_directions(tree: SyntaxTree, port_directions: dict) -> dict:
     return {c: port_directions[c] for c in get_instantiated_modules(tree) if c in port_directions}
 
 
+def forwarded_selects(modules, kids: dict[str, list[str]], own: dict[str, int]) -> dict[str, list[tuple[str, int]]]:
+    """{module: every (module, select) it must carry for the modules below it},
+    each child's own selects before what that child forwards, first-seen order,
+    deduplicated. A dict dedups in O(1); a list membership test made this
+    quadratic in the selects carried (opencores pairing: 17718 modules; ISSUES.md
+    115)."""
+    fwd: dict[str, list[tuple[str, int]]] = {}
+
+    def forwarded(name: str, stack: tuple[str, ...] = ()) -> list[tuple[str, int]]:
+        if name in fwd:
+            return fwd[name]
+        if name in stack:
+            raise SystemExit(f"module instantiation cycle: {' -> '.join(stack + (name,))}")
+        out: dict[tuple[str, int], None] = {}
+        for child in kids.get(name, []):
+            for entry in [(child, i) for i in range(own.get(child, 0))] + forwarded(child, stack + (name,)):
+                out.setdefault(entry, None)
+        fwd[name] = list(out)
+        return fwd[name]
+
+    for name in modules:
+        forwarded(name)
+    return fwd
+
+
 # MARK: Module context
 @dataclass
 class ModuleCuts:
@@ -1223,26 +1248,7 @@ async def main():
         kids = {n: [c for c in get_instantiated_modules(t) if c in muxed]
                 for n, t in muxed.items()}
 
-        fwd: dict[str, list[tuple[str, int]]] = {}
-
-        def forwarded(name: str, stack: tuple[str, ...] = ()) -> list[tuple[str, int]]:
-            """Every (module, select) this module must carry for the modules below
-            it, deepest-last and deduplicated."""
-            if name in fwd:
-                return fwd[name]
-            if name in stack:
-                raise SystemExit(f"module instantiation cycle: {' -> '.join(stack + (name,))}")
-            out: list[tuple[str, int]] = []
-            for child in kids.get(name, []):
-                for entry in [(child, i) for i in range(own.get(child, 0))] + \
-                             forwarded(child, stack + (name,)):
-                    if entry not in out:
-                        out.append(entry)
-            fwd[name] = out
-            return out
-
-        for name in muxed:
-            forwarded(name)
+        fwd = forwarded_selects(muxed, kids, own)
 
         # Rename the muxed copy so it can be elaborated next to the original: a
         # miter instantiates both, and two definitions of one name collide. Only
