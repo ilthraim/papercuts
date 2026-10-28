@@ -6,7 +6,9 @@ name, so the renamed ones were free on each side and the gate failed on
 designs that were equivalent (opencores bubblesortmodule, xge_mac, sbd_sqrt_fp,
 the koios designs). Jasper proved all three opencores ones once given:
 `-hierarchy` rules for instances, deepest first, and `-init` maps for signals
-(ISSUES 96). A signal the dead-code prune removed is not mapped.
+(ISSUES 96). A signal the dead-code prune removed is not mapped. The rules go
+as one list command per depth: one command each stalled opencores pairing's
+gate (10966 rules, ~6/min and slowing; as lists, 87 s, same mappings; ISSUES 109).
 """
 
 import os
@@ -57,8 +59,9 @@ def run():
     lines = script.splitlines()
     assert "check_sec -map -init -spec {h.r} -imp {h_r}" in lines, script
     rules = [l for l in lines if "-hierarchy" in l]
-    assert rules.index("check_sec -map -hierarchy -spec {k[0].m.g[1].u} -imp {k_0_m.g_1_u}") < \
-        rules.index("check_sec -map -hierarchy -spec {k[0].m} -imp {k_0_m}"), rules  # deepest first
+    assert rules == ["check_sec -map -hierarchy -spec {{k[0].m.g[0].u} {k[0].m.g[1].u}} "
+                     "-imp {{k_0_m.g_0_u} {k_0_m.g_1_u}}",
+                     "check_sec -map -hierarchy -spec {{k[0].m}} -imp {{k_0_m}}"], rules  # one per depth, deepest first
 
     # a renamed signal the prune removed is not mapped
     pruned = re.sub(r"\n\s*(reg|logic)\s+h_r;", "\n", elab.source)
@@ -73,7 +76,7 @@ def run():
     flipped = gate_map_script(elab.renames, build_compilation_from([SyntaxTree.fromText(elab.source)]),
                               spec_is_original=False)
     assert "check_sec -map -init -spec {h_r} -imp {h.r}" in flipped.splitlines(), flipped
-    assert "check_sec -map -hierarchy -spec {k_0_m} -imp {k[0].m}" in flipped.splitlines(), flipped
+    assert "check_sec -map -hierarchy -spec {{k_0_m}} -imp {{k[0].m}}" in flipped.splitlines(), flipped
 
     tcl = generate_jasper_tcl_script(clock="clk")
     assert 'if {[lindex $argv 9] ne "-"}' in tcl and "source [lindex $argv 9]" in tcl, tcl

@@ -1577,8 +1577,17 @@ def gate_map_script(renames, comp, spec_is_original: bool) -> str:
             walk(m)
     keep = [(k, o, e) if spec_is_original else (k, e, o)
             for k, o, e in renames if e in present and _JASPER_PATH.fullmatch(o)]
-    rules = sorted((r for r in keep if r[0] == "instance"), key=lambda r: -r[1].count("."))
-    lines = [f"check_sec -map -hierarchy -spec {{{s}}} -imp {{{i}}}" for _, s, i in rules]
+    # One command per depth, deepest first: a rule cannot enclose another of the
+    # same depth, so order within a command does not matter. One command per rule
+    # cost Jasper ~1 s each and grew with the count: opencores pairing's 10966
+    # stalled the gate for hours (ISSUES.md 109); as lists, 87 s, same mappings.
+    by_depth = {}
+    for k, s, i in keep:
+        if k == "instance":
+            by_depth.setdefault(s.count("."), []).append((s, i))
+    lines = [f"check_sec -map -hierarchy -spec {{{' '.join('{' + s + '}' for s, _ in rs)}}} "
+             f"-imp {{{' '.join('{' + i + '}' for _, i in rs)}}}"
+             for _, rs in sorted(by_depth.items(), reverse=True)]
     lines += [f"check_sec -map -init -spec {{{s}}} -imp {{{i}}}" for k, s, i in keep if k == "signal"]
     return "\n".join(lines) + "\n" if lines else ""
 
