@@ -48,6 +48,16 @@ def cut_family(ctype: str) -> str:
     return ctype.split("(", 1)[0]
 
 
+def child_port_directions(tree: SyntaxTree, port_directions: dict) -> dict:
+    """The entries of `port_directions` for the modules `tree` instantiates: the
+    only ones the cutter and muxer look up (by the instantiation's type name, as
+    get_instantiated_modules reports it). The binding copies the whole map into
+    C++ on every call, so passing all of it cost each module time in proportion to
+    the design: opencores pairing's 17718 concretized modules took ~40 ms each,
+    twice over (ISSUES.md 111)."""
+    return {c: port_directions[c] for c in get_instantiated_modules(tree) if c in port_directions}
+
+
 # MARK: Module context
 @dataclass
 class ModuleCuts:
@@ -1190,7 +1200,7 @@ async def main():
                 # so a difference here is a difference in what pc_sel<N> means.
                 symbolicRanges=symbolic_ranges.get(name, {}),
                 shrinkWithIntermediate=args.shrink_with_intermediate,
-                portDirections=port_directions,
+                portDirections=child_port_directions(tree, port_directions),
             )
             muxed[name] = rewrite
             mux_inserted[name] = set(inserted)
@@ -1328,7 +1338,7 @@ async def main():
             shrink_with_intermediate=args.shrink_with_intermediate,
             binops_in_conditions_only=args.binops_in_conditions_only,
             symbolic_ranges=symbolic_ranges.get(name, {}),
-            port_directions=port_directions,
+            port_directions=child_port_directions(ntree, port_directions),
         )
         cut_infos = list(pc.cut_info())  # (type, line) aligned 1:1 with cut indices
 
