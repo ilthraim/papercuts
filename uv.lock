@@ -3,15 +3,6 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
-name = "boto"
-version = "2.49.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c8/af/54a920ff4255664f5d238b5aebd8eedf7a07c7a5e71e27afcfe840b82f51/boto-2.49.0.tar.gz", hash = "sha256:ea0d3b40a2d852767be77ca343b58a9e3a4b00d9db440efb8da74b4e58025e5a", size = 1478498, upload-time = "2018-07-11T20:58:58.057Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/10/c0b78c27298029e4454a472a1919bde20cb182dab1662cec7f2ca1dcc523/boto-2.49.0-py2.py3-none-any.whl", hash = "sha256:147758d41ae7240dc989f0039f27da8ca0d53734be0eb869ef16e3adcfa462e8", size = 1359202, upload-time = "2018-07-11T20:58:55.711Z" },
-]
-
-[[package]]
 name = "nanobind-backend"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -59,25 +50,39 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "nanobind-backend" },
-    { name = "z3" },
+    { name = "pyosys" },
     { name = "z3-solver" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "nanobind-backend", specifier = ">=1.0" },
-    { name = "z3", specifier = ">=0.2.0" },
+    { name = "pyosys", specifier = ">=0.70" },
     { name = "z3-solver", specifier = ">=4.15.4.0" },
 ]
 
 [[package]]
-name = "z3"
-version = "0.2.0"
+name = "pyosys"
+version = "0.70"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "boto" },
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/b0/8cea81e87fa4bd55e40f9138b96918ae926dea62b7133ed6a6bd01c09ba5/pyosys-0.70-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:6914c966fbb653ecaafd2b9b0a7e8c34f0b0b6b07c4b8c889fc9ebee404d0714", size = 24967875, upload-time = "2026-10-13T12:14:37.361Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/85/ab2fbd9ab64c8149963656e8a52d1d36f5f7d1dc3e7ad90acaf71da0f9bb/pyosys-0.70-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:c6a44f4c5dc1af76b819fd9c7bd1751a12b1f5f824040379378c5214052e94be", size = 28221266, upload-time = "2026-10-13T12:14:40.011Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/17/f53dbea0bdb0b3cada691b44e526fe18b5cb2b6ce435d63141cdd401a2b1/pyosys-0.70-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2f29d3c38bdd5656847f286cd8c1f0aa459edd94e75d98aa404d1898bce59875", size = 32017649, upload-time = "2026-10-13T12:14:43.149Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/46/494666f0ce179d5c0760f63590953dacab63b80ca3e14cfbc9aee4697283/pyosys-0.70-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:cbc53ab06994646e1cf06a478a53be061b0626c85166f88f6254e7d2539156ec", size = 34386889, upload-time = "2026-10-13T12:14:46.164Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/cd/0b0881134b8f09f6b293746a13bb7d3a882c636393c18d268b2bdf379f95/pyosys-0.70-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:d6de7c19a94612e2a53dafee7e89c83159b949993e21305d0448c7db9caac739", size = 24970061, upload-time = "2026-10-13T12:14:49.324Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/ff/5d5de327fc2aa39881231e7c03ef2b633d8c4646a26c1c648ed21044ef71/pyosys-0.70-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:38d4cbfdc75c0e506e14858d9de4944a9453119e8fbd73490e99d5f1e8831cda", size = 28224659, upload-time = "2026-10-13T12:14:52.16Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/88/f9974711beb7afad04a8aafecee79f8a664af135fd7e72f67071df88aa13/pyosys-0.70-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:79c543b5a9deb1ff2bb14bc98bb6f66802cfdd8cdc2edd5d4b31363af3ecab19", size = 32018472, upload-time = "2026-10-13T12:14:55.181Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/71/2ccb492fec90e80ac7045144a9be50bdf17b7d3ab132aa20b146df139f53/pyosys-0.70-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b9f2be9dbb508d41a94072fbcc79c2a94afcf01183b06a6ac39a8d58d96b0781", size = 34386645, upload-time = "2026-10-13T12:14:58.536Z" },
+    { url = "https://files.pythonhosted.org/packages/72/9a/11699d8a8aa97e9e72b56de1f20dee443bd35e3ffa74813d5f9985208a8f/pyosys-0.70-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:9f62e3a2ca72e6f91f42d65e0db29198945811da302368a025b093d8654fb53c", size = 24970932, upload-time = "2026-10-13T12:23:03.013Z" },
+    { url = "https://files.pythonhosted.org/packages/46/dd/106e3c7ec7288e9581113b99a160aeead4b035c875a091bf22da0a5f994c/pyosys-0.70-cp314-cp314-macosx_11_0_x86_64.whl", hash = "sha256:90e1652d71f89fdcfa1cde18a9c517104287f7e962e194ca0ea965fad24a4994", size = 28225879, upload-time = "2026-10-13T12:23:34.985Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/38/23c1c343a654b4d85435d601ef72428bf51f972e750955f3604fdb883f33/pyosys-0.70-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ceca189601df14cf647c2e59915340dfa3492d91d70fe8f7810d09cbc1c38bdf", size = 32018835, upload-time = "2026-10-13T12:23:38.69Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/61/5170b3fecb190d7511a9b552e6030f2af37a858a1f7fb5b4bb0a421e91ed/pyosys-0.70-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ad7ff719e5b1ece0e9e8697fe12f58d59a5af85f115742c702edaa1e7255aacb", size = 34387308, upload-time = "2026-10-13T12:23:42.323Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/5a/1c674d985bf156e0c578a9dd7e3c020ba9b6c2aad0739b269d75cb979126/pyosys-0.70-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:f5dfd814146037d58efb5885e89ccdc8d59bd723562ec40e4fd8fc05c436669c", size = 24973499, upload-time = "2026-10-13T12:23:45.606Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/53/937b863ed20c07be78a40de688b5f8cfe9814d907d959db69b3976b47260/pyosys-0.70-cp314-cp314t-macosx_11_0_x86_64.whl", hash = "sha256:3df8fe46cf0233d579f581889b0eceec6101a8f5b088c5acbb892dade516edf7", size = 28227706, upload-time = "2026-10-13T12:23:48.846Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/15/6c1bcddc1454922a9387a577296d3595049779ef364e3b6f6de15394906b/pyosys-0.70-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7f8f4d97b166fa8c796509748849617fb4b7d78fd4872d746464440991b451e6", size = 32063667, upload-time = "2026-10-13T12:23:52.95Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/46/2d4012cc1b52b0bf34190da088e8f1e03775ff2b7dad2f8174b98a8e224d/pyosys-0.70-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:85eecfd6b0439e97c631d12fc205b02e53dded53dae11bf522fa8a3c683c18f1", size = 34442845, upload-time = "2026-10-13T12:23:56.093Z" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bc/00/c1f1dfb34f5975c0d5f03e108b0669246026b83512b755e9bc725638219d/z3-0.2.0.tar.gz", hash = "sha256:34819e964d71e1474f933b34b9e65f0d021ccfc9d9edbbded54d54c1a9352b90", size = 24593, upload-time = "2018-03-06T11:01:04.222Z" }
 
 [[package]]
 name = "z3-solver"
