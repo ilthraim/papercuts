@@ -26,10 +26,13 @@ import os
 import re
 import subprocess
 import sys
+from array import array
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
 from pyosys import libyosys as ys
 
+from papercuts.cegis.flat import Flat
 from papercuts.cegis.xpair import XReport, pair_x
 from papercuts.pragmas import READ_SLANG_ARGS
 from papercuts.elaborator import ident
@@ -73,48 +76,44 @@ def control_inputs(design) -> list[str]:
     muxes (`cntr_clk = rptc_ctrl[1] ? eclk_gate : wb_clk_i` -> `eclk_gate`); the
     loop accepted them and the joint Jasper check found the difference. A select
     in this set must not be searched."""
-    m = design.top_module()
-    parent: dict[tuple, tuple] = {}
-
-    def find(k):
-        parent.setdefault(k, k)
-        while parent[k] != k:
-            parent[k] = parent[parent[k]]
-            k = parent[k]
-        return k
-
-    def bits(sig):
-        return [(b.wire.name.str(), b.offset) for b in sig.to_sigbit_vector() if b.wire is not None]
-
-    for lhs, rhs in m.connections_:
-        for lb, rb in zip(lhs.to_sigbit_vector(), rhs.to_sigbit_vector()):
-            if lb.wire is not None and rb.wire is not None:
-                parent[find((lb.wire.name.str(), lb.offset))] = find((rb.wire.name.str(), rb.offset))
-    driver: dict[tuple, list] = {}  # alias root -> input bits of the cell driving it
+    f = Flat(design.top_module())
+    root = f.root
+    # The cell driving each alias class. A cell's inputs are walked once, however
+    # many of its output bits are reached: listing them per output bit made a wide
+    # cell cost outputs x inputs (koios bwave, 48 GB here; runs ISSUES.md 119).
+    driver = array("q", [-1]) * f.n
+    more = defaultdict(list)  # alias class -> further drivers (a conflict; check_drivers reports it)
     starts = []
-    for cell in m.cells_.values():
-        ins, outs = [], []
-        for port, sig in cell.connections_.items():
-            (ins if cell.input(port) else outs).extend(bits(sig))
-            name = port.str().lstrip("\\")
-            if cell.input(port) and (name in _CONTROL_PORTS or (name == "EN" and cell.type.str() in _LATCHES)):
-                starts.extend(bits(sig))
-        for b in outs:
-            driver.setdefault(find(b), []).extend(ins)
+    for idx, (_, t, ins, outs) in enumerate(f.cells):
+        for port, bits in ins.items():
+            name = port.lstrip("\\")
+            if name in _CONTROL_PORTS or (name == "EN" and t in _LATCHES):
+                starts.extend(b for b in bits if b >= 0)
+        for bits in outs.values():
+            for b in bits:
+                if b >= 0:
+                    r = root[b]
+                    if driver[r] < 0:
+                        driver[r] = idx
+                    else:
+                        more[r].append(idx)
     inputs = {}
-    for w in m.wires_.values():
-        if w.port_input:
-            for i in range(w.width):
-                inputs[find((w.name.str(), i))] = w.name.str().lstrip("\\")
-    seen, found, todo = set(), set(), [find(b) for b in starts]
+    for name, first, width in f.inputs:
+        for i in range(width):
+            inputs[root[first + i]] = name.lstrip("\\")
+    seen, walked = bytearray(f.n), bytearray(len(f.cells))
+    found, todo = set(), [root[b] for b in starts]
     while todo:
         r = todo.pop()
-        if r in seen:
+        if seen[r]:
             continue
-        seen.add(r)
+        seen[r] = 1
         if r in inputs:
             found.add(inputs[r])
-        todo.extend(find(b) for b in driver.get(r, ()))
+        for idx in ([driver[r]] if driver[r] >= 0 else []) + more.get(r, []):
+            if not walked[idx]:
+                walked[idx] = 1
+                todo.extend(root[b] for bits in f.cells[idx][2].values() for b in bits if b >= 0)
     return sorted(found)
 
 
@@ -298,6 +297,7 @@ def build_btor(rtl: list[str], top: str, out_base: str, slang_args: tuple[str, .
     with _stdout_to(f"{out_base}.pyosys.log"):
         ys.run_pass(f"read_rtlil {out_base}.pre.il", pre)
         control = control_inputs(pre)
+    del pre  # not held through pair_x: two copies of a large miter at once (runs ISSUES.md 119)
     d = ys.Design()
     with _stdout_to(f"{out_base}.pyosys.log"):
         ys.run_pass(f"read_rtlil {out_base}.il", d)
