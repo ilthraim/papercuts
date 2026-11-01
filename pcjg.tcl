@@ -12,7 +12,7 @@ if {[catch {
     if {$is_top eq "True"} {
         analyze -sv17 -y [lindex $argv 6] [lindex $argv 7] +libext+.sv
     } else {
-        analyze -sv17 -v [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
+        analyze -sv17 [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     }
     elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64
     # Analyze and elaborate the implementation design

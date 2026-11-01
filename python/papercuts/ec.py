@@ -310,7 +310,11 @@ if {[catch {
     if {$is_top eq "True"} {
         analyze -sv17 -y [lindex $argv 6] [lindex $argv 7] +libext+.sv
     } else {
-        analyze -sv17 -v [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
+        # The module under test is a plain source, not a -v library file: a
+        # module instantiated by one that -y pulled in resolves through -y,
+        # so the golden copy shadowed a -v cut and the check proved golden
+        # against golden (every module 2+ levels below the top).
+        analyze -sv17 [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     }
     elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 BBOX_A
     # Analyze and elaborate the implementation design
