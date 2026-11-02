@@ -396,6 +396,8 @@ class CombCegis:
         seconds, or when nothing is left. Returns the newly accepted assignments."""
         if distance < 1:
             raise ValueError(f"farm distance {distance}: expected >= 1")
+        if not self.sels:
+            return []  # the one empty assignment is all there is, and the search accepted it
         t0 = time.time()
         found: list[dict[str, bool]] = []
         self._block(accepted, distance)

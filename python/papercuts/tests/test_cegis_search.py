@@ -37,6 +37,13 @@ CANCEL = """
 11 bad 10
 """
 
+NO_SELECTS = """
+1 sort bitvec 1
+2 input 1 a
+3 neq 1 2 2
+4 bad 3
+"""
+
 # Two outputs that share nothing, each with its own cancelling pair: s0 and s1 on x, s2 and
 # s3 on y. Exactly 4 sets are valid: each pair is all on or all off.
 TWO_OUTPUTS = """
@@ -244,6 +251,16 @@ def test_farm_distance_and_budget():
     before = len(c.stats)
     c.farm(best, max_calls=2)
     assert len(c.stats) == before + 2
+
+
+def test_farm_with_no_selects_has_nothing_to_do():
+    # vtr__single_wire and vtr__single_ff: no cuts, so there is nothing to block
+    for distance in (1, 8):
+        c = loop(NO_SELECTS)
+        assert c.run() == {}
+        before = len(c.stats)
+        assert c.farm({}, max_calls=8, distance=distance) == []
+        assert len(c.stats) == before
 
 
 def test_trace_records_every_call():
