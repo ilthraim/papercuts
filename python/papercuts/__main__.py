@@ -409,7 +409,8 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
             select_cuts, man, f"{output_dir}/cegis", solver=args.cegis_solver, timeout=args.cegis_timeout,
             individual=args.cegis_individual, pin_off=[c for c in noop_ids if c in testable],
             verbose=args.verbose, on_event=on_event,
-            slang_args=("--ignore-initial",) if args.cegis_ignore_initial else ())
+            slang_args=("--ignore-initial",) if args.cegis_ignore_initial else (),
+            core_levels=args.cegis_core_levels, trace_path=f"{output_dir}/cegis/trace.jsonl")
     except (DesignAssertsPresent, DesignMalformed, MiterMismatch, ManifestError, AnonymousX,
             XPairingError) as e:
         tracker.finish(id(sel_task), "error", False)
@@ -783,6 +784,14 @@ async def main():
         "--ignore-initial, for designs whose initial blocks it rejects (e.g. "
         "`mem[i] <= $random`). Jasper ignores initial constructs too; ROM contents "
         "loaded in an initial block are then free in the CEGIS model as well.",
+    )
+    parser.add_argument(
+        "--cegis-core-levels",
+        default=None,
+        metavar="LEVELS",
+        help="--method cegis-comb: minimize each conflict core with CaDiCaL (needs python-sat), "
+        "at these conflict budgets, e.g. 10,50,250,1000 or 10,50,inf. Off by default: the "
+        "solver's raw core is learned as it comes.",
     )
     parser.add_argument(
         "--cegis-individual",

@@ -54,10 +54,12 @@ from collections.abc import Callable
 
 import z3
 
+from papercuts.cegis import core_min
 from papercuts.cegis.btor2z3 import Design, Trace, _conj, model_value
 from papercuts.cegis.registers import correspondence, match_registers, power_up
 from papercuts.cegis.solvers import check, make_solver, resolve_solver, run_external, smt2_text
 from papercuts.cegis.solvers import core as solver_core
+from papercuts.cegis.trace import TraceWriter
 
 # Papercuts names a module's own selects pc_sel<N> and the ones it forwards for a
 # child pc_sel_<module>_<N>, so a hierarchical top carries both shapes. Only the
@@ -114,8 +116,21 @@ class CombCegis:
         registers: list[tuple[str, int]] | None = None,
         on_event: Callable[..., None] | None = None,
         timeout: float | None = None,
+        core_levels=None,
+        learn_cores: bool = True,
+        steer=None,
+        trace_path: str | None = None,
     ):
+        """`core_levels`: minimize each conflict core with CaDiCaL (core_min), at these
+        conflict levels; None uses the solver's raw core. `learn_cores=False` learns
+        counterexamples only, the ablation baseline. `steer`: see steer.py.
+        `trace_path`: write one JSON line per verifier call (trace.py)."""
+        if core_levels is not None and not learn_cores:
+            raise ValueError("core_levels minimizes learned cores, and learn_cores=False learns none")
         self.d = design
+        self.core_levels = None if core_levels is None else core_min.parse_levels(core_levels)
+        self.learn_cores = learn_cores
+        self.steer = steer
         anon = design.input_names(r"^_anon\d+$")
         if anon:
             raise AnonymousX(f"{len(anon)} anonymous X input(s), e.g. {anon[:5]}")
@@ -148,9 +163,10 @@ class CombCegis:
         self.synth = z3.Optimize()
         for b in self.sels.values():
             self.synth.add_soft(b, 1)
+        self.hard: list[z3.BoolRef] = []  # all the synthesizer's constraints: lex steering rebuilds from these
         self.exclusive = [(a, b) for a, b in (exclusive or []) if a in self.sels and b in self.sels]
         for a, b in self.exclusive:
-            self.synth.add(z3.Not(z3.And(self.sels[a], self.sels[b])))
+            self._add_hard(z3.Not(z3.And(self.sels[a], self.sels[b])))
         self.cex_traces: list[dict] = []
         self.learned: list[z3.BoolRef] = []
         self.cores: list[list[tuple[str, bool]]] = []  # each learned core, as (select, value) literals
@@ -159,6 +175,23 @@ class CombCegis:
         self.base_ok: bool | None = None  # set by run(): R at power-up on the result
         self.base_evidence = ""
         self.total_s: float | None = None
+        self.last_extra: list = []  # further exact cores from the last conflict_core
+        self.trace = (TraceWriter(trace_path, self.sel_names, self.exclusive, two_frames=self.two_frames)
+                      if trace_path else None)
+        self._traced = 0  # stats records already written
+
+    def _add_hard(self, c: z3.BoolRef) -> None:
+        self.hard.append(c)
+        self.synth.add(c)
+
+    def flush_trace(self) -> None:
+        """Write the records not yet written. A record is complete once the next
+        candidate exists, since it carries the time spent producing that candidate."""
+        if self.trace is None:
+            return
+        for st in self.stats[self._traced:]:
+            self.trace.iteration(st)
+        self._traced = len(self.stats)
 
     def log(self, *a):
         if self.verbose:
@@ -253,15 +286,28 @@ class CombCegis:
         """Subset of the assignment that already violates the spec on this cex."""
         formula = self._cex_formula(cex, self.sel_bv)
         literals = [(n, bool(assignment[n])) for n in self.sel_names]
-        r, lits = solver_core(self.solver, [formula], literals, timeout_s=self.timeout)
-        if r != "unsat":
-            raise RuntimeError(f"counterexample did not reproduce with selects as assumptions ({r})")
-        core = [self.sels[n] if v else z3.Not(self.sels[n]) for n, v in lits]
+        self.last_extra = []
+        if self.core_levels is not None:
+            m = core_min.minimize(formula, literals, self.core_levels)
+            lits = m.lits
+            self.last_extra = [self._core_clause(e) for e in m.extra]
+            self.cores.extend(list(e) for e in m.extra)
+            if self.stats:
+                self.stats[-1].update(core_first=m.first_core, extra_cores=len(m.extra))
+        else:
+            r, lits = solver_core(self.solver, [formula], literals, timeout_s=self.timeout)
+            if r != "unsat":
+                raise RuntimeError(f"counterexample did not reproduce with selects as assumptions ({r})")
         self.cores.append(list(lits))
-        return [n for n, _ in lits], core
+        if self.stats:
+            self.stats[-1]["core_lits"] = list(lits)
+        return [n for n, _ in lits], self._core_clause(lits)
+
+    def _core_clause(self, lits) -> list:
+        return [self.sels[n] if v else z3.Not(self.sels[n]) for n, v in lits]
 
     def add_cex(self, cex: dict):
-        self.synth.add(self._cex_formula(cex, self.sel_bv))
+        self._add_hard(self._cex_formula(cex, self.sel_bv))
         self.cex_traces.append(cex)
 
     def add_conflict(self, core) -> bool:
@@ -271,22 +317,109 @@ class CombCegis:
         self._learned_keys.add(key)
         clause = z3.Not(z3.And(*core))
         self.learned.append(clause)
-        self.synth.add(clause)
+        self._add_hard(clause)
         return True
 
     def synthesize(self) -> dict[str, bool] | None:
         t0 = time.time()
         asg = None
-        if self.synth.check() == z3.sat:
-            m = self.synth.model()
+        opt = self._steered()
+        if opt.check() == z3.sat:
+            m = opt.model()
             asg = {nm: z3.is_true(m.eval(b, model_completion=True)) for nm, b in self.sels.items()}
         dt = time.time() - t0
         if self.stats:
             self.stats[-1]["synth_s"] = dt
+            self.flush_trace()
         if asg is not None:
             self.log(f"  synthesize: {sum(asg.values())}/{len(self.sel_names)} selects on in {dt:.2f}s")
         self.on_event("synth", on=None if asg is None else sum(asg.values()), s=round(dt, 3))
         return asg
+
+    def _steered(self) -> z3.Optimize:
+        """The optimizer for this call. A hint goes on the running one. Lex needs a
+        second objective whose weights change every call, and soft constraints cannot
+        be retracted, so it builds a fresh optimizer from the hard constraints."""
+        if self.steer is None:
+            return self.synth
+        if self.steer.mode == "hint":
+            for n, v in self.steer.phases().items():
+                self.synth.set_initial_value(self.sels[n], z3.BoolVal(v))
+            return self.synth
+        opt = z3.Optimize()
+        opt.add(*self.hard)
+        for b in self.sels.values():
+            opt.add_soft(b, 1, "count")
+        for n, w in self.steer.weights().items():
+            opt.add_soft(self.sels[n] if w > 0 else z3.Not(self.sels[n]), abs(w), "tie")
+        return opt
+
+    def _learn(self, cex: dict, asg: dict[str, bool]) -> None:
+        """Everything a refuted candidate teaches the synthesizer."""
+        if self.learn_cores:
+            t0 = time.time()
+            names, core = self.conflict_core(cex, asg)
+            self.stats[-1]["core_s"] = time.time() - t0
+            self.stats[-1]["core"] = names
+            if not names:
+                self.on_event("error", message="empty conflict core: the copies differ with all cuts off")
+                raise MiterMismatch(cex, "counterexample independent of every select (empty conflict core); "
+                                         f"unmatched registers: {self.unmatched}")
+            self.on_event("cex", frames=len(cex["inputs"]), core=names)
+            self.log(f"  cex {cex['inputs']} init={cex['init']}")
+            self.log(f"  conflict core: {names}")
+            self.add_cex(cex)
+            self.add_conflict(core)
+            for extra in self.last_extra:
+                self.add_conflict(extra)
+            if self.steer is not None:
+                self.steer.observe(self.stats[-1]["core_lits"])
+        else:
+            self.on_event("cex", frames=len(cex["inputs"]), core=None)
+            self.log(f"  cex {cex['inputs']} init={cex['init']}")
+            self.add_cex(cex)
+
+    # ------------------------------------------------------------ farming
+    def farm(self, accepted: dict[str, bool], max_calls: int, max_s: float | None = None,
+             distance: int = 1) -> list[dict[str, bool]]:
+        """After the search: more assignments that meet the spec, as training data.
+        Blocks each accepted assignment and carries on, so the synthesizer proposes
+        the next best thing it cannot yet refute. Records are marked phase "farm".
+        Refuted proposals teach it as usual and are the near-boundary negatives.
+
+        `distance` > 1 also keeps later candidates at least that Hamming distance from
+        every accepted one. Blocking only the exact assignment tends to return its
+        one-flip neighbours, which are nearly the same training example.
+
+        This changes the synthesizer, so `accepted`, not anything after, is the
+        result of the search. Stops after `max_calls` verifier calls, `max_s`
+        seconds, or when nothing is left. Returns the newly accepted assignments."""
+        if distance < 1:
+            raise ValueError(f"farm distance {distance}: expected >= 1")
+        t0 = time.time()
+        found: list[dict[str, bool]] = []
+        self._block(accepted, distance)
+        for _ in range(max_calls):
+            if max_s is not None and time.time() - t0 > max_s:
+                break
+            asg = self.synthesize()
+            if asg is None:
+                break
+            self.stats.append({"iter": len(self.stats), "phase": "farm",
+                               "assignment": [n for n in self.sel_names if asg[n]]})
+            cex = self.verify(asg)
+            self.stats[-1]["verify_result"], self.stats[-1]["verify_s"] = self.last_verify
+            if cex is None:
+                found.append(asg)
+                self._block(asg, distance)
+            else:
+                self._learn(cex, asg)
+        self.flush_trace()
+        return found
+
+    def _block(self, asg: dict[str, bool], distance: int) -> None:
+        flips = [z3.Not(b) if asg[n] else b for n, b in self.sels.items()]
+        self._add_hard(z3.Or(*flips) if distance == 1 else z3.PbGe([(f, 1) for f in flips], distance))
 
     # ------------------------------------------------------------ base
     def base(self, assignment: dict[str, bool]) -> tuple[bool, str]:
@@ -341,7 +474,7 @@ class CombCegis:
         if self.unmatched:
             self.log(f"unmatched registers (free in both copies, never compared): {self.unmatched}")
         asg = {n: True for n in self.sel_names}
-        if self.exclusive:  # all-on violates exclusivity: the synthesizer picks the seed
+        if self.exclusive or self.steer is not None:  # all-on may be illegal, and steering owns the first pick too
             asg = self.synthesize()
             if asg is None:
                 self.on_event("error", message="no assignment satisfies the exclusivity constraints")
@@ -359,24 +492,14 @@ class CombCegis:
                 self.stats[-1]["base"] = {"ok": self.base_ok, "evidence": self.base_evidence}
                 self.total_s = time.time() - t_start
                 self.log(f"  {'proved' if self.base_ok else 'NOT proved sequentially'}: {self.base_evidence}")
+                self.flush_trace()
                 self.log(f"done in {self.total_s:.2f}s, {it} counterexamples, {len(self.learned)} learned clauses")
                 self.on_event("done", on=sum(asg.values()), base=self.base_ok, total_s=round(self.total_s, 3))
                 return asg
-            t0 = time.time()
-            names, core = self.conflict_core(cex, asg)
-            self.stats[-1]["core_s"] = time.time() - t0
-            self.stats[-1]["core"] = names
-            if not names:
-                self.on_event("error", message="empty conflict core: the copies differ with all cuts off")
-                raise MiterMismatch(cex, "counterexample independent of every select (empty conflict core); "
-                                         f"unmatched registers: {self.unmatched}")
-            self.on_event("cex", frames=len(cex["inputs"]), core=names)
-            self.log(f"  cex {cex['inputs']} init={cex['init']}")
-            self.log(f"  conflict core: {names}")
-            self.add_cex(cex)
-            self.add_conflict(core)
+            self._learn(cex, asg)
             asg = self.synthesize()
             if asg is None:
+                self.flush_trace()
                 return self._no_assignment_left()
         self.on_event("error", message=f"iteration cap {max_iter} hit")
         raise RuntimeError("iteration cap hit")

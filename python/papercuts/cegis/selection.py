@@ -19,6 +19,9 @@ Steps, all in `workdir`:
   5. unless individual=False, each searched cut on alone (CombCegis.individually_valid)
 
 The manifest's clock and reset play no part (comb module docstring).
+
+`prepare_miter` is steps 1-3 alone, for callers that run the loop several ways on one
+miter (runs/smt_class). `Prepared.loop_args` are CombCegis's keyword arguments.
 """
 
 from __future__ import annotations
@@ -72,12 +75,34 @@ class Selection:
         return {m: sorted(v) for m, v in sorted(out.items())}
 
 
-def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: float | None = None,
-                individual: bool = True, pin_off: list[str] = (), verbose: bool = False,
-                on_event: Callable[..., None] | None = None, slang_args: tuple[str, ...] = ()) -> Selection:
-    """`pin_off`: ids of testable cuts to hold off rather than search (the
-    pipeline's no-ops, whose cut source would not match what the mux does).
-    `slang_args`: extra read_slang options for every netlist built here."""
+@dataclass
+class Prepared:
+    """A built miter and what the loop needs to know about it."""
+
+    miter_sv: str
+    btor: str
+    xpair: XReport
+    registers: list[tuple[str, int]]
+    registers_dropped: list[str]
+    testable: list[Cut]  # searched
+    pinned: list[Cut]  # testable but held off: the caller's pin_off and control_net
+    control_net: list[Cut]
+    inert: list[str]  # select ports pinned to 0
+    exclusive: list[tuple[str, str]]
+
+    @property
+    def info(self) -> str:
+        return self.btor[: -len(".btor")] + ".info"
+
+    @property
+    def loop_args(self) -> dict:
+        return {"selects": [c.port for c in self.testable], "pin_zero": self.inert, "exclusive": self.exclusive,
+                "registers": self.registers}
+
+
+def prepare_miter(man: Manifest, workdir: str, pin_off: list[str] = (),
+                  on_event: Callable[..., None] | None = None, slang_args: tuple[str, ...] = ()) -> tuple[Prepared, Design]:
+    """Steps 1-3 of the module docstring. `pin_off` and `slang_args` as in select_cuts."""
     workdir = os.path.abspath(workdir)
     os.makedirs(workdir, exist_ok=True)
     emit = on_event or (lambda kind, **fields: None)
@@ -134,9 +159,26 @@ def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: floa
         raise ManifestError(f"select port(s) the manifest marks inserted are not inputs of the miter's "
                             f"BTOR2: {missing[:10]}")
     inert = [c.port for c in man.untested if c.port and c.port in design.inputs] + [c.port for c in pinned]
-    loop = CombCegis(design, verbose=verbose, solver=solver, exclusive=man.exclusive_ports,
-                     selects=[c.port for c in testable], pin_zero=inert, registers=registers,
-                     on_event=on_event, timeout=timeout)
+    return Prepared(miter_sv=miter_sv, btor=base + ".btor", xpair=xrep, registers=registers,
+                    registers_dropped=unpaired, testable=testable, pinned=pinned, control_net=control,
+                    inert=inert, exclusive=man.exclusive_ports), design
+
+
+def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: float | None = None,
+                individual: bool = True, pin_off: list[str] = (), verbose: bool = False,
+                on_event: Callable[..., None] | None = None, slang_args: tuple[str, ...] = (),
+                core_levels=None, trace_path: str | None = None) -> Selection:
+    """`pin_off`: ids of testable cuts to hold off rather than search (the
+    pipeline's no-ops, whose cut source would not match what the mux does).
+    `slang_args`: extra read_slang options for every netlist built here.
+    `core_levels`, `trace_path`: as in CombCegis."""
+    workdir = os.path.abspath(workdir)
+    emit = on_event or (lambda kind, **fields: None)
+    prep, design = prepare_miter(man, workdir, pin_off, on_event, slang_args)
+    testable, pinned, control = prep.testable, prep.pinned, prep.control_net
+    registers, unpaired, xrep = prep.registers, prep.registers_dropped, prep.xpair
+    loop = CombCegis(design, verbose=verbose, solver=solver, on_event=on_event, timeout=timeout,
+                     core_levels=core_levels, trace_path=trace_path, **prep.loop_args)
     emit("stage", name="loop", selects=len(testable))
     try:
         res = loop.run()
@@ -165,6 +207,6 @@ def select_cuts(man: Manifest, workdir: str, solver: str = "auto", timeout: floa
         pinned_off=sorted((c for c in pinned if c not in control), key=key),
         control_net=sorted(control, key=key),
         base_ok=bool(loop.base_ok), base_evidence=loop.base_evidence,
-        miter_sv=miter_sv, btor=base + ".btor", xpair=xrep, registers=registers,
+        miter_sv=prep.miter_sv, btor=prep.btor, xpair=xrep, registers=registers,
         registers_dropped=unpaired, stats=loop.stats, total_s=loop.total_s, workdir=workdir,
         individual=ind, individual_how=how, individual_s=ind_s)
