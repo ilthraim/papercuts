@@ -97,6 +97,16 @@ def test_exact_k_finds_maximum_without_a_hole():
     assert loop(name="poly").verify(r.on) is None
 
 
+def test_exact_k_answers_on_many_selects():
+    # z3.Solver() never answered the first PbEq query at this size
+    n = 200
+    lines = ["1 sort bitvec 1", "2 input 1 a"]
+    lines += [f"{3 + i} input 1 pc_sel{i}" for i in range(n)]
+    lines += [f"{3 + n} neq 1 2 2", f"{4 + n} bad {3 + n}"]
+    r = exact_k_search(loop("\n".join(lines) + "\n"))
+    assert r.k == n and sum(r.on.values()) == n, r.k
+
+
 def test_exhaustive_agrees_and_sees_the_hole():
     t = exhaustive_max(loop(CANCEL))
     assert t.max_size == 2 and t.holes == [1], t

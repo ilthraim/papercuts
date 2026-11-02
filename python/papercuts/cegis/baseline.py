@@ -9,6 +9,11 @@ half if k is feasible and the lower half if not. Reimplemented on the current lo
 on 2026-11-02 so both searches share a verifier and a spec; the August version
 is not in the tree.
 
+The synthesizer is a SAT pipeline rather than z3.Solver(), which never answered even the
+first exactly-k query on designs of 188+ selects, and rather than SolverFor("QF_FD"), whose
+models broke the PbEq (asked for 47 selects on simple_spi, returned 46). A candidate of the
+wrong size is a hard error, since k is what this search reports.
+
 Discarding the upper half on failure assumes that no set of k cuts means no larger
 set. Feasibility is not monotone, so that can be wrong and the search can stop
 below the true maximum. Whatever it returns did pass the verifier, so the result is
@@ -34,11 +39,15 @@ class ExactK:
     total_s: float
 
 
+def _synthesizer() -> z3.Solver:
+    return z3.Then("simplify", "propagate-values", "card2bv", "bit-blast", "aig", "tseitin-cnf", "sat").solver()
+
+
 def exact_k_search(c: CombCegis) -> ExactK:
     t_start = time.time()
     names = c.sel_names
     sels = [c.sels[n] for n in names]
-    s = z3.Solver()
+    s = _synthesizer()
     for a, b in c.exclusive:
         s.add(z3.Not(z3.And(c.sels[a], c.sels[b])))
 
@@ -76,6 +85,8 @@ def exact_k_search(c: CombCegis) -> ExactK:
                 break
             m = s.model()
             asg = {n: z3.is_true(m.eval(c.sels[n], model_completion=True)) for n in names}
+            if sum(asg.values()) != k:
+                raise RuntimeError(f"exact-{k} synthesizer returned {sum(asg.values())} selects")
             cex = check(asg, k)
             if cex is None:
                 found = asg
