@@ -540,6 +540,8 @@ def _failed_as(verdict) -> str:
         return "is not equivalent to"
     if verdict == "error":
         return "could not be checked (backend error, no proof ran) against"
+    if verdict == "unmapped-bbox-input":
+        return "was proven only with a black-box input left uncompared against"
     return "was not proven equal to"
 
 

@@ -441,6 +441,35 @@ def _parse_verdict(output: str, returncode: int) -> str:
     return "error"
 
 
+_INTERFACE_SUMMARY = "Interface Check Summary"
+_BBOX_INPUT_UNMAPPED = re.compile(r"^(?:auto|user)_bbox_input\s+- FAILED", re.M)
+
+
+def _sec_verdict(output: str, returncode: int, jg_log: str) -> str:
+    """The verdict of a check, refusing a proof that left a black-box input unmatched.
+
+    A black box's outputs are shared free values and its inputs are what the check
+    compares. An input with no partner is compared with nothing, so a cut that
+    deletes a memory's only write gets "proven": the read data is free in both
+    copies either way (mips_16 data_mem, fv_dataset ISSUES.md 16). Other unmapped
+    signals (reset_x, X sources) stay independent free values, which only makes a
+    proof harder, so they are left alone.
+
+    The summary is read from Jasper's jg.log. The last one counts: the script
+    repeats the interface check after pairing reset_x signals. A proof with no
+    summary means the log format changed, which would disable this check silently.
+    """
+    verdict = _parse_verdict(output, returncode)
+    if verdict != "proven":
+        return verdict
+    with open(jg_log, errors="replace") as f:
+        log = f.read()
+    start = log.rfind(_INTERFACE_SUMMARY)
+    if start < 0:
+        raise RuntimeError(f"proven, but no interface check summary in {jg_log}")
+    return "unmapped-bbox-input" if _BBOX_INPUT_UNMAPPED.search(log, start) else verdict
+
+
 # MARK: Jasper Runner
 def _jg_command() -> str:
     """The Jasper launcher: `jg`, or $PAPERCUTS_JG (e.g. a wrapper that throttles
@@ -472,9 +501,9 @@ async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str =
 
     await process.wait()
 
-    run.valid = process.returncode == 0
     run.output = output
-    run.verdict = _parse_verdict(output, process.returncode)
+    run.verdict = _sec_verdict(output, process.returncode, f"{run.impl_module_folder}/jgproject{run.index}/jg.log")
+    run.valid = process.returncode == 0 and run.verdict == "proven"
     return
 
 async def run_jasper_old(run: pc_core.Run, print_output: bool = False):
