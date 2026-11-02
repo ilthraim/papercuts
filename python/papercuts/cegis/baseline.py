@@ -9,10 +9,11 @@ half if k is feasible and the lower half if not. Reimplemented on the current lo
 on 2026-11-02 so both searches share a verifier and a spec; the August version
 is not in the tree.
 
-The synthesizer is a SAT pipeline rather than z3.Solver(), which never answered even the
-first exactly-k query on designs of 188+ selects, and rather than SolverFor("QF_FD"), whose
-models broke the PbEq (asked for 47 selects on simple_spi, returned 46). A candidate of the
-wrong size is a hard error, since k is what this search reports.
+The synthesizer is a SAT pipeline rather than z3.Solver(), which gave no answer to the
+first exactly-k query in 30 minutes on simple_spi and others (why is not understood: a
+toy of the same size with exclusive pairs is instant), and rather than SolverFor("QF_FD"),
+whose models broke the PbEq (asked for 47 selects on simple_spi, returned 46). A candidate
+of the wrong size is a hard error, since k is what this search reports.
 
 Discarding the upper half on failure assumes that no set of k cuts means no larger
 set. Feasibility is not monotone, so that can be wrong and the search can stop

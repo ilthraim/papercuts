@@ -98,7 +98,7 @@ def test_exact_k_finds_maximum_without_a_hole():
 
 
 def test_exact_k_answers_on_many_selects():
-    # z3.Solver() never answered the first PbEq query at this size
+    # every candidate along the way must have exactly k selects, or the search raises
     n = 200
     lines = ["1 sort bitvec 1", "2 input 1 a"]
     lines += [f"{3 + i} input 1 pc_sel{i}" for i in range(n)]
