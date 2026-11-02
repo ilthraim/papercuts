@@ -1045,8 +1045,11 @@ class Emitter:
 
     def _emit_subroutine(self, node):
         is_func = node.subroutineKind.name == "Function"
-        life = {"Automatic": "automatic ", "Static": "static "}.get(
-            node.defaultLifetime.name if hasattr(node, "defaultLifetime") else "", "")
+        # Modules are emitted without a lifetime, so static is already the default
+        # here. Writing `static` explicitly is legal SV, but Fusion Compiler's
+        # reader rejects it (VER-721); only automatic needs saying.
+        life = "automatic " if getattr(node, "defaultLifetime", None) is not None \
+            and node.defaultLifetime.name == "Automatic" else ""
         port_list = ", ".join(self._formal_arg(a) for a in node.arguments)
         if is_func:
             ret = self.split_type(tname(node.returnType))[0]
