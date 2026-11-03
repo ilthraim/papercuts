@@ -14,7 +14,16 @@ from papercuts.cegis.btor2z3 import Design
 from papercuts.cegis.comb import CombCegis
 from papercuts.cegis.core_min import minimize, parse_levels
 from papercuts.cegis.exhaustive import exhaustive_max, fails_under, is_minimal, minimum_core
-from papercuts.cegis.features import History, analyze, components, decomposable, select_table, set_features
+from papercuts.cegis.features import (
+    SELECT_DEFAULT,
+    SET_DEFAULT,
+    History,
+    analyze,
+    components,
+    decomposable,
+    select_table,
+    set_features,
+)
 from papercuts.cegis.steer import AdaptiveSteer
 from papercuts.cegis.trace import bits, decode_on, read_trace
 from papercuts.manifest import Manifest
@@ -317,6 +326,31 @@ def test_cones_and_components():
     assert cones.fanout == [1, 1, 1, 1]
     assert cones.sink_dist == [4, 3, 4, 3], cones.sink_dist
     assert cones.cone_nodes[0] == 5  # and, xor, xor, neq, or
+    assert cones.cone_depth == [4, 3, 4, 3], cones.cone_depth
+
+
+def test_cone_depth_takes_the_longest_path():
+    d = Design.from_string("""
+1 sort bitvec 1
+2 input 1 x
+3 input 1 pc_sel0
+4 and 1 3 2
+5 not 1 4
+6 xor 1 5 4
+7 neq 1 6 2
+8 bad 7
+""")
+    cones = analyze(d, ["pc_sel0"])
+    assert cones.sink_dist == [3] and cones.cone_depth == [4], (cones.sink_dist, cones.cone_depth)
+
+
+def test_overlap_ignores_what_combines_the_outputs():
+    cones = analyze(Design.from_string(TWO_OUTPUTS), [f"pc_sel{i}" for i in range(4)])
+    j = cones.overlap()
+    # s0 reaches and, xor, xor, neq; s1 reaches and, xor, neq; they share xor, neq
+    assert abs(j[0, 1] - 2 / 5) < 1e-6 and j[0, 1] == j[1, 0], j
+    assert j[0, 2] == 0 and j[1, 3] == 0, j  # independent outputs, joined only by the final or
+    assert j[0, 0] == 0
 
 
 def test_independence_holds_by_brute_force():
@@ -343,7 +377,7 @@ class _Man:
     """As much of a Manifest as select_table reads."""
 
     def __init__(self, names):
-        cuts = [{"index": i, "type": "ternary(keep-false)" if i % 2 else "binop(land)(keep-left)", "line": i + 1,
+        cuts = [{"index": i, "type": "ternary(keep-false)" if i % 2 else "binop(land,keep-left)", "line": i + 1,
                  "port": n, "inserted": True} for i, n in enumerate(names)]
         self.m = Manifest({"version": 1, "top": "t", "mux_suffix": "_m", "files": {"golden": [], "muxed": []},
                            "modules": {"t": {"muxed_name": "t_m", "cuts": cuts, "exclusive": [], "forwarded": []}}},
@@ -358,21 +392,33 @@ def test_select_and_set_features():
     col = {c: i for i, c in enumerate(t.columns)}
     assert list(t.X[:, col["family_ternary"]]) == [0, 1, 0, 1]
     assert list(t.X[:, col["variant_keep-false"]]) == [0, 1, 0, 1]
+    assert list(t.X[:, col["variant_keep-left"]]) == [1, 0, 1, 0]
     assert list(t.X[:, col["component"]]) == [2, 2, 2, 2]
 
     h = History(4)
     empty = np.zeros(4, dtype=bool)
-    f = set_features(t, empty, h, None)
-    assert f["n_on"] == 0 and f["hamming_prev"] == -1 and f["core_closest"] == 0
+    f = set_features(t, empty, h)
+    assert f["n_on"] == 0 and f["core_closest"] == 0 and f["overlap_pair_frac"] == 0
     on = np.array([True, True, False, False])
-    f = set_features(t, on, h, empty)
-    assert f["n_on"] == 2 and f["sinks_shared"] == 1 and f["sink_pairs"] == 1 and f["hamming_prev"] == 2
+    across = np.array([True, False, True, False])
+    f = set_features(t, on, h)
+    assert f["n_on"] == 2 and f["sinks_shared"] == 1 and f["sink_pairs"] == 1
     assert f["components_touched"] == 1 and f["frac_family_ternary"] == 0.5
+    assert f["overlap_pair_frac"] == 1 and abs(f["cone_overlap_mean"] - 2 / 5) < 1e-6
+    assert f["cone_depth_mean"] == 3.5 and f["cone_nodes_max"] == 5
+    assert set_features(t, across, h)["overlap_pair_frac"] == 0
     h.add([(0, 1), (2, 0)])  # s0 on and s2 off
-    f = set_features(t, on, h, None)
-    assert f["n_cores"] == 1 and f["core_on_sum"] == 1 and f["core_off_sum"] == 1 and f["core_closest"] == 1.0
-    f = set_features(t, np.array([True, False, True, False]), h, None)
+    f = set_features(t, on, h)
+    assert f["core_on_sum"] == 1 and f["core_off_sum"] == 1 and f["core_closest"] == 1.0
+    assert f["core_freq_max"] == 1 and f["core_freq_mean"] == 0.5 and f["core_pair_frac"] == 0
+    f = set_features(t, across, h)
     assert f["core_closest"] == 0.5 and f["core_near_misses"] == 1
+    h.add([(0, 1), (1, 1)])
+    f = set_features(t, on, h)
+    assert f["core_pair_frac"] == 1 and f["core_freq_max"] == 1 and f["core_freq_mean"] == 0.75
+    assert list(t.X[:, col["overlap_frac"]]) == [1 / 3] * 4, t.X[:, col["overlap_frac"]]
+    assert set(SELECT_DEFAULT) <= set(t.columns) and set(SET_DEFAULT) <= set(f)
+    assert not {"hamming_prev", "n_cores", "n_on", "frac_on"} & set(SET_DEFAULT)
 
 
 def run():

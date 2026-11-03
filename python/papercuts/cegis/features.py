@@ -39,6 +39,15 @@ VARIANTS = ("keep-false", "keep-true", "keep-left", "keep-right", "0", "1")
 NODE_SCALARS = ("fanout", "cone_nodes", "cone_frac", "cone_mux", "cone_arith", "cone_cmp", "sinks", "sinks_frac",
                 "sinks_output", "sinks_next", "sink_dist", "component")
 
+# What a model trains on by default. Everything else stays in the tables as extra_ columns,
+# to test later whether it adds anything. None of these scale with the set's size, which
+# all but decides the label on candidates (see the week 6 report).
+_TYPES = tuple(f"family_{f}" for f in FAMILIES) + tuple(f"variant_{v}" for v in VARIANTS)
+SELECT_DEFAULT = _TYPES + ("cone_nodes", "cone_depth", "overlap_frac", "overlap_max")
+SET_DEFAULT = tuple(f"frac_{t}" for t in _TYPES) + (
+    "cone_nodes_mean", "cone_nodes_max", "cone_depth_mean", "overlap_pair_frac", "cone_overlap_mean",
+    "cone_overlap_max", "core_pair_frac", "core_freq_mean", "core_freq_max")
+
 
 def operands(op: str, args: list) -> list[int]:
     """The arguments that are nodes: slice and extensions also carry plain integers."""
@@ -61,11 +70,31 @@ class Cones:
     cone_arith: list[int]
     cone_cmp: list[int]
     sink_dist: list[int]  # fewest nodes from the select to a sink; -1 if it reaches none
+    cone_depth: list[int]  # most nodes from the select to a sink; -1 if it reaches none
+    overlap_groups: dict[int, int]  # support -> nodes with it, among nodes that lead to a sink
     n_nodes: int
     constraint_mask: int  # selects a constraint depends on
 
     def sinks_of(self, i: int) -> list[int]:
         return [k for k, m in enumerate(self.sink_masks) if m >> i & 1]
+
+    def overlap(self) -> np.ndarray:
+        """Jaccard overlap of each pair's cones, diagonal 0. Only nodes that lead to a sink
+        count: the nodes combining the outputs into `bad` would join every pair, including
+        selects that cannot interact."""
+        n = len(self.selects)
+        if not n or not self.overlap_groups:
+            return np.zeros((n, n), dtype=np.float32)
+        member = np.zeros((len(self.overlap_groups), n), dtype=np.float32)
+        for row, m in enumerate(self.overlap_groups):
+            member[row, bits(m)] = 1.0
+        weight = np.array(list(self.overlap_groups.values()), dtype=np.float32)
+        shared = (member * weight[:, None]).T @ member
+        size = np.diag(shared)
+        union = size[:, None] + size[None, :] - shared
+        out = np.divide(shared, union, out=np.zeros_like(shared), where=union > 0)
+        np.fill_diagonal(out, 0.0)
+        return out
 
 
 def split_bad(d: Design, nid: int, masks: dict[int, int]) -> list[int]:
@@ -150,23 +179,36 @@ def analyze(d: Design, selects: list[str]) -> Cones:
         arith[where] += c2
         cmp_[where] += c3
 
-    # Distance to the nearest sink: one backward pass over the DAG.
+    # Distance to the nearest and farthest sink: one backward pass over the DAG.
     dist: dict[int, int] = {abs(s): 0 for s in sink_nodes.values()}
+    deep: dict[int, int] = dict(dist)
     for nid in reversed(d.order):
         best = dist.get(nid)
+        far = deep.get(nid)
         for r in readers.get(nid, ()):
-            if r in dist and (best is None or dist[r] + 1 < best):
-                best = dist[r] + 1
+            if r in dist:
+                if best is None or dist[r] + 1 < best:
+                    best = dist[r] + 1
+                if far is None or deep[r] + 1 > far:
+                    far = deep[r] + 1
         if best is not None:
             dist[nid] = best
+            deep[nid] = far
     sink_dist = [dist.get(d.inputs[s][0], -1) for s in selects]
+    cone_depth = [deep.get(d.inputs[s][0], -1) for s in selects]
+
+    overlap_groups: dict[int, int] = {}
+    for nid in d.order:
+        if masks[nid] and nid not in sel_node and nid in dist:
+            overlap_groups[masks[nid]] = overlap_groups.get(masks[nid], 0) + 1
 
     constraint_mask = 0
     for c in d.constraints:
         constraint_mask |= masks[abs(c)]
     return Cones(selects=list(selects), sink_names=names, sink_masks=sink_masks, node_masks=masks, fanout=fanout,
                  cone_nodes=cone.tolist(), cone_mux=mux.tolist(), cone_arith=arith.tolist(), cone_cmp=cmp_.tolist(),
-                 sink_dist=sink_dist, n_nodes=len(d.order), constraint_mask=constraint_mask)
+                 sink_dist=sink_dist, cone_depth=cone_depth, overlap_groups=overlap_groups, n_nodes=len(d.order),
+                 constraint_mask=constraint_mask)
 
 
 def components(cones: Cones, exclusive: list[tuple[str, str]] = ()) -> list[list[int]]:
@@ -218,6 +260,12 @@ class SelectTable:
     comp_of: np.ndarray
     n_components: int
     decomposable: bool
+    overlap: np.ndarray  # per pair of selects, Cones.overlap
+
+
+def _variant(cut_type: str) -> str:
+    """The last argument of a type: if(keep-false), binop(and,keep-left), force-const(0)."""
+    return cut_type.rstrip(")").split("(")[-1].split(",")[-1]
 
 
 def select_table(cones: Cones, man: Manifest, exclusive: list[tuple[str, str]], two_frames: bool) -> SelectTable:
@@ -236,6 +284,7 @@ def select_table(cones: Cones, man: Manifest, exclusive: list[tuple[str, str]], 
     for c in cuts:
         max_line[c.module] = max(max_line.get(c.module, 1), c.line)
     excl = {x for pair in exclusive for x in pair}
+    overlap = cones.overlap()
 
     sinks = np.zeros(n)
     sinks_out = np.zeros(n)
@@ -252,6 +301,9 @@ def select_table(cones: Cones, man: Manifest, exclusive: list[tuple[str, str]], 
         "cone_mux": np.array(cones.cone_mux, dtype=float),
         "cone_arith": np.array(cones.cone_arith, dtype=float),
         "cone_cmp": np.array(cones.cone_cmp, dtype=float),
+        "cone_depth": np.array(cones.cone_depth, dtype=float),
+        "overlap_frac": (overlap > 0).sum(axis=1).astype(float) / max(n - 1, 1),
+        "overlap_max": overlap.max(axis=1).astype(float) if n else np.zeros(0),
         "sinks": sinks,
         "sinks_frac": sinks / max(len(cones.sink_names), 1),
         "sinks_output": sinks_out,
@@ -269,11 +321,11 @@ def select_table(cones: Cones, man: Manifest, exclusive: list[tuple[str, str]], 
     if unknown:
         raise ValueError(f"cut families with no feature column: {unknown}")
     for v in VARIANTS:
-        cols[f"variant_{v}"] = np.array([f"({v})" in c.type for c in cuts], dtype=float)
+        cols[f"variant_{v}"] = np.array([_variant(c.type) == v for c in cuts], dtype=float)
     sink_lists = [np.array(bits(m), dtype=np.int64) for m in dict.fromkeys(cones.sink_masks) if m & (m - 1)]
     return SelectTable(selects=list(cones.selects), columns=list(cols), X=np.column_stack(list(cols.values())) if n
                        else np.zeros((0, len(cols))), sink_lists=sink_lists, comp_of=comp_of,
-                       n_components=len(comps), decomposable=decomposable(cones, two_frames))
+                       n_components=len(comps), decomposable=decomposable(cones, two_frames), overlap=overlap)
 
 
 class History:
@@ -284,22 +336,23 @@ class History:
         self.on_count = np.zeros(n)
         self.off_count = np.zeros(n)
         self.cores: list[tuple[np.ndarray, np.ndarray]] = []  # per core: selects on, selects off
+        self.pair = np.zeros((n, n), dtype=bool)  # both were on in one core
 
     def add(self, core: list) -> None:
         on = np.array([i for i, v in core if v], dtype=np.int64)
         off = np.array([i for i, v in core if not v], dtype=np.int64)
         self.on_count[on] += 1
         self.off_count[off] += 1
+        self.pair[np.ix_(on, on)] = True
         self.cores.append((on, off))
 
 
-SCALAR_STATS = ("fanout", "cone_nodes", "cone_frac", "cone_mux", "cone_arith", "sinks", "sinks_frac",
+SCALAR_STATS = ("fanout", "cone_nodes", "cone_depth", "cone_frac", "cone_mux", "cone_arith", "sinks", "sinks_frac",
                 "sink_dist", "component", "module_depth")
 
 
-def set_features(t: SelectTable, on: np.ndarray, h: History, prev_on: np.ndarray | None) -> dict[str, float]:
-    """Features of one candidate. `on` is a boolean array over the selects; `prev_on` is
-    the previous candidate's, or None on the first."""
+def set_features(t: SelectTable, on: np.ndarray, h: History) -> dict[str, float]:
+    """Features of one candidate. `on` is a boolean array over the selects."""
     n = len(t.selects)
     k = int(on.sum())
     f: dict[str, float] = {"n_selects": n, "n_on": k, "frac_on": k / n if n else 0.0}
@@ -325,9 +378,22 @@ def set_features(t: SelectTable, on: np.ndarray, h: History, prev_on: np.ndarray
     f["n_components"] = t.n_components
     f["component_crowd_max"] = float(touched.max()) if t.n_components else 0.0
 
-    # conflict history
-    f["n_cores"] = len(h.cores)
+    # pairs of the set, as fractions so they do not grow with it
+    where = np.flatnonzero(on)
+    upper = np.triu_indices(k, 1)
+    ov = t.overlap[np.ix_(where, where)][upper]
+    together = h.pair[np.ix_(where, where)][upper]
+    f["overlap_pair_frac"] = float((ov > 0).mean()) if ov.size else 0.0
+    f["cone_overlap_mean"] = float(ov.mean()) if ov.size else 0.0
+    f["cone_overlap_max"] = float(ov.max()) if ov.size else 0.0
+    f["core_pair_frac"] = float(together.mean()) if together.size else 0.0
+
+    # conflict history. Counts only grow during a run and valid sets come last, so the
+    # default features are shares of the cores so far.
     v_on, v_off = h.on_count[on], h.off_count[~on]
+    seen = max(len(h.cores), 1)
+    f["core_freq_mean"] = float(v_on.mean()) / seen if k else 0.0
+    f["core_freq_max"] = float(v_on.max()) / seen if k else 0.0
     f["core_on_sum"] = float(v_on.sum())
     f["core_on_max"] = float(v_on.max()) if k else 0.0
     f["frac_on_seen_in_core"] = float((v_on > 0).sum() / k) if k else 0.0
@@ -341,5 +407,4 @@ def set_features(t: SelectTable, on: np.ndarray, h: History, prev_on: np.ndarray
         near += hit == size - 1
     f["core_closest"] = best
     f["core_near_misses"] = near
-    f["hamming_prev"] = int((on != prev_on).sum()) if prev_on is not None else -1
     return f
