@@ -113,7 +113,34 @@ def run():
         errs = _errors(text)
         assert not errs, f"{name}: {[str(e.code) for e in errs]}\n{text}"
 
-    print("test_narrow_selects: OK (constant selects into dropped bits rewritten)")
+    run_parameterized()
+    print("test_narrow_selects: OK (constant selects into dropped bits rewritten, literal and parameterized)")
+
+
+PSRC = """
+module psel #(parameter W = 8) (
+    input  logic [W-1:0] a,
+    output logic [3:0]   y
+    );
+    logic [W-1:0] p;
+    assign p = a;
+    assign y = {p[7], p[6:4]};
+endmodule
+"""
+
+
+def run_parameterized():
+    """--in-situ cuts the parameterized source: `p` is `[W-1:0]`, whose bounds come
+    from `symbolic_ranges` (the pipeline's read-only elaboration). Selects into
+    the dropped bit must be rewritten the same as for a literal range."""
+    pc = Papercutter(SyntaxTree.fromText(PSRC), symbolic_ranges={"a": [(7, 0)], "p": [(7, 0)]})
+    info = pc.cut_info()
+    texts = [str(pc.cut_index([i]).root) for i, (k, _) in enumerate(info) if k == "bitshrink"]
+    p = next(_flat(t) for t in texts if "logic [(W-1)-1:0] p;" in _flat(t))
+    assert "y = {1'b0, p[6:4]};" in p, p                      # dead read of p[7] is 0
+    # The narrowed source must elaborate cleanly at W = 8.
+    errs = _errors(p)
+    assert not errs, [str(e.code) for e in errs]
 
 
 if __name__ == "__main__":

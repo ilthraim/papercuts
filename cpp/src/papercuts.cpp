@@ -1979,6 +1979,7 @@ Papercutter::Papercutter(const std::shared_ptr<SyntaxTree> tree, bool shrinkWith
     // the retained bits explicitly, which needs a literal width.
     if (shrinkWithIntermediate)
         symbolicRanges.clear();
+    evaluatedRanges = symbolicRanges;
     BitShrinkCollector BSC(std::move(symbolicRanges));
     shrinkNodes = BSC.getFoundNodes(tree);
     cutCount += shrinkNodes.size();
@@ -2083,8 +2084,14 @@ void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut,
             continue;
         NarrowedSignal sig;
         sig.numUnpacked = decl->dimensions.size();
+        auto evaluated = evaluatedRanges.find(std::string(decl->name.valueText()));
         for (size_t di = 0; di < dims->size(); ++di) {
             auto range = literalRangeOf(*(*dims)[di]);
+            // A parameterized dimension (`[W-1:0]`): use the bounds it evaluates to.
+            // For a definition with differently-sized instances that is the
+            // narrowest one; the check still verifies every rewritten select.
+            if (!range && evaluated != evaluatedRanges.end() && di < evaluated->second.size())
+                range = evaluated->second[di];
             sig.origDims.push_back(range);
             auto it = std::find_if(targets.begin(), targets.end(),
                                    [&](const BitShrinkTarget& t) { return t.dimIndex == (int)di; });
