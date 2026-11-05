@@ -2859,6 +2859,17 @@ void Papercutter::rewriteNarrowedSelect(const IdentifierSelectNameSyntax& node, 
                                    conn->kind == SyntaxKind::OrderedPortConnection);
         if (action == Clamp && (directLhs || directPort)) {
             replace(node, parse(trivia + clampedText));
+        } else if (action == Dead && directPort) {
+            // An output port that only drives dropped bits: leave it unconnected,
+            // `u(a, , c)` or `.o()`, so the write goes nowhere. The common case in
+            // --in-situ sources, whose instances keep positional port lists.
+            if (auto* named = conn->as_if<NamedPortConnectionSyntax>()) {
+                replace(*conn, factory.namedPortConnection(named->attributes, named->dot, named->name,
+                                                           named->openParen, nullptr, named->closeParen));
+            } else {
+                auto& ordered = conn->as<OrderedPortConnectionSyntax>();
+                replace(*conn, factory.emptyPortConnection(ordered.attributes, Token()));
+            }
         } else if (action == Dead && directLhs) {
             const SyntaxNode* stmtNode = bin->parent;
             if (auto* stmt = stmtNode ? stmtNode->as_if<ExpressionStatementSyntax>() : nullptr) {

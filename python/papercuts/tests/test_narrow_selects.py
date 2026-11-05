@@ -114,7 +114,8 @@ def run():
         assert not errs, f"{name}: {[str(e.code) for e in errs]}\n{text}"
 
     run_parameterized()
-    print("test_narrow_selects: OK (constant selects into dropped bits rewritten, literal and parameterized)")
+    run_port_writes()
+    print("test_narrow_selects: OK (constant selects into dropped bits rewritten: literal, parameterized, port writes)")
 
 
 PSRC = """
@@ -127,6 +128,41 @@ module psel #(parameter W = 8) (
     assign y = {p[7], p[6:4]};
 endmodule
 """
+
+
+OSRC = """
+module fa (input logic a, b, output logic s, c);
+    assign s = a ^ b;
+    assign c = a & b;
+endmodule
+
+module ports (input logic a, b, output logic [1:0] y, output logic z);
+    logic [1:0] w;
+    logic [1:0] v;
+    fa u0 (a, b, w[0], w[1]);
+    fa u1 (.a(a), .b(b), .s(v[0]), .c(v[1]));
+    assign y = w;
+    assign z = v[0];
+endmodule
+"""
+
+
+def run_port_writes():
+    """A fully dropped bit written through an output port (positional or named) is
+    left unconnected instead of staying an out-of-range select."""
+    pc = Papercutter(SyntaxTree.fromText(OSRC))
+    texts = {}
+    for i, (k, _) in enumerate(pc.cut_info()):
+        if k == "bitshrink":
+            t = _flat(str(pc.cut_index([i]).root))
+            for sig in ("w", "v"):
+                if f"logic [0:0] {sig};" in t:
+                    texts[sig] = t
+    assert "fau0(a,b,w[0],)" in texts["w"].replace(" ", ""), texts["w"]       # positional slot emptied
+    assert ".c()" in texts["v"], texts["v"]                                      # named port unconnected
+    for sig, t in texts.items():
+        errs = _errors(t)
+        assert not errs, f"{sig}: {[str(e.code) for e in errs]}"
 
 
 def run_parameterized():
