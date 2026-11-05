@@ -809,6 +809,15 @@ std::optional<IntermediateWire> buildIntermediateWire(const std::string& trivia,
     return out;
 }
 
+// The literal range `[l:r]` with `t.amount` bits dropped off its high end:
+// [7:0] -drop=2-> [5:0]; [0:7] -drop=2-> [0:5]. Keeps at least one bit: never
+// shrinks to a zero-width or reversed range.
+std::pair<int, int> narrowLiteral(int l, int r, const BitShrinkTarget& t) {
+    int drop = std::clamp(t.amount, 1, std::max(1, t.width - 1));
+    (l >= r ? l : r) -= drop;
+    return {l, r};
+}
+
 std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
                               const std::vector<BitShrinkTarget>& narrow) {
     std::string out;
@@ -825,10 +834,8 @@ std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
         int drop = std::clamp(it->amount, 1, std::max(1, it->width - 1));
 
         if (auto bounds = classifyRange(rsel); bounds.literal) {
-            // [7:0] -drop=2-> [5:0]; [0:7] -drop=2-> [0:5].
-            int l = tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal);
-            int r = tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal);
-            (l >= r ? l : r) -= drop;
+            auto [l, r] = narrowLiteral(tokenToInt(rsel.left->as<LiteralExpressionSyntax>().literal),
+                                        tokenToInt(rsel.right->as<LiteralExpressionSyntax>().literal), *it);
             out += "[" + std::to_string(l) + ":" + std::to_string(r) + "]";
         } else {
             std::string sym = "(" + trimWs(std::string(bounds.symbolic->toString())) + ")-" +
@@ -839,6 +846,42 @@ std::string buildPackedRanges(const SyntaxList<VariableDimensionSyntax>& dims,
         }
     }
     return out;
+}
+} // namespace
+
+namespace {
+// Packed dimensions of a declarator's (logic/reg/bit or net) type, or nullptr.
+const SyntaxList<VariableDimensionSyntax>* packedDimsOf(const DeclaratorSyntax& decl) {
+    const DataTypeSyntax* type = nullptr;
+    if (auto* dataDecl = decl.parent->as_if<DataDeclarationSyntax>())
+        type = dataDecl->type;
+    else if (auto* netDecl = decl.parent->as_if<NetDeclarationSyntax>())
+        type = netDecl->type;
+    if (!type)
+        return nullptr;
+    if (auto* intType = type->as_if<IntegerTypeSyntax>())
+        return &intType->dimensions;
+    if (auto* impType = type->as_if<ImplicitTypeSyntax>())
+        return &impType->dimensions;
+    return nullptr;
+}
+
+// `(left, right)` of a literal range dimension (`[7:0]`), else nullopt.
+std::optional<std::pair<int, int>> literalRangeOf(const VariableDimensionSyntax& dim) {
+    auto* spec = dim.specifier ? dim.specifier->as_if<RangeDimensionSpecifierSyntax>() : nullptr;
+    auto* sel = spec ? spec->selector->as_if<RangeSelectSyntax>() : nullptr;
+    if (!sel || !classifyRange(*sel).literal)
+        return std::nullopt;
+    return std::make_pair(tokenToInt(sel->left->as<LiteralExpressionSyntax>().literal),
+                          tokenToInt(sel->right->as<LiteralExpressionSyntax>().literal));
+}
+
+// Value of a plain decimal literal index expression (`3`), else nullopt.
+std::optional<int> literalIndexOf(const ExpressionSyntax* expr) {
+    auto* lit = expr ? expr->as_if<LiteralExpressionSyntax>() : nullptr;
+    if (!lit || lit->kind != SyntaxKind::IntegerLiteralExpression)
+        return std::nullopt;
+    return tokenToInt(lit->literal);
 }
 } // namespace
 
@@ -2031,6 +2074,28 @@ void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut,
             constForceActive[std::string(constForceNodes[rel / 2]->name.valueText())] = polarity;
         }
     }
+
+    if (shrinkWithIntermediate)
+        return;
+    for (const auto& [decl, targets] : runMap) {
+        const auto* dims = packedDimsOf(*decl);
+        if (!dims)
+            continue;
+        NarrowedSignal sig;
+        sig.numUnpacked = decl->dimensions.size();
+        for (size_t di = 0; di < dims->size(); ++di) {
+            auto range = literalRangeOf(*(*dims)[di]);
+            sig.origDims.push_back(range);
+            auto it = std::find_if(targets.begin(), targets.end(),
+                                   [&](const BitShrinkTarget& t) { return t.dimIndex == (int)di; });
+            sig.narrowed.push_back(it != targets.end());
+            if (range && it != targets.end())
+                sig.newDims.push_back(narrowLiteral(range->first, range->second, *it));
+            else
+                sig.newDims.push_back(range);
+        }
+        narrowedSignals[std::string(decl->name.valueText())] = std::move(sig);
+    }
 }
 
 std::shared_ptr<SyntaxTree> Papercutter::cutIndex(std::vector<size_t> indicesToCut,
@@ -2602,8 +2667,12 @@ void Papercutter::handle(const IdentifierNameSyntax& node) {
 
 void Papercutter::handle(const IdentifierSelectNameSyntax& node) {
     // Narrow mode never renames reads; identifier redirection is wire-mode only.
-    // Descend anyway so cuts nested in select-index expressions are still reached.
+    // It does fix up constant selects into the bits a shrink dropped. Descend
+    // anyway so cuts nested in select-index expressions are still reached.
     if (!shrinkWithIntermediate) {
+        auto it = narrowedSignals.find(std::string(node.identifier.valueText()));
+        if (it != narrowedSignals.end() && !(node.parent && node.parent->kind == SyntaxKind::ScopedName))
+            rewriteNarrowedSelect(node, it->second);
         visitDefault(node);
         return;
     }
@@ -2675,6 +2744,141 @@ void Papercutter::handle(const CaseStatementSyntax& node) {
         }
     }
     this->visitDefault(node);
+}
+
+// A narrowed declaration drops the high indices of a packed dimension, but a
+// constant select written against the original range (`x[3:0]`, `x[3]`) still
+// names them, which the formal tool rejects as out of range. Give the dropped bits
+// the same meaning a narrowed bare `x` has: they read as 0 and writes to them are
+// discarded. Concretely, for the select on a narrowed dimension:
+//   read,  entirely dropped  -> a zero of the select's original width
+//   read,  partly dropped    -> the kept part, zero-padded back to its width
+//   write, partly dropped    -> clamped to the kept part (an assignment truncates)
+//   write, entirely dropped  -> the statement/continuous assign is removed
+// Anything else (non-constant or indexed `+:` selects, writes inside an LHS
+// concatenation, ...) is left alone; a cut whose source is then still illegal
+// simply fails its check as before.
+void Papercutter::rewriteNarrowedSelect(const IdentifierSelectNameSyntax& node, const NarrowedSignal& sig) {
+    const auto& sels = node.selectors;
+    if (sels.size() <= sig.numUnpacked)
+        return; // no packed dimension is selected
+    size_t lastDim = sels.size() - 1 - sig.numUnpacked;
+    if (lastDim >= sig.origDims.size())
+        return;
+
+    enum { Keep, Clamp, Dead } action = Keep;
+    std::pair<int, int> clamped; // the kept part of the last selector, in its orientation
+    bool clampedDescending = true; // [hi:lo]: the dropped bits were its high (left) end
+    for (size_t d = 0; d <= lastDim; ++d) {
+        if (!sig.narrowed[d])
+            continue;
+        if (!sig.newDims[d])
+            return; // symbolic dimension: indices can't be compared
+        int newMax = std::max(sig.newDims[d]->first, sig.newDims[d]->second);
+        auto* selector = sels[sig.numUnpacked + d]->selector;
+        if (!selector)
+            return;
+        int hi, lo;
+        bool descending = true;
+        if (auto* bit = selector->as_if<BitSelectSyntax>()) {
+            auto i = literalIndexOf(bit->expr);
+            if (!i)
+                return;
+            hi = lo = *i;
+        } else if (selector->kind == SyntaxKind::SimpleRangeSelect) {
+            auto& rsel = selector->as<RangeSelectSyntax>();
+            auto a = literalIndexOf(rsel.left), b = literalIndexOf(rsel.right);
+            if (!a || !b)
+                return;
+            hi = std::max(*a, *b);
+            lo = std::min(*a, *b);
+            descending = *a >= *b;
+        } else {
+            return;
+        }
+        if (lo > newMax) {
+            action = Dead;
+            break;
+        }
+        if (hi > newMax) {
+            if (d != lastDim)
+                return; // clamping a non-final select would reshape what follows it
+            action = Clamp;
+            clampedDescending = descending;
+            clamped = descending ? std::make_pair(newMax, lo) : std::make_pair(lo, newMax);
+        }
+    }
+    if (action == Keep)
+        return;
+
+    // Width of the last selector and of every packed dimension below it, as the
+    // expression had originally (what its context was sized against).
+    int selWidth = 1;
+    auto* last = sels.back()->selector;
+    if (last && last->kind == SyntaxKind::SimpleRangeSelect) {
+        auto& rsel = last->as<RangeSelectSyntax>();
+        auto a = literalIndexOf(rsel.left), b = literalIndexOf(rsel.right);
+        if (!a || !b)
+            return;
+        selWidth = std::abs(*a - *b) + 1;
+    } else if (!last || !last->as_if<BitSelectSyntax>()) {
+        return;
+    }
+    int innerWidth = 1;
+    for (size_t d = lastDim + 1; d < sig.origDims.size(); ++d) {
+        if (!sig.origDims[d] || (action == Clamp && sig.narrowed[d]))
+            return; // unknown width, or the padding would not be a contiguous high slice
+        innerWidth *= std::abs(sig.origDims[d]->first - sig.origDims[d]->second) + 1;
+    }
+
+    std::string trivia;
+    for (const auto& t : node.getFirstToken().trivia())
+        trivia += t.getRawText();
+    std::string clampedText;
+    if (action == Clamp) {
+        clampedText = std::string(node.identifier.valueText());
+        for (size_t k = 0; k + 1 < sels.size(); ++k)
+            clampedText += trimWs(std::string(sels[k]->toString()));
+        clampedText += "[" + std::to_string(clamped.first) + ":" + std::to_string(clamped.second) + "]";
+    }
+
+    if (isAssignmentWriteTarget(node, &portDirections)) {
+        auto* bin = node.parent ? node.parent->as_if<BinaryExpressionSyntax>() : nullptr;
+        bool directLhs = bin && static_cast<const SyntaxNode*>(bin->left) == &node;
+        const SyntaxNode* conn = node.parent;
+        while (conn && (conn->kind == SyntaxKind::SimpleSequenceExpr || conn->kind == SyntaxKind::SimplePropertyExpr))
+            conn = conn->parent;
+        bool directPort = conn && (conn->kind == SyntaxKind::NamedPortConnection ||
+                                   conn->kind == SyntaxKind::OrderedPortConnection);
+        if (action == Clamp && (directLhs || directPort)) {
+            replace(node, parse(trivia + clampedText));
+        } else if (action == Dead && directLhs) {
+            const SyntaxNode* stmtNode = bin->parent;
+            if (auto* stmt = stmtNode ? stmtNode->as_if<ExpressionStatementSyntax>() : nullptr) {
+                // An empty block, as for an if cut with nothing left to run: it
+                // fills any statement slot and keeps the label and attributes.
+                replace(*stmt, factory.blockStatement(
+                                   SyntaxKind::SequentialBlockStatement, stmt->label, stmt->attributes,
+                                   makeToken(TokenKind::BeginKeyword, "begin", stmt->getFirstToken().trivia()),
+                                   nullptr, SyntaxList<SyntaxNode>{},
+                                   makeToken(TokenKind::EndKeyword, "end", spaced()), nullptr));
+            } else if (auto* ca = stmtNode ? stmtNode->as_if<ContinuousAssignSyntax>() : nullptr) {
+                if (ca->assignments.size() == 1)
+                    remove(*ca);
+            }
+        }
+        return;
+    }
+
+    int width = selWidth * innerWidth;
+    if (action == Dead) {
+        replace(node, makeIntLiteral(persistString(alloc, std::to_string(width) + "'b0"),
+                                     node.getFirstToken().trivia()));
+        return;
+    }
+    int keptWidth = (std::abs(clamped.first - clamped.second) + 1) * innerWidth;
+    std::string pad = std::to_string(width - keptWidth) + "'b0";
+    replace(node, parse(trivia + "{" + (clampedDescending ? pad + ", " + clampedText : clampedText + ", " + pad) + "}"));
 }
 
 } // namespace papercuts
