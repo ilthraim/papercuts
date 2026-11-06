@@ -2075,6 +2075,8 @@ void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut,
             constForceActive[std::string(constForceNodes[rel / 2]->name.valueText())] = polarity;
         }
     }
+    if (constPriority && !constForceActive.empty())
+        applyConstPriority();
 
     if (shrinkWithIntermediate)
         return;
@@ -2638,6 +2640,28 @@ static bool isAssignmentWriteTarget(const SyntaxNode& node, const PortDirections
         return SyntaxFacts::isAssignmentOperator(bin->kind) &&
                static_cast<const SyntaxNode*>(bin->left) == cur;
     return isOutputConnection(cur, ports);
+}
+
+bool Papercutter::readsForcedSignal(const SyntaxNode& node) const {
+    if (node.kind == SyntaxKind::IdentifierName) {
+        const auto& id = node.as<IdentifierNameSyntax>();
+        if (constForceActive.contains(std::string(id.identifier.valueText())) &&
+            !isAssignmentWriteTarget(id, &portDirections))
+            return true;
+    }
+    for (size_t i = 0; i < node.getChildCount(); ++i)
+        if (auto* ch = node.childNode(i); ch && readsForcedSignal(*ch))
+            return true;
+    return false;
+}
+
+void Papercutter::applyConstPriority() {
+    std::erase_if(binopNodesToChange, [&](const auto& kv) {
+        const auto* dropped = kv.second ? kv.first->right.get() : kv.first->left.get();
+        return readsForcedSignal(*dropped);
+    });
+    // Ternary and if cuts keep priority (see constPriority).
+    std::erase_if(caseNodesToChange, [&](const auto& kv) { return readsForcedSignal(*kv.first->expr); });
 }
 
 void Papercutter::handle(const IdentifierNameSyntax& node) {

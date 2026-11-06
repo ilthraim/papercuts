@@ -671,6 +671,15 @@ private:
     // Other cut families are unaffected.
     bool binopsInConditionsOnly = false;
 
+    // When true, an active force-const cut wins over a binop cut whose dropped
+    // operand reads its signal, and over a case cut whose selector reads it: the
+    // constant is never larger there (`a & x` with x=0 is 0, not `a`; a constant
+    // selector leaves one item). Ternary and if cuts keep priority: where they
+    // agree with the constant the hardware is the same and the cut writes less
+    // text, and where they disagree neither side is smaller in general. Cuts that
+    // only delete code containing a forced read still apply. On by default.
+    bool constPriority = true;
+
     // Bit shrinker variables
     std::vector<BitShrinkTarget> shrinkNodes; // One entry per shrinkable packed dimension (order = cut order)
     // Active cut(s), keyed by declarator -> the packed dimensions to narrow this
@@ -744,7 +753,13 @@ private:
 
     void selectCuts(const std::vector<size_t>& indicesToCut,
                     const std::unordered_map<size_t, int>& amounts = {});
+    // constPriority: whether `node` reads a signal an active force-const cut forces.
+    bool readsForcedSignal(const SyntaxNode& node) const;
+    // constPriority: drop the selected non-const cuts that would decide a forced read.
+    void applyConstPriority();
 public:
+    void setConstPriority(bool on) { constPriority = on; }
+    bool getConstPriority() const { return constPriority; }
     // `symbolicRanges` maps signal name -> the (left, right) each of its packed
     // dimensions evaluates to (outermost first), enabling bit-shrink on
     // declarations whose range is parameterized (`logic [WIDTH-1:0] x;`), including

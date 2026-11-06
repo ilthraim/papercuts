@@ -161,6 +161,10 @@ NB_MODULE(pypercuts, m) {
         .def("cut_index_text", &papercuts::Papercutter::cutIndexText,
              nb::arg("indices"),
              nb::arg("amounts") = std::unordered_map<size_t, int>{})
+        .def_prop_rw("const_priority", &papercuts::Papercutter::getConstPriority,
+                     &papercuts::Papercutter::setConstPriority,
+                     "When True, an active force-const cut wins over a binop cut whose dropped operand reads its "
+                     "signal and over a case cut whose selector reads it. Ternary and if cuts keep priority. True by default.")
         .def("cut_info", &papercuts::Papercutter::cutInfo)
         .def("cut_pairs", &papercuts::Papercutter::cutPairs,
              "Mutually exclusive cut index pairs (the two halves of one site).")

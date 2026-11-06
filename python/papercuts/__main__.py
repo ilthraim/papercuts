@@ -132,8 +132,10 @@ def write_papercuts_log(
     Under --method cegis-comb, ``cegis`` holds the run's header lines, rows gain
     a `set` column (Y: in the selected set), valid is the cut's validity on its
     own under the combinational spec ('-' not checked, 'U' untested: its select
-    drives nothing), and ``joint`` is the one check of the whole consolidated
-    design.
+    drives nothing).
+
+    ``joint`` is the one check of the whole consolidated design, under either
+    method.
     """
     total = sum(len(m.runs) for m in modules)
     valid = sum(1 for m in modules for r in m.runs if r.valid)
@@ -277,7 +279,8 @@ def write_papercuts_log(
 
         if joint is not None:
             result = "PROVEN" if joint.valid else f"FAILED ({joint.verdict})"
-            f.write(f"\n# joint check of the consolidated design ({in_set} cuts applied): {result}\n")
+            applied = in_set if cegis is not None else valid
+            f.write(f"\n# joint check of the consolidated design ({applied} cuts applied): {result}\n")
 
 
 # MARK: cut plan
@@ -499,13 +502,8 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
         with open(f"{consolidated_dir}/{mod.name}.sv", "w") as f:
             f.write(text)
         texts.append(text)
-    joint_dir = f"{consolidated_dir}/joint"
-    os.makedirs(joint_dir, exist_ok=True)
-    joint_path = f"{joint_dir}/{top_name}_consolidated.sv"
-    with open(joint_path, "w") as f:
-        f.write("\n".join(texts))
-    joint = Run(top_module_path=f"{ctree_dir}/{top_name}.sv", spec_lib_path=ctree_dir,
-                impl_module_path=joint_path, impl_module_folder=joint_dir, is_top=True, index=-1)
+    joint = _joint_run(texts, consolidated_dir, ctree_dir, top_name)
+    joint_dir = joint.impl_module_folder
 
     status("Verifying the whole consolidated design (from power-up, no reset)...")
     tracker.set_phase("consolidate")
@@ -530,6 +528,18 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
             f"although the selected set was proven on the muxed design. The cut and mux paths disagree, "
             f"or the CEGIS model and the backend read the design differently. See {joint_dir}.")
     status(f"Consolidated design PROVEN ({len(on)} cuts); results written to {log_path}")
+
+
+def _joint_run(texts: list[str], consolidated_dir: str, ctree_dir: str, top_name: str) -> Run:
+    """Write every consolidated module to one file and return the check of that
+    whole design against the golden one."""
+    joint_dir = f"{consolidated_dir}/joint"
+    os.makedirs(joint_dir, exist_ok=True)
+    joint_path = f"{joint_dir}/{top_name}_consolidated.sv"
+    with open(joint_path, "w") as f:
+        f.write("\n".join(texts))
+    return Run(top_module_path=f"{ctree_dir}/{top_name}.sv", spec_lib_path=ctree_dir,
+               impl_module_path=joint_path, impl_module_folder=joint_dir, is_top=True, index=-1)
 
 
 def _failed_as(verdict) -> str:
@@ -579,6 +589,15 @@ async def main():
         "to it. The default instead narrows the declaration in place "
         "(e.g. 'logic [7:0] x;' -> 'logic [6:0] x;'). Always on under --method "
         "cegis-comb, whose bit-shrink muxes model exactly this form.",
+    )
+    parser.add_argument(
+        "--const-priority",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="When cuts are combined (consolidation, cut sets), an active force-const cut wins over a binop "
+        "cut whose dropped operand reads the forced signal and over a case cut whose selector reads it. "
+        "Ternary and if cuts keep priority, and deletions that merely contain a forced read still apply. "
+        "Single cuts are unaffected. On by default; off (and not allowed) under --method cegis-comb.",
     )
     parser.add_argument(
         "--binops-in-conditions-only",
@@ -848,8 +867,15 @@ async def main():
         # stops compiling (vtr__multiclock_reader_writer), and a variable-index
         # read of it becomes an out-of-range X instead of 0.
         args.shrink_with_intermediate = True
+        if args.const_priority:
+            # The muxes model each cut on its own; const priority would consolidate a different
+            # rewrite from the set the search proved.
+            parser.error("--const-priority is not supported with --method cegis-comb")
+        args.const_priority = False
     elif args.iterative_bitshrink is None:
         args.iterative_bitshrink = True
+    if args.const_priority is None:
+        args.const_priority = True
 
 
     backend = backend_cls.from_args(args) if args.check_equivalence else None
@@ -1357,6 +1383,7 @@ async def main():
             symbolic_ranges=symbolic_ranges.get(name, {}),
             port_directions=child_port_directions(ntree, port_directions),
         )
+        pc.const_priority = args.const_priority
         cut_infos = list(pc.cut_info())  # (type, line) aligned 1:1 with cut indices
 
         mod = ModuleCuts(
@@ -1639,14 +1666,17 @@ async def main():
     # also run in parallel without colliding on jgproject/run directories.
     status("Consolidating valid cuts...")
     final_runs: list[tuple[ModuleCuts, Run]] = []
+    consolidated_texts: list[str] = []
     for mod in modules:
         out_path = f"{consolidated_dir}/{mod.name}.sv"
 
         if mod.excluded:
             # Emit the untouched module so the consolidated design is complete,
             # but don't re-verify it -- nothing was cut.
+            text = print_tree(mod.tree)
             with open(out_path, "w") as f:
-                f.write(print_tree(mod.tree))
+                f.write(text)
+            consolidated_texts.append(text)
             continue
 
         working = [run.index for run in mod.runs if run.valid]
@@ -1668,6 +1698,7 @@ async def main():
             )
         with open(out_path, "w") as f:
             f.write(consolidated_text)
+        consolidated_texts.append(consolidated_text)
 
         work_dir = f"{consolidated_dir}/{mod.name}"
         os.makedirs(work_dir, exist_ok=True)
@@ -1717,13 +1748,40 @@ async def main():
     for mod, fr in final_runs:
         status(f"consolidated {mod.name}: {'PROVEN' if fr.valid else 'FAILED'}")
 
+    # Each check above has one consolidated module among golden ones, so none of
+    # them shows that the modules' cuts hold together. This one does. It keeps the
+    # reset the cuts were proven under: unlike a CEGIS set, FV cuts may rely on
+    # reachability from reset.
+    joint = _joint_run(consolidated_texts, consolidated_dir, ctree_dir, top_name)
+    applied = sum(1 for m in modules for r in m.runs if r.valid)
+    status("Verifying the whole consolidated design...")
+    tracker.start(id(joint), "consolidate", "joint")
+    t0 = time.time()
+    try:
+        await backend.check(joint)
+    finally:
+        tracker.finish(id(joint), joint.verdict, joint.valid)
+        append_result(results_path, {
+            "ts": time.time(), "phase": "consolidate", "method": "fv", "module": top_name,
+            "idx": -1, "type": "joint", "line": None, "valid": joint.valid, "verdict": joint.verdict,
+            "applied": applied, "elapsed": round(time.time() - t0, 3),
+        })
+
     # Rewrite the log now that consolidation verdicts are known, so the final
     # papercuts.log includes both the per-cut table and the consolidated results.
     write_papercuts_log(
         log_path, modules, checked=True, final_runs=final_runs, fv_gate=fv_gate_result,
-        prune_stats=prune_stats,
+        prune_stats=prune_stats, joint=joint,
     )
     status(f"Consolidated results written to {log_path}")
+    if not joint.valid:
+        failed = [m.name for m, fr in final_runs if not fr.valid]
+        raise SystemExit(
+            f"FATAL: consolidation error: the whole consolidated design {_failed_as(joint.verdict)} "
+            f"the golden one (verdict={joint.verdict}). Cuts were proven one module at a time, so cuts "
+            f"in different modules may conflict. Modules failing their own consolidated check: "
+            f"{', '.join(failed) or 'none'}. See {joint.impl_module_folder}.")
+    status(f"Consolidated design PROVEN ({applied} cuts)")
 
     tracker.set_phase("done")
 

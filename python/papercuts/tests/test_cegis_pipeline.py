@@ -453,20 +453,45 @@ def test_failed_joint_check_is_fatal():
             assert "FAILED (cex)" in f.read()
 
 
-def test_fv_method_unchanged():
-    # the default method still checks every cut and each consolidated module,
-    # with iterative bit-shrink on and no CEGIS columns in the log
+def test_fv_method():
+    # the default method checks every cut, each consolidated module and the whole
+    # consolidated design, with iterative bit-shrink on and no CEGIS columns in the log
     with tempfile.TemporaryDirectory() as tmp:
         calls, exit_ = pipeline(tmp, [])
         n_cegis = len(calls)
         calls, exit_ = pipeline(tmp, ["--method", "fv"])
         assert exit_ is None, exit_
         assert len(calls) > n_cegis + 18, len(calls)  # 18 cuts, more bit-shrink probes, 3 modules
-        assert sum(1 for c in calls if c.index == -1) == 3  # one consolidated check per module
+        finals = [c for c in calls if c.index == -1]
+        assert len(finals) == 4  # one consolidated check per module, then the joint one
+        joint = finals[-1]
+        assert joint.is_top and joint.impl_module_path.endswith("joint/top_consolidated.sv")
+        # unlike CEGIS, it keeps the reset the cuts were proven under
+        assert not getattr(joint, "power_up", False)
+        with open(os.path.join(tmp, joint.impl_module_path)) as f:
+            text = f.read()
+        assert all(f"module {m}" in text for m in ("top", "top_c0", "top_c1")), text
+        rec = [r for r in results(tmp) if r["type"] == "joint"]
+        valid = sum(1 for r in results(tmp) if r["phase"] == "cuts" and r["valid"])
+        assert len(rec) == 1 and rec[0]["applied"] == valid and rec[0]["valid"], rec
         with open(os.path.join(tmp, "outputs", "papercuts.log")) as f:
             log = f.read()
-        assert "valid  set" not in log and "in set" not in log and "joint check" not in log
+        assert "valid  set" not in log and "in set" not in log
+        assert f"joint check of the consolidated design ({valid} cuts applied): PROVEN" in log
         assert "Y(-" in log  # the stub proves every probe, so bit-shrinks went past one bit
+
+
+def test_fv_failed_joint_check_is_a_consolidation_error():
+    # the stub refutes every consolidated check here, so the error names the modules
+    with tempfile.TemporaryDirectory() as tmp:
+        calls, exit_ = pipeline(tmp, ["--method", "fv"], refute_joint=True)
+        assert exit_ is not None, "a failed joint check must stop the run"
+        msg = str(exit_.code)
+        assert "FATAL: consolidation error" in msg and "not equivalent" in msg, msg
+        assert calls[-1].impl_module_path.endswith("joint/top_consolidated.sv")
+        with open(os.path.join(tmp, "outputs", "papercuts.log")) as f:
+            assert "FAILED (cex)" in f.read()
+        assert [r["valid"] for r in results(tmp) if r["type"] == "joint"] == [False]
 
 
 def test_cli_errors():
