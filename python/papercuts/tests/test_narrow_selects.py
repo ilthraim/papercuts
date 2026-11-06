@@ -1,0 +1,183 @@
+"""Narrow-mode bit-shrink rewrites constant selects into the dropped bits.
+
+Narrowing only edits the declaration, so a select written against the original
+range (`t[3:0]`, `m[1]`) would be out of range once `t` is `[2:0]` -- the formal
+tool rejects the whole cut. The dropped bits instead behave as they do for a
+bare narrowed read: they read as 0, and writes to them are discarded.
+"""
+
+from papercuts import Papercutter
+from pyslang.syntax import SyntaxTree
+from pyslang import ast
+
+SRC = """
+module narrow_selects (
+    input  logic [3:0] a,
+    input  logic       b,
+    output logic [5:0] y,
+    output logic [1:0] z,
+    output logic [1:0] w
+    );
+    logic [3:0] t;
+    logic [1:0] m;
+    logic [2:0][1:0] mx;
+    logic [0:3] asc;
+    logic [1:0] q;
+    assign t[3:0] = a;
+    assign m[1] = b;
+    assign m[0] = b;
+    assign asc[0:3] = a;
+    always_comb begin
+        mx[2] = 2'b11;
+        mx[1][1:0] = a[1:0];
+        mx[0] = a[3:2];
+    end
+    always_ff @(posedge b) q[1:0] <= a[1:0];
+    sub u (.o(q[1:0]));
+    assign y = {t[3:0], m[1], m[0]};
+    assign z = mx[2][1:0] ^ mx[1];
+    assign w = asc[2:3];
+endmodule
+
+module sub (output logic [1:0] o);
+    assign o = 2'b01;
+endmodule
+"""
+
+
+def _cut_for(pc, info, name):
+    """Text of the bitshrink cut whose narrowed declaration is `name`."""
+    for i, (kind, _) in enumerate(info):
+        if kind != "bitshrink":
+            continue
+        text = str(pc.cut_index([i]).root)
+        for ln in text.splitlines():
+            ln = ln.strip()
+            if ln.startswith("logic") and ln.endswith(f" {name};") and ln != _orig_decl[name]:
+                return text
+    raise AssertionError(f"no bitshrink cut narrows {name}")
+
+
+_orig_decl = {
+    "t": "logic [3:0] t;",
+    "m": "logic [1:0] m;",
+    "mx": "logic [2:0][1:0] mx;",
+    "asc": "logic [0:3] asc;",
+    "q": "logic [1:0] q;",
+}
+
+
+def _errors(text):
+    tree = SyntaxTree.fromText(text)
+    comp = ast.Compilation()
+    comp.addSyntaxTree(tree)
+    diags = [d for d in comp.getAllDiagnostics() if d.isError()]
+    # Out-of-range constant selects are warnings in slang but errors in the
+    # formal tools, so treat them as failures too.
+    diags += [d for d in comp.getAllDiagnostics() if "out of" in str(d.code).lower()
+              or "bounds" in str(d.code).lower()]
+    return diags
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def run():
+    tree = SyntaxTree.fromText(SRC)
+    pc = Papercutter(tree)
+    info = pc.cut_info()
+
+    t = _flat(_cut_for(pc, info, "t"))
+    assert "assign t[2:0] = a;" in t, t                       # write clamped
+    assert "y = {{1'b0, t[2:0]}, m[1], m[0]}" in t, t        # read zero-padded
+
+    m = _flat(_cut_for(pc, info, "m"))
+    assert "assign m[1]" not in m, m                          # dead write removed
+    assert "y = {t[3:0], 1'b0, m[0]}" in m, m                 # dead read is 0
+
+    mx = _flat(_cut_for(pc, info, "mx"))
+    assert "mx[2] = 2'b11" not in mx, mx                      # dead procedural write
+    assert "z = 2'b0 ^ mx[1];" in mx, mx                      # dead multi-dim read
+
+    asc = _flat(_cut_for(pc, info, "asc"))
+    assert "assign asc[0:2] = a;" in asc, asc                 # ascending clamp
+    assert "w = {asc[2:2], 1'b0};" in asc, asc                # ascending pads low end
+
+    q = _flat(_cut_for(pc, info, "q"))
+    assert "q[0:0] <= a[1:0]" in q, q                         # nonblocking clamp
+    assert ".o(q[0:0])" in q, q                               # port connection clamp
+
+    for name in _orig_decl:
+        text = _cut_for(pc, info, name)
+        errs = _errors(text)
+        assert not errs, f"{name}: {[str(e.code) for e in errs]}\n{text}"
+
+    run_parameterized()
+    run_port_writes()
+    print("test_narrow_selects: OK (constant selects into dropped bits rewritten: literal, parameterized, port writes)")
+
+
+PSRC = """
+module psel #(parameter W = 8) (
+    input  logic [W-1:0] a,
+    output logic [3:0]   y
+    );
+    logic [W-1:0] p;
+    assign p = a;
+    assign y = {p[7], p[6:4]};
+endmodule
+"""
+
+
+OSRC = """
+module fa (input logic a, b, output logic s, c);
+    assign s = a ^ b;
+    assign c = a & b;
+endmodule
+
+module ports (input logic a, b, output logic [1:0] y, output logic z);
+    logic [1:0] w;
+    logic [1:0] v;
+    fa u0 (a, b, w[0], w[1]);
+    fa u1 (.a(a), .b(b), .s(v[0]), .c(v[1]));
+    assign y = w;
+    assign z = v[0];
+endmodule
+"""
+
+
+def run_port_writes():
+    """A fully dropped bit written through an output port (positional or named) is
+    left unconnected instead of staying an out-of-range select."""
+    pc = Papercutter(SyntaxTree.fromText(OSRC))
+    texts = {}
+    for i, (k, _) in enumerate(pc.cut_info()):
+        if k == "bitshrink":
+            t = _flat(str(pc.cut_index([i]).root))
+            for sig in ("w", "v"):
+                if f"logic [0:0] {sig};" in t:
+                    texts[sig] = t
+    assert "fau0(a,b,w[0],)" in texts["w"].replace(" ", ""), texts["w"]       # positional slot emptied
+    assert ".c()" in texts["v"], texts["v"]                                      # named port unconnected
+    for sig, t in texts.items():
+        errs = _errors(t)
+        assert not errs, f"{sig}: {[str(e.code) for e in errs]}"
+
+
+def run_parameterized():
+    """--in-situ cuts the parameterized source: `p` is `[W-1:0]`, whose bounds come
+    from `symbolic_ranges` (the pipeline's read-only elaboration). Selects into
+    the dropped bit must be rewritten the same as for a literal range."""
+    pc = Papercutter(SyntaxTree.fromText(PSRC), symbolic_ranges={"a": [(7, 0)], "p": [(7, 0)]})
+    info = pc.cut_info()
+    texts = [str(pc.cut_index([i]).root) for i, (k, _) in enumerate(info) if k == "bitshrink"]
+    p = next(_flat(t) for t in texts if "logic [(W-1)-1:0] p;" in _flat(t))
+    assert "y = {1'b0, p[6:4]};" in p, p                      # dead read of p[7] is 0
+    # The narrowed source must elaborate cleanly at W = 8.
+    errs = _errors(p)
+    assert not errs, [str(e.code) for e in errs]
+
+
+if __name__ == "__main__":
+    run()

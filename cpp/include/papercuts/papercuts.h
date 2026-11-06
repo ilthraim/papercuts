@@ -679,6 +679,25 @@ private:
     std::unordered_map<const DeclaratorSyntax*, std::vector<BitShrinkTarget>> runMap;
     std::unordered_set<std::string> nodesToShrink; // Set to store the names of the nodes we want to shrink bits in
 
+    // The evaluated (left, right) of each packed dimension of parameterized
+    // declarations, as passed to the constructor (`symbolicRanges`). Lets selects
+    // into a narrowed `[W-1:0]` be rewritten too, not only literal ranges.
+    std::unordered_map<std::string, std::vector<std::pair<int, int>>> evaluatedRanges;
+
+    // Narrow mode: each shrunk signal's packed dimensions before and after this
+    // run's narrowing (nullopt for a dimension with no known bounds). Narrowing only edits
+    // the declaration, so a constant select that reaches the dropped bits
+    // (`x[3:0]`, `x[3]` once x is `[2:0]`) would be out of range; selects are
+    // rewritten against this (see handle(IdentifierSelectNameSyntax)).
+    struct NarrowedSignal {
+        size_t numUnpacked = 0;
+        std::vector<std::optional<std::pair<int, int>>> origDims;
+        std::vector<std::optional<std::pair<int, int>>> newDims;
+        std::vector<bool> narrowed;
+    };
+    std::unordered_map<std::string, NarrowedSignal> narrowedSignals;
+    void rewriteNarrowedSelect(const IdentifierSelectNameSyntax& node, const NarrowedSignal& sig);
+
     // Ternary remover variables
     std::vector<const ConditionalExpressionSyntax*> ternaryNodes;
     std::unordered_map<const ConditionalExpressionSyntax*, bool> ternaryNodesToChange;
@@ -703,6 +722,7 @@ private:
     void clearState() {
         nodesToShrink.clear();
         runMap.clear();
+        narrowedSignals.clear();
         ternaryNodesToChange.clear();
         ifNodesToChange.clear();
         caseNodesToChange.clear();
