@@ -28,13 +28,13 @@ def verdict(log, res="proven", rc=0):
 
 def run():
     assert verdict(PASS) == "proven"
-    assert verdict(BBOX) == "unmapped-bbox-input"
-    assert verdict(USER) == "unmapped-bbox-input"
+    assert verdict(BBOX) == "unmapped"
+    assert verdict(USER) == "unmapped"
     assert verdict(RESET) == "proven"
     assert verdict(OUTPUT) == "proven"
     # The script repeats the interface check after pairing reset_x: the last one counts.
     assert verdict(BBOX + PASS) == "proven"
-    assert verdict(PASS + BBOX) == "unmapped-bbox-input"
+    assert verdict(PASS + BBOX) == "unmapped"
     # A refutation stays a refutation, and needs no log.
     assert verdict(None, "cex", 1) == "cex"
     assert verdict(BBOX, "cex", 1) == "cex"

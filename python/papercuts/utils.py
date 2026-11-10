@@ -50,21 +50,71 @@ def print_tree(tree: SyntaxTree) -> str:
         return str(tree.root)
     
 # MARK: Run
+@dataclass(frozen=True)
+class Design:
+    """One side of an equivalence check, in terms any formal tool can resolve.
+
+    ``lib_dir`` holds one file per definition, named ``<definition>.sv``. The
+    design is everything reachable from ``top``, each definition resolved by name
+    from ``lib_dir``, EXCEPT that every definition in an ``overrides`` file wins
+    over the library copy of the same name. Each override is keyed by the
+    definition it was written for; a file may define more than that one (the
+    elaborated blob and the joint consolidated file define the whole design and
+    are keyed by the top).
+
+    A backend must make the override win at every depth. Letting the library copy
+    of a definition shadow the override (as Jasper's `-y` did for a `-v` file
+    below the top) checks golden against golden and proves anything
+    (fv_dataset, 2026-11-01).
+    """
+
+    top: str
+    lib_dir: str
+    overrides: "tuple[tuple[str, str], ...]" = ()
+
+    def override(self, definition: str, path: str) -> "Design":
+        """This design with `definition` taken from `path`."""
+        return Design(self.top, self.lib_dir, self.overrides + ((definition, path),))
+
+    @property
+    def override_map(self) -> "dict[str, str]":
+        return dict(self.overrides)
+
+
+@dataclass(frozen=True)
+class Rename:
+    """A name the candidate spells differently from the golden design (elaboration
+    flattens `g[0].u` to `g_0_u`). Paths are hierarchical, relative to the top.
+    ``kind`` is "instance" (everything inside pairs by name once the instances are
+    paired) or "signal" (a variable or net; a backend pairs a renamed state element
+    as the same initial state, not as one shared free value)."""
+
+    kind: str
+    golden: str
+    candidate: str
+
+
+#: Every verdict a backend may report. Only "proven" makes a run valid.
+#: "unmapped": the proof finished, but a point the check compares (a black-box
+#: input, say) had no partner on the other side, so it was compared with nothing.
+VERDICTS = ("proven", "cex", "inconclusive", "unmapped", "error")
+
+
 @dataclass
 class Run:
-    """A single test run with input and expected output."""
+    """One equivalence check: is ``candidate`` equivalent to ``golden``?"""
 
-    top_module_path: str
-    spec_lib_path: str
-    impl_module_path: str
-    impl_module_folder: str
-    is_top: bool
+    golden: Design
+    candidate: Design
+    #: Directory the backend may write its own files into (tool projects, logs).
+    work_dir: str
     index: int = 0
+    #: Pipeline bookkeeping, never read by a backend: the file this run's rewrite
+    #: is written to (one of ``candidate.overrides``).
+    rewrite_path: "str | None" = None
     valid: bool = False
     output: str = ""
-    #: Normalized formal verdict for this run, when the backend can report one:
-    #: "proven" | "cex" | "inconclusive" | "error". None until a check runs (or
-    #: if the backend never sets it). "error" also covers a killed/aborted tool.
+    #: One of VERDICTS once a check has run (ECBackend.check sets it), else None.
     verdict: "str | None" = None
     #: For a bit-shrink cut, the number of bits actually removed from the targeted
     #: dimension. 1 for a plain single-bit shrink; higher when --iterative-bitshrink
@@ -75,11 +125,11 @@ class Run:
     #: combinational spec, which neither implies nor follows from membership.
     #: None under --method fv.
     in_set: "bool | None" = None
-    #: A Tcl file of check_sec mapping commands the backend applies after setup
-    #: (the elaboration gate: names the elaborator changed). None: none.
-    map_script: "str | None" = None
-    #: check_sec -prove limits for this run (None: none). A per-cut check stops at
-    #: its first counterexample (cex_limit 1: any refuted output settles the cut)
-    #: and, with --jasper-time-limit, after that budget ("600s"; inconclusive).
-    time_limit: "str | None" = None
-    cex_limit: "int | None" = None
+    #: Names the candidate changed (the elaboration gate), for the backend to pair.
+    renames: "tuple[Rename, ...]" = ()
+    #: Proof budget in seconds (None: none); a check that runs out is inconclusive.
+    time_limit_s: "int | None" = None
+    #: The caller only needs to know whether the designs differ, not every point
+    #: where they do: the backend may stop at the first counterexample (a per-cut
+    #: check). An optimization; ignoring it is correct.
+    stop_at_first_cex: bool = False

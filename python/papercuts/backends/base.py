@@ -3,14 +3,25 @@ from __future__ import annotations
 import argparse
 from abc import ABC, abstractmethod
 
-from papercuts.utils import Run
+from papercuts.utils import VERDICTS, Run
 
 
 class ECBackend(ABC):
     """An equivalence-checking backend.
 
     A backend proves or refutes each candidate rewrite (a :class:`Run`) against
-    the golden source, setting ``run.valid`` (and optionally ``run.output``).
+    the golden source. A subclass implements :meth:`_check` (and
+    :meth:`_check_from_power_up`, to serve cegis-comb), returning one of
+    ``VERDICTS``; :meth:`check` records it, and only "proven" makes a run valid.
+    A subclass should set ``run.output``.
+
+    What every backend must honour (the pipeline relies on each):
+
+    - ``run.golden`` / ``run.candidate``: a definition in an override file wins
+      over the library copy at every depth (see :class:`Design`).
+    - ``run.renames``: pair each renamed instance and signal across the sides.
+    - ``run.time_limit_s``: stop after that budget, as "inconclusive".
+    - "unmapped", never "proven", when a compared point had no partner.
 
     Backends are discovered as plugins via the ``papercuts.backends`` entry-point
     group, so out-of-tree packages (e.g. environment-specific formal-tool
@@ -86,6 +97,11 @@ class ECBackend(ABC):
         """
         return set()
 
+    async def check(self, run: Run) -> bool:
+        """Equivalence-check a single run under the clock and reset. Sets
+        ``run.verdict`` and ``run.valid``; returns ``run.valid``."""
+        return self._record(run, await self._check(run))
+
     async def check_from_power_up(self, run: Run) -> bool:
         """Equivalence-check a run from every power-up state the two designs
         share, with no reset: each register starts at an arbitrary value, the
@@ -99,17 +115,23 @@ class ECBackend(ABC):
         register whose reset value depends on an input comes out unknown in one
         design and constant in the other, and the two then start apart
         (opencores__gost28147-89__mac, 2026-10-23).
-
-        A backend that cannot run such a check cannot serve cegis-comb.
         """
-        raise NotImplementedError(f"backend {self.name!r} has no power-up check (needed by --method cegis-comb)")
+        return self._record(run, await self._check_from_power_up(run))
+
+    @staticmethod
+    def _record(run: Run, verdict: str) -> bool:
+        if verdict not in VERDICTS:
+            raise ValueError(f"backend verdict {verdict!r} is not one of {VERDICTS}")
+        run.verdict = verdict
+        run.valid = verdict == "proven"
+        return run.valid
 
     @abstractmethod
-    async def check(self, run: Run) -> bool:
-        """Equivalence-check a single run.
-
-        Implementations must set ``run.valid`` (True iff the rewrite is proven
-        equivalent to the golden source) and should populate ``run.output``.
-        The return value is ``run.valid`` for convenience.
-        """
+    async def _check(self, run: Run) -> str:
+        """Prove or refute ``run`` under the clock and reset; return a verdict."""
         raise NotImplementedError
+
+    async def _check_from_power_up(self, run: Run) -> str:
+        """As :meth:`_check`, from every shared power-up state with no reset. A
+        backend that cannot run such a check cannot serve cegis-comb."""
+        raise NotImplementedError(f"backend {self.name!r} has no power-up check (needed by --method cegis-comb)")

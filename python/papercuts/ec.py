@@ -279,9 +279,13 @@ def generate_jasper_tcl_script(clock: "str | None" = None,
     emitted verbatim as Jasper's ``clock``/``reset`` commands. Both default to
     None, which keeps the clock-free ``clock -none`` / ``reset -none`` setup.
 
-    Every check elaborates at the design top in both compile contexts (see the
-    ``is_top`` branch below), so a single pair of top-level names is correct for
-    every run -- per-cut, consolidated, and the two load-bearing gates alike.
+    Every check elaborates the design top, named with ``elaborate -top`` in both
+    compile contexts, so a single pair of top-level names is correct for every
+    run -- per-cut, consolidated, and the two load-bearing gates alike. Left to
+    itself Jasper picks the first module nothing instantiates, and the spec
+    context reads whole override files: an in-situ joint file keeps the modules
+    the top never instantiates, so Jasper elaborated one of those (ch_intrinsics:
+    DFF) and the check errored.
 
     ``bbox_array`` raises Jasper's array black-box limit (``elaborate -bbox_a``).
     Jasper black-boxes arrays above a small default size and compares every
@@ -300,8 +304,10 @@ def generate_jasper_tcl_script(clock: "str | None" = None,
 #Arguments are : (5) top_module_path, (6) spec_lib_path, (7) imp_module_path, (8) is_top,
 #                (9) a Tcl file of mapping commands, or "-"
 #                (10) check_sec -prove -time_limit, or "-"  (11) -cex_limit, or "-"
+#                (12) the top module name, elaborated in both contexts
 
 set is_top [lindex $argv 8]
+set top [lindex $argv 12]
 
 if {[catch {
     clear -all
@@ -316,11 +322,11 @@ if {[catch {
         # against golden (every module 2+ levels below the top).
         analyze -sv17 [lindex $argv 7] -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
     }
-    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 BBOX_A
+    elaborate -top $top -bbox_mul 64 -bbox_div 64 -bbox_mod 64 BBOX_A
     # Analyze and elaborate the implementation design
     check_sec -compile_context imp
     analyze -sv -y [lindex $argv 6] [lindex $argv 5] +libext+.sv
-    elaborate -bbox_mul 64 -bbox_div 64 -bbox_mod 64 BBOX_A
+    elaborate -top $top -bbox_mul 64 -bbox_div 64 -bbox_mod 64 BBOX_A
     # Setup verification environment
 """
     # A reset expression routinely contains spaces (e.g. "rst == 1'b1"), which
@@ -331,7 +337,7 @@ if {[catch {
     tcl_script += f"    clock {clock if clock else '-none'}\n"
     tcl_script += """    check_sec -setup
     check_sec -auto_map_reset_x_values on
-    # Names the elaborator changed (Run.map_script); auto-mapping re-runs with them
+    # Names the candidate changed (Run.renames); auto-mapping re-runs with them
     if {[lindex $argv 9] ne "-"} {
         source [lindex $argv 9]
         check_sec -map -auto
@@ -467,7 +473,64 @@ def _sec_verdict(output: str, returncode: int, jg_log: str) -> str:
     start = log.rfind(_INTERFACE_SUMMARY)
     if start < 0:
         raise RuntimeError(f"proven, but no interface check summary in {jg_log}")
-    return "unmapped-bbox-input" if _BBOX_INPUT_UNMAPPED.search(log, start) else verdict
+    return "unmapped" if _BBOX_INPUT_UNMAPPED.search(log, start) else verdict
+
+
+# MARK: Jasper rendering of a Run
+_JASPER_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*(\[\d+\])*(\.[A-Za-z_][A-Za-z0-9_$]*(\[\d+\])*)*")
+
+
+def jasper_map_script(renames) -> str:
+    """check_sec commands pairing what the candidate renamed (``Run.renames``).
+    The script reads the candidate as Jasper's spec, so a rule maps candidate
+    names (-spec) to golden ones (-imp).
+
+    Measured on Jasper 2026.03 (runs/cegis_comb_dataset/ISSUES.md 96):
+    `-hierarchy` rules make a renamed instance's contents map by name, its
+    uninitialized flops included, once `check_sec -map -auto` re-runs; a renamed
+    flop needs `-init` (a plain map is a connection, one free value driving both
+    sides). `-init` on a wire only warns and maps nothing. Deeper rules come first
+    so an enclosing rule never claims their names. A golden name Jasper may spell
+    differently (an escaped one) is left out: unmapped fails the gate loudly where
+    a wrong spelling could pair the wrong flop."""
+    keep = [r for r in renames if _JASPER_PATH.fullmatch(r.golden)]
+    # One command per depth, deepest first: a rule cannot enclose another of the
+    # same depth, so order within a command does not matter. One command per rule
+    # cost Jasper ~1 s each and grew with the count: opencores pairing's 10966
+    # stalled the gate for hours (ISSUES.md 109); as lists, 87 s, same mappings.
+    by_depth = {}
+    for r in keep:
+        if r.kind == "instance":
+            by_depth.setdefault(r.candidate.count("."), []).append((r.candidate, r.golden))
+    lines = [f"check_sec -map -hierarchy -spec {{{' '.join('{' + s + '}' for s, _ in rs)}}} "
+             f"-imp {{{' '.join('{' + i + '}' for _, i in rs)}}}"
+             for _, rs in sorted(by_depth.items(), reverse=True)]
+    lines += [f"check_sec -map -init -spec {{{r.candidate}}} -imp {{{r.golden}}}" for r in keep if r.kind == "signal"]
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def jasper_args(run: pc_core.Run, map_path: "str | None") -> list[str]:
+    """The script arguments (5)-(12) for `run` (see generate_jasper_tcl_script).
+
+    The script reads the candidate as Jasper's spec and the golden design as its
+    imp, from one library: the imp context is `-y lib lib/<top>.sv`, and the spec
+    context the candidate's one override as a plain source beside the same `-y
+    lib` (with `lib/<top>.sv` too when the override is below the top). That is
+    exactly what a Design states, for the designs the pipeline builds; anything
+    else is refused rather than approximated. Both contexts elaborate `top`
+    by name (12)."""
+    g, c = run.golden, run.candidate
+    if g.overrides:
+        raise ValueError(f"Jasper backend: the golden design must have no overrides, got {g.overrides}")
+    if (c.top, c.lib_dir) != (g.top, g.lib_dir):
+        raise ValueError(f"Jasper backend: golden and candidate must share top and library, got "
+                         f"{(g.top, g.lib_dir)} and {(c.top, c.lib_dir)}")
+    if len(c.overrides) > 1:
+        raise ValueError(f"Jasper backend: at most one override per candidate, got {c.overrides}")
+    top_path = f"{g.lib_dir}/{g.top}.sv"
+    definition, impl_path = c.overrides[0] if c.overrides else (c.top, top_path)
+    limits = [f"{run.time_limit_s}s" if run.time_limit_s else "-", "1" if run.stop_at_first_cex else "-"]
+    return [top_path, g.lib_dir, impl_path, str(definition == c.top), map_path or "-", *limits, g.top]
 
 
 # MARK: Jasper Runner
@@ -478,14 +541,22 @@ def _jg_command() -> str:
     return os.environ.get("PAPERCUTS_JG", "jg")
 
 
-async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str = TCL_SCRIPT_NAME):
+async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str = TCL_SCRIPT_NAME) -> str:
+    """Run `script` on `run`; set ``run.output`` and return the verdict."""
+    project = f"{run.work_dir}/jgproject{run.index}"
+    map_path = None
+    if run.renames:
+        map_text = jasper_map_script(run.renames)
+        if map_text:
+            os.makedirs(run.work_dir, exist_ok=True)
+            map_path = os.path.abspath(f"{run.work_dir}/rename_map{run.index}.tcl")
+            with open(map_path, "w") as f:
+                f.write(map_text)
     # stdin=DEVNULL detaches jg from our controlling terminal; otherwise it puts
     # the inherited tty into raw mode (ONLCR off) and doesn't restore it, making
     # subsequent status prints "stairstep" across the screen.
-    map_script = run.map_script or "-"
-    limits = f"{run.time_limit or '-'} {run.cex_limit or '-'}"
     process = await asyncio.create_subprocess_shell(
-        f"csh -c '{_jg_command()} -no_gui -proj {run.impl_module_folder}/jgproject{run.index} {script} --- {run.top_module_path} {run.spec_lib_path} {run.impl_module_path} {run.is_top} {map_script} {limits}'",
+        f"csh -c '{_jg_command()} -no_gui -proj {project} {script} --- {' '.join(jasper_args(run, map_path))}'",
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -502,9 +573,10 @@ async def run_jasper(run: pc_core.Run, print_output: bool = False, script: str =
     await process.wait()
 
     run.output = output
-    run.verdict = _sec_verdict(output, process.returncode, f"{run.impl_module_folder}/jgproject{run.index}/jg.log")
-    run.valid = process.returncode == 0 and run.verdict == "proven"
-    return
+    verdict = _sec_verdict(output, process.returncode, f"{project}/jg.log")
+    # The script exits 0 exactly when it printed "proven"; a proof whose tool then
+    # failed is not trusted.
+    return "error" if verdict == "proven" and process.returncode != 0 else verdict
 
 async def run_jasper_old(run: pc_core.Run, print_output: bool = False):
     name = run.wrapper_fname.split("_wrapper")[0]

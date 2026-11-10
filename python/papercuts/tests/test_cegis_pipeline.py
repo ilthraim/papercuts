@@ -39,15 +39,13 @@ def make_stub(calls, refute_joint=False):
     class Stub(ECBackend):
         name = "stub"
 
-        async def check(self, run):
+        async def _check(self, run):
             calls.append(run)
-            ok = not (refute_joint and run.index == -1)
-            run.valid, run.verdict = ok, "proven" if ok else "cex"
-            return ok
+            return "cex" if refute_joint and run.index == -1 else "proven"
 
-        async def check_from_power_up(self, run):
+        async def _check_from_power_up(self, run):
             run.power_up = True
-            return await self.check(run)
+            return await self._check(run)
 
     return Stub
 
@@ -84,12 +82,12 @@ def test_elaborated():
         calls, exit_ = pipeline(tmp, [])
         assert exit_ is None, exit_
         # self-check, elaboration gate, one joint check; nothing per cut or per module
-        assert [c.index for c in calls] == [0, 0, -1], [c.impl_module_path for c in calls]
+        assert [c.index for c in calls] == [0, 0, -1], [c.rewrite_path for c in calls]
         joint = calls[-1]
-        assert joint.is_top and joint.impl_module_path.endswith("joint/top_consolidated.sv")
+        assert joint.candidate.overrides == (("top", joint.rewrite_path),) and joint.rewrite_path.endswith("joint/top_consolidated.sv")
         # the joint check starts from power-up; the gates keep the reset
         assert getattr(joint, "power_up", False) and not any(getattr(c, "power_up", False) for c in calls[:-1])
-        with open(os.path.join(tmp, joint.impl_module_path)) as f:
+        with open(os.path.join(tmp, joint.rewrite_path)) as f:
             text = f.read()
         assert all(f"module {m}" in text for m in ("top", "top_c0", "top_c1")), text
 
@@ -137,7 +135,7 @@ endmodule
             assert exit_ is None, exit_
             cut = [r for r in results(tmp) if r["phase"] == "cuts" and r["type"].startswith("bitshrink")]
             assert cut and cut[0]["in_set"], cut  # bit 3 is never read: the shrink is valid
-            with open(os.path.join(tmp, calls[-1].impl_module_path)) as f:
+            with open(os.path.join(tmp, calls[-1].rewrite_path)) as f:
                 text = f.read()
             assert "r_papercuts" in text and "r[3] <=" in text, text
     finally:
@@ -167,7 +165,7 @@ endmodule
             assert set(fc) == {"force-const(0)", "force-const(1)"}, cuts
             assert all(r["verdict"] != "noop" for r in fc.values()), fc
             assert fc["force-const(1)"]["in_set"] and not fc["force-const(0)"]["valid"], fc
-            with open(os.path.join(tmp, calls[-1].impl_module_path)) as f:
+            with open(os.path.join(tmp, calls[-1].rewrite_path)) as f:
                 text = f.read()
             assert "t ?" not in text, text  # the read of t is gone from the joint check's design
     finally:
@@ -465,10 +463,10 @@ def test_fv_method():
         finals = [c for c in calls if c.index == -1]
         assert len(finals) == 4  # one consolidated check per module, then the joint one
         joint = finals[-1]
-        assert joint.is_top and joint.impl_module_path.endswith("joint/top_consolidated.sv")
+        assert joint.candidate.overrides == (("top", joint.rewrite_path),) and joint.rewrite_path.endswith("joint/top_consolidated.sv")
         # unlike CEGIS, it keeps the reset the cuts were proven under
         assert not getattr(joint, "power_up", False)
-        with open(os.path.join(tmp, joint.impl_module_path)) as f:
+        with open(os.path.join(tmp, joint.rewrite_path)) as f:
             text = f.read()
         assert all(f"module {m}" in text for m in ("top", "top_c0", "top_c1")), text
         rec = [r for r in results(tmp) if r["type"] == "joint"]
@@ -488,7 +486,7 @@ def test_fv_failed_joint_check_is_a_consolidation_error():
         assert exit_ is not None, "a failed joint check must stop the run"
         msg = str(exit_.code)
         assert "FATAL: consolidation error" in msg and "not equivalent" in msg, msg
-        assert calls[-1].impl_module_path.endswith("joint/top_consolidated.sv")
+        assert calls[-1].rewrite_path.endswith("joint/top_consolidated.sv")
         with open(os.path.join(tmp, "outputs", "papercuts.log")) as f:
             assert "FAILED (cex)" in f.read()
         assert [r["valid"] for r in results(tmp) if r["type"] == "joint"] == [False]

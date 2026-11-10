@@ -1547,23 +1547,13 @@ class Emitter:
 
 
 
-_JASPER_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*(\[\d+\])*(\.[A-Za-z_][A-Za-z0-9_$]*(\[\d+\])*)*")
+def gate_renames(renames, comp) -> tuple:
+    """The elaborator's renames (Emitter.rename_map: (kind, original, elaborated))
+    that still name something in `comp`, the elaborated design the gate checks,
+    as Run.renames with the original as golden. The dead-code prune may have
+    removed a renamed signal; pairing it would name nothing."""
+    from papercuts.utils import Rename
 
-
-def gate_map_script(renames, comp, spec_is_original: bool) -> str:
-    """check_sec commands pairing what the elaborator renamed (Emitter.rename_map)
-    for the elaboration gate, given the compiled design the gate checks (after the
-    dead-code prune, which may have removed a renamed signal). `spec_is_original`:
-    which design Jasper's spec context reads; a rule maps spec names to imp names.
-
-    Measured on Jasper 2026.03 (runs/cegis_comb_dataset/ISSUES.md 96):
-    `-hierarchy` rules make a renamed instance's contents map by name, its
-    uninitialized flops included, once `check_sec -map -auto` re-runs; a renamed
-    flop needs `-init` (a plain map is a connection, one free value driving both
-    sides). `-init` on a wire only warns and maps nothing. Deeper rules come first
-    so an enclosing rule never claims their names. An escaped name is left out:
-    how Jasper spells it is not known, and unmapped fails the gate loudly where a
-    wrong spelling could pair the wrong flop."""
     present = set()
     for top in comp.getRoot().topInstances:
         base = top.hierarchicalPath + "."
@@ -1578,21 +1568,7 @@ def gate_map_script(renames, comp, spec_is_original: bool) -> str:
 
         for m in top.body:
             walk(m)
-    keep = [(k, o, e) if spec_is_original else (k, e, o)
-            for k, o, e in renames if e in present and _JASPER_PATH.fullmatch(o)]
-    # One command per depth, deepest first: a rule cannot enclose another of the
-    # same depth, so order within a command does not matter. One command per rule
-    # cost Jasper ~1 s each and grew with the count: opencores pairing's 10966
-    # stalled the gate for hours (ISSUES.md 109); as lists, 87 s, same mappings.
-    by_depth = {}
-    for k, s, i in keep:
-        if k == "instance":
-            by_depth.setdefault(s.count("."), []).append((s, i))
-    lines = [f"check_sec -map -hierarchy -spec {{{' '.join('{' + s + '}' for s, _ in rs)}}} "
-             f"-imp {{{' '.join('{' + i + '}' for _, i in rs)}}}"
-             for _, rs in sorted(by_depth.items(), reverse=True)]
-    lines += [f"check_sec -map -init -spec {{{s}}} -imp {{{i}}}" for k, s, i in keep if k == "signal"]
-    return "\n".join(lines) + "\n" if lines else ""
+    return tuple(Rename(k, o, e) for k, o, e in renames if e in present)
 
 
 def _empty_port(port) -> bool:

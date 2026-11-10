@@ -17,8 +17,10 @@ import tempfile
 
 from pyslang.syntax import SyntaxTree
 
-from papercuts.ec import generate_jasper_tcl_script
-from papercuts.elaborator import build_compilation_from, elaborate_design, gate_map_script
+from papercuts.ec import generate_jasper_tcl_script, jasper_map_script
+from papercuts.elaborator import build_compilation_from, elaborate_design, gate_renames
+from papercuts.utils import Rename
+
 
 DESIGN = """
 module leaf(input logic clk, input logic d, output logic q);
@@ -54,29 +56,29 @@ def run():
     assert ("instance", "k[0].m.g[0].u", "k_0_m.g_0_u") in ren, ren
     assert not any(r[1].startswith("k[0].m.g[0].u.") for r in ren), ren  # leaf keeps its names
 
-    script = gate_map_script(elab.renames, build_compilation_from([SyntaxTree.fromText(elab.source)]),
-                             spec_is_original=True)
+    kept = gate_renames(elab.renames, build_compilation_from([SyntaxTree.fromText(elab.source)]))
+    assert Rename("signal", "h.r", "h_r") in kept, kept  # golden = original, candidate = elaborated
+
+    # The Jasper script reads the candidate as its spec: rules map candidate -> golden.
+    script = jasper_map_script(kept)
     lines = script.splitlines()
-    assert "check_sec -map -init -spec {h.r} -imp {h_r}" in lines, script
+    assert "check_sec -map -init -spec {h_r} -imp {h.r}" in lines, script
     rules = [l for l in lines if "-hierarchy" in l]
-    assert rules == ["check_sec -map -hierarchy -spec {{k[0].m.g[0].u} {k[0].m.g[1].u}} "
-                     "-imp {{k_0_m.g_0_u} {k_0_m.g_1_u}}",
-                     "check_sec -map -hierarchy -spec {{k[0].m}} -imp {{k_0_m}}"], rules  # one per depth, deepest first
+    assert rules == ["check_sec -map -hierarchy -spec {{k_0_m.g_0_u} {k_0_m.g_1_u}} "
+                     "-imp {{k[0].m.g[0].u} {k[0].m.g[1].u}}",
+                     "check_sec -map -hierarchy -spec {{k_0_m}} -imp {{k[0].m}}"], rules  # one per depth, deepest first
 
     # a renamed signal the prune removed is not mapped
     pruned = re.sub(r"\n\s*(reg|logic)\s+h_r;", "\n", elab.source)
     pruned = re.sub(r"always_ff @\(posedge clk\) begin\s*h_r <= d\[0\];\s*end", "", pruned)
     pruned = pruned.replace("assign r_out = h_r;", "assign r_out = 1'b0;")
     assert "h_r" not in pruned, pruned
-    script2 = gate_map_script(elab.renames, build_compilation_from([SyntaxTree.fromText(pruned)]),
-                              spec_is_original=True)
+    kept2 = gate_renames(elab.renames, build_compilation_from([SyntaxTree.fromText(pruned)]))
+    script2 = jasper_map_script(kept2)
     assert "h_r" not in script2 and "k_0_m" in script2, script2
 
-    # the pipeline's gate reads the elaborated blob as spec: the same map, sides swapped
-    flipped = gate_map_script(elab.renames, build_compilation_from([SyntaxTree.fromText(elab.source)]),
-                              spec_is_original=False)
-    assert "check_sec -map -init -spec {h_r} -imp {h.r}" in flipped.splitlines(), flipped
-    assert "check_sec -map -hierarchy -spec {{k_0_m}} -imp {{k[0].m}}" in flipped.splitlines(), flipped
+    # a golden name Jasper may spell differently is left unmapped (fails loudly)
+    assert jasper_map_script((Rename("signal", "\\esc[ .x", "esc_x"),)) == ""
 
     tcl = generate_jasper_tcl_script(clock="clk")
     assert 'if {[lindex $argv 9] ne "-"}' in tcl and "source [lindex $argv 9]" in tcl, tcl

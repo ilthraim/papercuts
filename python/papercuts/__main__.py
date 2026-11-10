@@ -25,7 +25,7 @@ from papercuts.elaborator import (
     EmitError,
     build_compilation_from,
     elaborate_design,
-    gate_map_script,
+    gate_renames,
     make_parse_env,
 )
 from papercuts.manifest import build_manifest, check_manifest, write_manifest
@@ -38,7 +38,7 @@ from papercuts.pypercuts import (
     wire_mux_hierarchy,
 )
 from papercuts.status import StatusWriter
-from papercuts.utils import Run, print_tree, set_verbose, status
+from papercuts.utils import Design, Run, print_tree, set_verbose, status
 
 CUT_FAMILIES = ("bitshrink", "ternary", "if", "case", "binop", "force-const")
 
@@ -503,7 +503,7 @@ async def cegis_phase(args, modules: list[ModuleCuts], manifest_path: str, *, ba
             f.write(text)
         texts.append(text)
     joint = _joint_run(texts, consolidated_dir, ctree_dir, top_name)
-    joint_dir = joint.impl_module_folder
+    joint_dir = joint.work_dir
 
     status("Verifying the whole consolidated design (from power-up, no reset)...")
     tracker.set_phase("consolidate")
@@ -538,8 +538,9 @@ def _joint_run(texts: list[str], consolidated_dir: str, ctree_dir: str, top_name
     joint_path = f"{joint_dir}/{top_name}_consolidated.sv"
     with open(joint_path, "w") as f:
         f.write("\n".join(texts))
-    return Run(top_module_path=f"{ctree_dir}/{top_name}.sv", spec_lib_path=ctree_dir,
-               impl_module_path=joint_path, impl_module_folder=joint_dir, is_top=True, index=-1)
+    golden = Design(top_name, ctree_dir)
+    return Run(golden=golden, candidate=golden.override(top_name, joint_path), work_dir=joint_dir, index=-1,
+               rewrite_path=joint_path)
 
 
 def _failed_as(verdict) -> str:
@@ -550,8 +551,8 @@ def _failed_as(verdict) -> str:
         return "is not equivalent to"
     if verdict == "error":
         return "could not be checked (backend error, no proof ran) against"
-    if verdict == "unmapped-bbox-input":
-        return "was proven only with a black-box input left uncompared against"
+    if verdict == "unmapped":
+        return "was proven only with a compared point (a black-box input) left unpaired against"
     return "was not proven equal to"
 
 
@@ -767,36 +768,13 @@ async def main():
         "stops the run with an error; default: no limit.",
     )
     parser.add_argument(
-        "--jasper-bbox-array",
-        type=int,
-        default=None,
-        metavar="BITS",
-        help="Jasper: black-box only arrays larger than BITS (elaborate -bbox_a). "
-        "Jasper's default black-boxes much smaller arrays and then compares every "
-        "write into them, read or not, which can fail a check on a valid cut "
-        "(hls covariance). Raising it models the arrays instead, at a large memory "
-        "cost on array-heavy designs; off by default.",
-    )
-    parser.add_argument(
-        "--jasper-time-limit",
+        "--fv-time-limit",
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Jasper: time budget of each per-cut check (check_sec -prove "
-        "-time_limit); a check that runs out is inconclusive and the cut is not "
-        "applied. Gates and consolidation checks are not limited. Default: none.",
-    )
-    parser.add_argument(
-        "--jasper-engines",
-        type=int,
-        default=0,
-        metavar="N",
-        help="Jasper: proof-engine jobs one check may run at once "
-        "(set_proofgrid_max_local_jobs; one job per engine). A check runs its whole "
-        "engine portfolio in parallel, ~28 engines and up to ~50 processes, so the "
-        "machine load is about -j times that. 0 (default) leaves the portfolio "
-        "whole; the proof strategy needs at least 4, and a cap drops engines, which "
-        "can make a hard check far slower (a deep cex: 81 s uncapped, >15 min at 16).",
+        help="Time budget of each per-cut equivalence check; a check that runs out "
+        "is inconclusive and the cut is not applied. Gates and consolidation checks "
+        "are not limited. Default: none.",
     )
     parser.add_argument(
         "--cegis-ignore-initial",
@@ -960,7 +938,7 @@ async def main():
     # those of multi-packed-dim vectors. Empty => those stay uncut.
     symbolic_ranges: dict[str, dict[str, list[tuple[int, int]]]] = {}
     elab_blob_path = None
-    gate_map_path = None  # check_sec commands pairing what elaboration renamed
+    gate_rename_list = ()  # what elaboration renamed, for the gate to pair
     # Dead-code prune summary for the elaborated blob (None => pruning not run,
     # e.g. --no-prune-dead or --in-situ). Recorded into papercuts.log.
     prune_stats = None
@@ -1066,14 +1044,10 @@ async def main():
         blob_tree = SyntaxTree.fromText(elab_source)
         conc_trees = [(tree, name) for name, tree in chipper.split_tree(blob_tree)]
 
-        # Jasper pairs uninitialized flops, blackboxes and X sources by name, and
-        # flattening a generate scope renames them (ISSUES 96): the gate gets the map.
-        # The is_top script reads impl_module_path (this blob) as Jasper's spec.
-        map_text = gate_map_script(elab.renames, build_compilation_from([blob_tree]), spec_is_original=False)
-        if map_text:
-            gate_map_path = os.path.abspath(f"{elab_dir}/gate_map.tcl")
-            with open(gate_map_path, "w") as f:
-                f.write(map_text)
+        # A formal tool pairs uninitialized flops, blackboxes and X sources by name,
+        # and flattening a generate scope renames them (ISSUES 96): the gate gets
+        # the renames that survived the prune.
+        gate_rename_list = gate_renames(elab.renames, build_compilation_from([blob_tree]))
 
         # The elaborator emits an excluded module AND its whole subtree verbatim
         # (an opaque boundary), so the uncut set is exactly what it emitted
@@ -1142,11 +1116,9 @@ async def main():
         selfcheck_dir = f"{output_dir}/fv_selfcheck"
         os.makedirs(selfcheck_dir, exist_ok=True)
         selfcheck_run = Run(
-            top_module_path=f"{orig_dir}/{top_name}.sv",
-            spec_lib_path=orig_dir,
-            impl_module_path=f"{orig_dir}/{top_name}.sv",  # same source both sides
-            impl_module_folder=selfcheck_dir,
-            is_top=True,
+            golden=Design(top_name, orig_dir),
+            candidate=Design(top_name, orig_dir),  # same source both sides
+            work_dir=selfcheck_dir,
             index=0,
         )
         tracker.set_phase("selfcheck")
@@ -1184,13 +1156,12 @@ async def main():
         gate_dir = f"{elab_dir}/fv"
         os.makedirs(gate_dir, exist_ok=True)
         gate_run = Run(
-            top_module_path=f"{orig_dir}/{top_name}.sv",
-            spec_lib_path=orig_dir,
-            impl_module_path=elab_blob_path,
-            impl_module_folder=gate_dir,
-            is_top=True,
+            golden=Design(top_name, orig_dir),
+            # the blob defines the whole design; the library is never consulted
+            candidate=Design(top_name, orig_dir).override(top_name, elab_blob_path),
+            work_dir=gate_dir,
             index=0,
-            map_script=gate_map_path,
+            renames=gate_rename_list,
         )
         tracker.set_phase("gate")
         tracker.start(id(gate_run), "gate", "elab-gate")
@@ -1352,6 +1323,7 @@ async def main():
     status("Enumerating cuts...")
     modules: list[ModuleCuts] = []
     all_runs: list[Run] = []
+    golden = Design(top_name, ctree_dir)  # every cut is checked against the whole golden design
     for tree, name in conc_trees:
         cur_dir = f"{output_dir}/{name}"  # created lazily, only when a cut is written
         is_top = name == top_name
@@ -1402,16 +1374,16 @@ async def main():
             # driven by mod.runs).
             if only_families is not None and cut_family(cut_infos[idx][0]) not in only_families:
                 continue
+            cut_path = f"{cur_dir}/{name}_pc{idx}.sv"
             run = Run(
-                top_module_path=f"{ctree_dir}/{top_name}.sv",
-                spec_lib_path=ctree_dir,
-                impl_module_path=f"{cur_dir}/{name}_pc{idx}.sv",
-                impl_module_folder=cur_dir,
-                is_top=is_top,
+                golden=golden,
+                candidate=golden.override(name, cut_path),
+                work_dir=cur_dir,
                 index=idx,
+                rewrite_path=cut_path,
                 # one refuted output settles a cut; the rest of the proof is waste
-                cex_limit=1,
-                time_limit=f"{args.jasper_time_limit}s" if args.jasper_time_limit else None,
+                stop_at_first_cex=True,
+                time_limit_s=args.fv_time_limit,
                 )
             mod.runs.append(run)
             all_runs.append(run)
@@ -1477,7 +1449,7 @@ async def main():
                 if not made_dir:
                     os.makedirs(mod.cur_dir, exist_ok=True)
                     made_dir = True
-                with open(run.impl_module_path, "w") as f:
+                with open(run.rewrite_path, "w") as f:
                     f.write(cut_src)
                 kept.append(run)
             mod.runs = kept
@@ -1571,7 +1543,7 @@ async def main():
                 return run
 
             os.makedirs(mod.cur_dir, exist_ok=True)
-            with open(run.impl_module_path, "w") as f:
+            with open(run.rewrite_path, "w") as f:
                 f.write(cut_src)
 
             tracker.start(id(run))
@@ -1596,7 +1568,7 @@ async def main():
                     k = 2
                     while k <= cap:
                         cand = mod.pc.cut_index_text([run.index], {run.index: k})
-                        with open(run.impl_module_path, "w") as f:
+                        with open(run.rewrite_path, "w") as f:
                             f.write(cand)
                         await backend.check(run)
                         if run.valid:
@@ -1608,7 +1580,7 @@ async def main():
                     run.shrink_amount = best
                     run.valid = True
                     run.verdict = "proven"
-                    with open(run.impl_module_path, "w") as f:
+                    with open(run.rewrite_path, "w") as f:
                         f.write(mod.pc.cut_index_text([run.index], {run.index: best}))
             finally:
                 tracker.finish(id(run), getattr(run, "verdict", None), run.valid)
@@ -1657,7 +1629,7 @@ async def main():
     for mod in modules:
         for run in mod.runs:
             if run.valid:
-                shutil.copy2(run.impl_module_path, working_dir)
+                shutil.copy2(run.rewrite_path, working_dir)
                 n_working += 1
     status(f"{n_working} working cut source(s) copied to {working_dir}")
 
@@ -1706,12 +1678,11 @@ async def main():
             (
                 mod,
                 Run(
-                    top_module_path=f"{ctree_dir}/{top_name}.sv",
-                    spec_lib_path=ctree_dir,
-                    impl_module_path=out_path,
-                    impl_module_folder=work_dir,
-                    is_top=mod.is_top,
+                    golden=Design(top_name, ctree_dir),
+                    candidate=Design(top_name, ctree_dir).override(mod.name, out_path),
+                    work_dir=work_dir,
                     index=-1,
+                    rewrite_path=out_path,
                         ),
             )
         )
@@ -1780,7 +1751,7 @@ async def main():
             f"FATAL: consolidation error: the whole consolidated design {_failed_as(joint.verdict)} "
             f"the golden one (verdict={joint.verdict}). Cuts were proven one module at a time, so cuts "
             f"in different modules may conflict. Modules failing their own consolidated check: "
-            f"{', '.join(failed) or 'none'}. See {joint.impl_module_folder}.")
+            f"{', '.join(failed) or 'none'}. See {joint.work_dir}.")
     status(f"Consolidated design PROVEN ({applied} cuts)")
 
     tracker.set_phase("done")
