@@ -433,6 +433,13 @@ private:
     // the symbolic bound would silently widen it. One entry per dimension lets a
     // multi-packed-dim vector be shrunk on every dimension, not just literal ones.
     std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges;
+    // Names declared by the enclosing module's non-ANSI port declarations
+    // (`output [31:0] x;`). Their separate `reg [31:0] x;` / `wire [31:0] x;` is an
+    // ordinary data/net declaration, but narrowing it either contradicts the port
+    // line (illegal source that Jasper accepts and checks as if unshrunk) or, when
+    // the port line has no range, silently narrows the port. Ports are not cut
+    // targets -- ANSI ones never reach this collector -- so these are skipped too.
+    std::unordered_set<std::string> nonAnsiPorts;
 public:
     // Signed declarations, nets and multi-packed-dim vectors are all shrinkable by
     // both strategies -- narrow-in-place rebuilds the range, and the intermediate
@@ -440,6 +447,7 @@ public:
     explicit BitShrinkCollector(
         std::unordered_map<std::string, std::vector<std::pair<int, int>>> symbolicRanges = {})
         : symbolicRanges(std::move(symbolicRanges)) {}
+    void handle(const ModuleDeclarationSyntax&);
     void handle(const DeclaratorSyntax&);
     std::vector<BitShrinkTarget> getFoundNodes(const std::shared_ptr<SyntaxTree>);
 };

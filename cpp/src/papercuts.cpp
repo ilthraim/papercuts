@@ -1115,7 +1115,24 @@ void BitShrinker::handle(const SyntaxNode& node) {
     visitDefault(node);
 }
 
+void BitShrinkCollector::handle(const ModuleDeclarationSyntax& node) {
+    // Scope the non-ANSI port names to this module (nested modules get their own).
+    auto saved = std::move(nonAnsiPorts);
+    nonAnsiPorts.clear();
+    for (const auto* member : node.members) {
+        if (auto* port = member->as_if<PortDeclarationSyntax>()) {
+            for (const auto* d : port->declarators)
+                nonAnsiPorts.emplace(d->name.valueText());
+        }
+    }
+    visitDefault(node);
+    nonAnsiPorts = std::move(saved);
+}
+
 void BitShrinkCollector::handle(const DeclaratorSyntax& node) {
+    // The data/net redeclaration of a non-ANSI port; see nonAnsiPorts.
+    if (nonAnsiPorts.contains(std::string(node.name.valueText())))
+        return;
     // Pull the shared type off the declarator's parent. logic/reg/bit live in a
     // DataDeclarationSyntax; wire/tri/... live in a NetDeclarationSyntax.
     const DataTypeSyntax* type = nullptr;
