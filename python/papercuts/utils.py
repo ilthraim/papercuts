@@ -97,6 +97,33 @@ class Rename:
 #: Every verdict a backend may report. Only "proven" makes a run valid.
 #: "unmapped": the proof finished, but a point the check compares (a black-box
 #: input, say) had no partner on the other side, so it was compared with nothing.
+def clock_list(clock) -> list[str]:
+    """The design's clocks as a list of top-level signal names; [] for none.
+
+    A design can have several clocks, and a check that declares only some of them
+    drives the rest as ordinary inputs, at most half rate (rs_decoder's clock2,
+    ssp_uart), so wrong cuts prove. Every clock is therefore a list entry.
+
+    A single string is one clock, as `--clock` and every caller meant before the
+    list existed (scripts under runs/ and saved job configs still pass one); it is
+    never iterated, which would declare c, l and k for "clk". Anything else that
+    is not a list or tuple of names is refused.
+    """
+    if clock is None:
+        return []
+    if isinstance(clock, str):
+        clock = [clock]
+    if not isinstance(clock, (list, tuple)):
+        raise TypeError(f"clocks must be a list of signal names, got {clock!r}")
+    out = list(clock)
+    for c in out:
+        if not isinstance(c, str) or not c.strip() or any(ch.isspace() for ch in c):
+            raise ValueError(f"clock {c!r} is not a signal name")
+    if len(set(out)) != len(out):
+        raise ValueError(f"clock declared twice: {out}")
+    return out
+
+
 VERDICTS = ("proven", "cex", "inconclusive", "unmapped", "error")
 
 

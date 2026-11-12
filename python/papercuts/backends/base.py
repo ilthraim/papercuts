@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from abc import ABC, abstractmethod
 
-from papercuts.utils import VERDICTS, Run
+from papercuts.utils import VERDICTS, Run, clock_list
 
 
 class ECBackend(ABC):
@@ -36,9 +36,9 @@ class ECBackend(ABC):
     #: Short identifier used to select the backend on the command line.
     name: str = "base"
 
-    def __init__(self, clock: "str | None" = None, reset: "str | None" = None) -> None:
-        #: Top-level clock signal name, or None for a clock-free check.
-        self.clock = clock
+    def __init__(self, clock: "list[str] | None" = None, reset: "str | None" = None) -> None:
+        #: Every top-level clock signal, declared together; [] for a clock-free check.
+        self.clock = clock_list(clock)
         #: Top-level reset expression, or None for no reset constraint.
         self.reset = reset
 
@@ -52,10 +52,15 @@ class ECBackend(ABC):
         """
         parser.add_argument(
             "--clock",
+            action="append",
             default=None,
             metavar="SIGNAL",
-            help="Top-level clock signal to declare to the formal tool. "
-            "Omitted by default, which leaves the check clock-free.",
+            help="Top-level clock signal to declare to the formal tool. Repeat it "
+            "for every clock of a multi-clock design (--clock clk1 --clock clk2): all "
+            "are declared together, at the same rate and in phase. A clock left out "
+            "is an ordinary input that changes at most every other cycle, so cuts "
+            "that depend on it can prove wrongly. Omitted by default, which leaves "
+            "the check clock-free.",
         )
         parser.add_argument(
             "--reset",

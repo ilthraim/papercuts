@@ -9,10 +9,10 @@ cannot drift from the muxed source it describes.
 `build_manifest` / `check_manifest` / `write_manifest` write it; `Manifest`
 reads it back as a consumer does (the CEGIS cut selection, papercuts.cegis).
 
-Shape (version 1), paths relative to the manifest's own directory:
+Shape (version 2), paths relative to the manifest's own directory:
 
-    {"version": 1, "mode": "in-situ"|"elaborated", "top": "...", "mux_suffix": "_muxed",
-     "clock": "clk" | null, "reset": "!rst_n" | null,
+    {"version": 2, "mode": "in-situ"|"elaborated", "top": "...", "mux_suffix": "_muxed",
+     "clock": ["clk", ...], "reset": "!rst_n" | null,
      "files": {"golden": [...], "muxed": [...]},
      "modules": {
        "<module>": {
@@ -23,10 +23,17 @@ Shape (version 1), paths relative to the manifest's own directory:
          "exclusive": [[0, 1]],
          "forwarded": [{"port": "pc_sel_<child>_<i>", "module": "<child>", "index": i}]}}}
 
-`clock` and `reset` are the `--clock` / `--reset` this run was given, verbatim
-(null when absent): the signals papercuts' own formal checks declare. A consumer
-that checks the muxed design itself uses these, so both sides reason about the
-same clock and the same reset instead of each being told separately.
+`clock` is every `--clock` this run was given, in order ([] when none), and
+`reset` the `--reset`, verbatim (null when absent): the signals papercuts' own
+formal checks declare. A consumer that checks the muxed design itself uses
+these, so both sides reason about the same clocks and the same reset instead of
+each being told separately. A consumer must declare EVERY clock: one left out
+runs at most half rate, and cuts that depend on it prove wrongly.
+
+Version 2 made `clock` a list; version 1 held one name or null. `Manifest` reads
+both (a version-1 name was that run's only clock). The bump is deliberate: a
+reader that only knows version 1 refuses a version-2 manifest rather than
+taking a list of clocks for one.
 
 `inserted: false` marks a select that is RESERVED (the port exists, so cut
 indices stay aligned) but drives nothing: a family turned off with
@@ -41,15 +48,17 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from papercuts.utils import clock_list
 
 MANIFEST_NAME = "mux_manifest.json"
-VERSION = 1
+VERSION = 2
+READABLE_VERSIONS = (1, 2)
 
 
 def build_manifest(*, mode: str, top: str, suffix: str, modules, muxed_names: dict[str, str],
                    muxed_files: dict[str, str], golden_files: dict[str, str],
                    inserted: dict[str, set[int]], forwarded: dict[str, list[tuple[str, int]]],
-                   base_dir: str, clock: str | None = None, reset: str | None = None) -> dict:
+                   base_dir: str, clock: list[str] | None = None, reset: str | None = None) -> dict:
     """`modules` is the pipeline's ModuleCuts list; only those that were muxed appear."""
     def rel(p):
         return os.path.relpath(p, base_dir)
@@ -79,7 +88,7 @@ def build_manifest(*, mode: str, top: str, suffix: str, modules, muxed_names: di
         "mode": mode,
         "top": top,
         "mux_suffix": suffix,
-        "clock": clock,
+        "clock": clock_list(clock),
         "reset": reset,
         "files": {
             "golden": sorted({rel(p) for p in golden_files.values()}),
@@ -189,7 +198,7 @@ class Manifest:
 
         m = Manifest.load("outputs/mux_manifest.json")
         m.top, m.muxed_top          # module to miter, and its muxed twin
-        m.clock, m.reset            # the run's --clock / --reset (None if not given)
+        m.clock, m.reset            # the run's --clock list ([] if none) / --reset (None)
         m.golden_files, m.muxed_files
         m.testable                  # cuts reachable from a top-level port
         m.untested                  # reserved selects that drive nothing
@@ -202,13 +211,24 @@ class Manifest:
         self.dir = os.path.dirname(self.path)
         self.data = data
         v = data.get("version")
-        if v != VERSION:
-            raise ManifestError(f"{path}: manifest version {v!r}, this reader supports {VERSION}")
+        if v not in READABLE_VERSIONS:
+            raise ManifestError(f"{path}: manifest version {v!r}, this reader supports {READABLE_VERSIONS}")
         self.mode = data.get("mode", "?")
         self.top = data["top"]
         self.suffix = data.get("mux_suffix", "")
-        # Optional fields: manifests written before papercuts recorded them read as None.
-        self.clock = data.get("clock")
+        # Optional fields: manifests written before papercuts recorded them read as
+        # none. Version 1 held one clock name (or null); version 2 holds the list.
+        clock = data.get("clock")
+        if v == 1:
+            if clock is not None and not isinstance(clock, str):
+                raise ManifestError(f"{path}: version-1 clock must be a name or null, got {clock!r}")
+            clock = [clock] if clock else []
+        elif clock is not None and not isinstance(clock, list):
+            raise ManifestError(f"{path}: version-2 clock must be a list of names, got {clock!r}")
+        try:
+            self.clock = clock_list(clock)
+        except (TypeError, ValueError) as e:
+            raise ManifestError(f"{path}: {e}") from None
         self.reset = data.get("reset")
         mods = data["modules"]
         if self.top not in mods:

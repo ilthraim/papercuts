@@ -13,7 +13,7 @@ from papercuts.ec import generate_jasper_tcl_script
 
 
 def run():
-    tcl = generate_jasper_tcl_script(clock="clk")
+    tcl = generate_jasper_tcl_script(clock=["clk"])
     spec = tcl[tcl.index("check_sec -compile_context spec"):tcl.index("check_sec -compile_context imp")]
     analyzes = [l.strip() for l in spec.splitlines() if l.strip().startswith("analyze")]
     assert analyzes == [

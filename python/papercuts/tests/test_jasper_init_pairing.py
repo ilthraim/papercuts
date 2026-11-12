@@ -14,7 +14,7 @@ from papercuts.ec import generate_jasper_tcl_script
 
 
 def run():
-    tcl = generate_jasper_tcl_script(clock="clk")
+    tcl = generate_jasper_tcl_script(clock=["clk"])
     rule = tcl.index("check_sec -interface -unmapped -imp -signal_type reset_x")
     assert tcl.index("source [lindex $argv 9]") < rule, tcl
     assert tcl.index("check_sec -auto_map_reset_x_values on") < rule, tcl

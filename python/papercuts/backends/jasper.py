@@ -11,13 +11,13 @@ class JasperBackend(ECBackend):
     """Default backend: Cadence JasperGold SEC, run directly via ``ec.run_jasper``.
 
     Requires ``jg``/``csh`` on PATH. Writes its own SEC script (``pcjg.tcl``) in
-    :meth:`prepare`, baking in the ``--clock``/``--reset`` declarations; ``jg``
+    :meth:`prepare`, baking in the ``--clock`` (every one)/``--reset`` declarations; ``jg``
     is invoked from the same working directory the script is written to.
     """
 
     name = "jg"
 
-    def __init__(self, clock: "str | None" = None, reset: "str | None" = None,
+    def __init__(self, clock: "list[str] | None" = None, reset: "str | None" = None,
                  bbox_array: "int | None" = None, engines: int = 0) -> None:
         super().__init__(clock=clock, reset=reset)
         self.bbox_array = bbox_array

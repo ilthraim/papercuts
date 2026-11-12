@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple, TYPE_CHECKING
 import pyslang
 
 import papercuts.utils as pc_core
-from papercuts.utils import print_tree
+from papercuts.utils import clock_list, print_tree
 
 
 # MARK: Jasper Wrapper
@@ -269,15 +269,19 @@ def generate_jasper_tcl_script_old(wrapper_name: str) -> str:
 
     return tcl_script
 
-def generate_jasper_tcl_script(clock: "str | None" = None,
+def generate_jasper_tcl_script(clock: "list[str] | None" = None,
                                reset: "str | None" = None,
                                bbox_array: "int | None" = None,
                                engines: int = 0) -> str:
     """Render the SEC script, optionally declaring a clock and a reset.
 
-    ``clock`` is a top-level signal name and ``reset`` a top-level expression,
-    emitted verbatim as Jasper's ``clock``/``reset`` commands. Both default to
-    None, which keeps the clock-free ``clock -none`` / ``reset -none`` setup.
+    ``clock`` is the list of top-level clock signals and ``reset`` a top-level
+    expression, emitted verbatim as Jasper's ``clock``/``reset`` commands. All
+    clocks go in one ``clock c1 c2 ...``: declared together, they run at the same
+    rate and in phase. An undeclared clock is a plain input that changes at most
+    once per declared cycle, so logic needing it faster is never exercised and
+    cuts there "prove" (rs_decoder, ssp_uart). Both default to None, which keeps
+    the clock-free ``clock -none`` / ``reset -none`` setup.
 
     Every check elaborates the design top, named with ``elaborate -top`` in both
     compile contexts, so a single pair of top-level names is correct for every
@@ -334,7 +338,8 @@ if {[catch {
     # argument and suppress TCL substitution of any $ or [ inside the SV
     # expression. A bare signal name is unaffected by the bracing.
     tcl_script += f"    reset {'{' + reset + '}' if reset else '-none'}\n"
-    tcl_script += f"    clock {clock if clock else '-none'}\n"
+    clocks = clock_list(clock)
+    tcl_script += f"    clock {' '.join(clocks) if clocks else '-none'}\n"
     tcl_script += """    check_sec -setup
     check_sec -auto_map_reset_x_values on
     # Names the candidate changed (Run.renames); auto-mapping re-runs with them

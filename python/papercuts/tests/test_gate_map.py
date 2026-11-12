@@ -80,7 +80,7 @@ def run():
     # a golden name Jasper may spell differently is left unmapped (fails loudly)
     assert jasper_map_script((Rename("signal", "\\esc[ .x", "esc_x"),)) == ""
 
-    tcl = generate_jasper_tcl_script(clock="clk")
+    tcl = generate_jasper_tcl_script(clock=["clk"])
     assert 'if {[lindex $argv 9] ne "-"}' in tcl and "source [lindex $argv 9]" in tcl, tcl
     assert tcl.index("source [lindex $argv 9]") > tcl.index("check_sec -setup"), tcl
     return f"{len(lines)} map commands: instance rules deepest first, -init for signals, pruned left out"
