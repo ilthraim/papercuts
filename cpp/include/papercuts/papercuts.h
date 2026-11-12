@@ -705,15 +705,19 @@ private:
     // run's narrowing (nullopt for a dimension with no known bounds). Narrowing only edits
     // the declaration, so a constant select that reaches the dropped bits
     // (`x[3:0]`, `x[3]` once x is `[2:0]`) would be out of range; selects are
-    // rewritten against this (see handle(IdentifierSelectNameSyntax)).
+    // rewritten against this (see handle(IdentifierSelectNameSyntax)). A bare
+    // name connected to an input port is padded back to its declared width
+    // (padNarrowedConnection).
     struct NarrowedSignal {
         size_t numUnpacked = 0;
+        bool isSigned = false;
         std::vector<std::optional<std::pair<int, int>>> origDims;
         std::vector<std::optional<std::pair<int, int>>> newDims;
         std::vector<bool> narrowed;
     };
     std::unordered_map<std::string, NarrowedSignal> narrowedSignals;
     void rewriteNarrowedSelect(const IdentifierSelectNameSyntax& node, const NarrowedSignal& sig);
+    void padNarrowedConnection(const IdentifierNameSyntax& node, const NarrowedSignal& sig);
 
     // Ternary remover variables
     std::vector<const ConditionalExpressionSyntax*> ternaryNodes;

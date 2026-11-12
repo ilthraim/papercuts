@@ -2103,6 +2103,12 @@ void Papercutter::selectCuts(const std::vector<size_t>& indicesToCut,
             continue;
         NarrowedSignal sig;
         sig.numUnpacked = decl->dimensions.size();
+        std::optional<DeclShape> shape;
+        if (auto* dd = decl->parent->as_if<DataDeclarationSyntax>())
+            shape = shapeOf(*dd);
+        else if (auto* nd = decl->parent->as_if<NetDeclarationSyntax>())
+            shape = shapeOf(*nd);
+        sig.isSigned = shape && shape->isSigned;
         auto evaluated = evaluatedRanges.find(std::string(decl->name.valueText()));
         for (size_t di = 0; di < dims->size(); ++di) {
             auto range = literalRangeOf(*(*dims)[di]);
@@ -2597,10 +2603,14 @@ void Papercutter::handle(const BinaryExpressionSyntax& node) {
 
 }
 
-// True when `cur` is the whole expression of a port connection whose port is not
-// an input. The connection's direction is the child's, so it comes from `ports`
-// (PortDirections); a connection that cannot be resolved counts as a write.
-static bool isOutputConnection(const SyntaxNode* cur, const PortDirections* ports) {
+// Whether `cur` is the whole expression of a port connection, and if so the
+// direction of the child's port: "in", "out", "inout", "ref", or nullopt when the
+// connection cannot be resolved (no map, module or port unknown).
+struct ConnectionDirection {
+    bool isConnection = false;
+    std::optional<std::string> dir;
+};
+static ConnectionDirection connectionDirection(const SyntaxNode* cur, const PortDirections* ports) {
     const SyntaxNode* p = cur->parent;
     // a connection's expression sits inside property/sequence wrappers
     while (p && (p->kind == SyntaxKind::ParenthesizedExpression || p->kind == SyntaxKind::SimpleSequenceExpr ||
@@ -2609,7 +2619,8 @@ static bool isOutputConnection(const SyntaxNode* cur, const PortDirections* port
         p = p->parent;
     }
     if (!p || (p->kind != SyntaxKind::NamedPortConnection && p->kind != SyntaxKind::OrderedPortConnection))
-        return false;
+        return {};
+    ConnectionDirection out{true, std::nullopt};
     const SyntaxNode* conn = p;
     const SyntaxNode* inst = conn->parent;
     while (inst && inst->kind != SyntaxKind::HierarchicalInstance)
@@ -2618,25 +2629,36 @@ static bool isOutputConnection(const SyntaxNode* cur, const PortDirections* port
     while (instantiation && instantiation->kind != SyntaxKind::HierarchyInstantiation)
         instantiation = instantiation->parent;
     if (!inst || !instantiation || !ports)
-        return true;
+        return out;
     auto def = ports->find(std::string(instantiation->as<HierarchyInstantiationSyntax>().type.valueText()));
     if (def == ports->end())
-        return true;
+        return out;
     const auto& list = def->second;
     if (conn->kind == SyntaxKind::NamedPortConnection) {
         std::string name{conn->as<NamedPortConnectionSyntax>().name.valueText()};
         for (const auto& [port, dir] : list)
             if (port == name)
-                return dir != "in";
-        return true;
+                out.dir = dir;
+        return out;
     }
     size_t idx = 0;
     for (auto* c : inst->as<HierarchicalInstanceSyntax>().connections) {
-        if (c == conn)
-            return idx < list.size() ? list[idx].second != "in" : true;
+        if (c == conn) {
+            if (idx < list.size())
+                out.dir = list[idx].second;
+            return out;
+        }
         ++idx;
     }
-    return true;
+    return out;
+}
+
+// True when `cur` is the whole expression of a port connection whose port is not
+// an input. The connection's direction is the child's, so it comes from `ports`
+// (PortDirections); a connection that cannot be resolved counts as a write.
+static bool isOutputConnection(const SyntaxNode* cur, const PortDirections* ports) {
+    auto c = connectionDirection(cur, ports);
+    return c.isConnection && c.dir != "in";
 }
 
 // True when this identifier sits in a write position -- the LHS of any
@@ -2693,8 +2715,12 @@ void Papercutter::handle(const IdentifierNameSyntax& node) {
             return;
         }
     }
-    // Narrow mode never renames reads for bit-shrink.
+    // Narrow mode never renames reads for bit-shrink. It does pad a narrowed
+    // signal connected to an input port back to its declared width.
     if (!shrinkWithIntermediate) {
+        auto it = narrowedSignals.find(std::string(node.identifier.valueText()));
+        if (it != narrowedSignals.end() && connectionDirection(&node, &portDirections).dir == "in")
+            padNarrowedConnection(node, it->second);
         visitDefault(node);
         return;
     }
@@ -2806,6 +2832,53 @@ void Papercutter::handle(const CaseStatementSyntax& node) {
 // Anything else (non-constant or indexed `+:` selects, writes inside an LHS
 // concatenation, ...) is left alone; a cut whose source is then still illegal
 // simply fails its check as before.
+// A narrowed signal connected by name alone to an input port (`.in2(x)`) relies
+// on the port connection extending it implicitly. That is legal and the formal
+// tool accepts it, but Fusion Compiler folds a [0:0] net driven only by a
+// constant into a scalar and then refuses to link it to a bus port (LNK-042,
+// rs_decoder). So write the extension out: pad the narrowed value back to the
+// width the signal was declared with, which is what the connection was sized
+// against before the cut. The dropped bits read as 0, as they do for a bare
+// narrowed read in an expression; a signed signal takes copies of its new top
+// bit and stays signed, so the port still sign-extends it as before.
+// Only the outermost packed dimension may be narrowed: narrowing an inner one
+// reshapes the flattened vector rather than dropping its high bits, so such a
+// connection (and an unpacked or unknown-bound one) is left as written.
+void Papercutter::padNarrowedConnection(const IdentifierNameSyntax& node, const NarrowedSignal& sig) {
+    if (sig.numUnpacked != 0 || sig.origDims.empty())
+        return;
+    int inner = 1;
+    for (size_t d = 0; d < sig.origDims.size(); ++d) {
+        if (!sig.origDims[d] || !sig.newDims[d])
+            return;
+        if (d > 0) {
+            if (sig.narrowed[d])
+                return;
+            inner *= std::abs(sig.origDims[d]->first - sig.origDims[d]->second) + 1;
+        }
+    }
+    int origOuter = std::abs(sig.origDims[0]->first - sig.origDims[0]->second) + 1;
+    int newOuter = std::abs(sig.newDims[0]->first - sig.newDims[0]->second) + 1;
+    int pad = (origOuter - newOuter) * inner;
+    if (pad <= 0)
+        return;
+
+    std::string name{node.identifier.valueText()};
+    std::string text;
+    if (sig.isSigned) {
+        std::string msb = name;
+        for (const auto& dim : sig.newDims)
+            msb += "[" + std::to_string(dim->first) + "]";
+        text = "$signed({" + fillBits(pad, msb) + ", " + name + "})";
+    } else {
+        text = "{" + std::to_string(pad) + "'b0, " + name + "}";
+    }
+    std::string trivia;
+    for (const auto& t : node.getFirstToken().trivia())
+        trivia += t.getRawText();
+    replace(node, parse(trivia + text));
+}
+
 void Papercutter::rewriteNarrowedSelect(const IdentifierSelectNameSyntax& node, const NarrowedSignal& sig) {
     const auto& sels = node.selectors;
     if (sels.size() <= sig.numUnpacked)
