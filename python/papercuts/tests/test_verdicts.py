@@ -63,10 +63,11 @@ def run():
     assert _parse_verdict(_out("DETERMINED"), 1) == "cex"
     assert _parse_verdict(_out("cex") + _out("proven"), 0) == "proven"
 
-    # No marker: the tool died before printing, so fall back to the exit code
-    # rather than losing the run.
-    assert _parse_verdict("no marker here\n", 0) == "proven"
+    # No marker: the tool died or was stopped before printing. Never "proven",
+    # whatever the exit code: a stopped Jasper exits 0 (stopped_by_user).
+    assert _parse_verdict("no marker here\n", 0) == "error"
     assert _parse_verdict("no marker here\n", 1) == "error"
+    assert _parse_verdict("SEC Proof Result: stopped_by_user\n", 0) == "error"
 
     print(f"test_verdicts: OK ({len(CASES)} statuses + marker fallbacks)")
 

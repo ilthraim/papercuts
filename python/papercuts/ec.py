@@ -409,9 +409,11 @@ def _parse_verdict(output: str, returncode: int) -> str:
     """Normalize the tool's proof verdict into a small, stable vocabulary.
 
     Returns one of "proven" | "cex" | "inconclusive" | "error". The TCL prints
-    ``__PC_VERDICT__:<res>`` (or ``:error`` on a caught exception); if the marker
-    is absent (e.g. the tool was killed before it printed), fall back to the exit
-    code so a crashed/aborted run is still recorded as an error rather than lost.
+    ``__PC_VERDICT__:<res>`` (or ``:error`` on a caught exception). No marker is
+    always "error", whatever the exit code: Jasper stopped from outside (SIGTERM,
+    a batch system's kill, an exit request from the console) logs
+    ``stopped_by_user`` and exits 0 without printing the marker, so reading the
+    exit code turned the check that was running into "proven".
 
     The vocabulary the prover reports is wider than it first appears. A proof
     only returns "proven" when *every* property has that same status; a run that
@@ -432,7 +434,7 @@ def _parse_verdict(output: str, returncode: int) -> str:
         if line.startswith(_VERDICT_MARKER):
             raw = line[len(_VERDICT_MARKER):].strip().lower()
     if raw is None:
-        return "proven" if returncode == 0 else "error"
+        return "error"
     if raw in ("proven", "marked_proven"):
         return "proven"
     # Fully decided, and not all-proven => at least one property was refuted.
