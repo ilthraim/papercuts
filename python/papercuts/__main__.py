@@ -37,6 +37,7 @@ from papercuts.pypercuts import (
     rename_module,
     wire_mux_hierarchy,
 )
+from papercuts.repair import ChainLimits, Checker, CutSet, FinalCheckError, finalize
 from papercuts.status import StatusWriter
 from papercuts.utils import Design, Run, print_tree, set_verbose, status
 
@@ -114,28 +115,27 @@ def write_papercuts_log(
     log_path: str,
     modules: list[ModuleCuts],
     checked: bool,
-    final_runs: list[tuple[ModuleCuts, Run]] | None = None,
     fv_gate: str | None = None,
     prune_stats=None,
     cegis: list[str] | None = None,
     joint: Run | None = None,
+    final=None,
 ) -> None:
     """Write a text summary of every papercut that was tried.
 
     One row per cut: module, index, type, source line, and valid (Y/N). When
     equivalence checking was not requested, validity is unknown and shown as '-'.
 
-    When ``final_runs`` is provided (after consolidation), a second section
-    reports each module's consolidated run: how many valid cuts were merged and
-    whether the merged source verified (PROVEN/FAILED).
+    ``final`` (--method fv, a repair.FinalResult) is the final check of every
+    proven cut: its first verdict, the cuts dropped and why, and the proof.
 
     Under --method cegis-comb, ``cegis`` holds the run's header lines, rows gain
     a `set` column (Y: in the selected set), valid is the cut's validity on its
     own under the combinational spec ('-' not checked, 'U' untested: its select
     drives nothing).
 
-    ``joint`` is the one check of the whole consolidated design, under either
-    method.
+    ``joint`` is the one check of the whole consolidated design under
+    --method cegis-comb.
     """
     total = sum(len(m.runs) for m in modules)
     valid = sum(1 for m in modules for r in m.runs if r.valid)
@@ -166,9 +166,7 @@ def write_papercuts_log(
             rows.append((m.name, idx, ctype, line, "ERR", "-"))
 
     # Column widths for aligned output (account for both sections' module names).
-    mod_names = [r[0] for r in rows] + (
-        [m.name for m, _ in final_runs] if final_runs else []
-    )
+    mod_names = [r[0] for r in rows]
     w_mod = max([len("module")] + [len(n) for n in mod_names], default=len("module"))
     w_type = max([len("type")] + [len(r[2]) for r in rows], default=len("type"))
 
@@ -265,17 +263,19 @@ def write_papercuts_log(
                         + "\n"
                     )
 
-        if final_runs is not None:
-            n_proven = sum(1 for _, fr in final_runs if fr.valid)
-            f.write("\n")
-            f.write(
-                f"# consolidated runs: {n_proven}/{len(final_runs)} verified\n"
-            )
-            f.write(f"# {'module':<{w_mod}}  {'applied':>7}  result\n")
-            for m, fr in final_runs:
-                applied = sum(1 for r in m.runs if r.valid)
-                result = "PROVEN" if fr.valid else "FAILED"
-                f.write(f"  {m.name:<{w_mod}}  {applied:>7}  {result}\n")
+        if final is not None:
+            n = len(final.kept) + len(final.dropped)
+            f.write(f"\n# final check of all {n} proven cuts: {final.first_verdict}\n")
+            if final.conflicts:
+                f.write(f"# repaired: {len(final.conflicts)} conflict(s)\n")
+                for c in final.conflicts:
+                    f.write("  conflict: " + " ".join(f"{m}#{i}" for m, i in c) + "\n")
+            for (m, i), why in final.dropped:
+                back = final.added_back.get(f"{m}#{i}")
+                f.write(f"  dropped {m}#{i} ({why}" + (f"; added back alone: {back}" if back else "") + ")\n")
+            how = (f"a chain of {len(final.proof['steps'])} checks" if final.proof["kind"] == "chain"
+                   else "one check")
+            f.write(f"# final design ({len(final.kept)} cuts kept): PROVEN by {how}\n")
 
         if joint is not None:
             result = "PROVEN" if joint.valid else f"FAILED ({joint.verdict})"
@@ -773,8 +773,35 @@ async def main():
         default=None,
         metavar="SECONDS",
         help="Time budget of each per-cut equivalence check; a check that runs out "
-        "is inconclusive and the cut is not applied. Gates and consolidation checks "
-        "are not limited. Default: none.",
+        "is inconclusive and the cut is not applied. Also the budget of the final "
+        "check of all proven cuts and of each repair check: a final set with no "
+        "verdict in it is proven by a chain instead (--chain-*). The gates are not "
+        "limited. Default: none, so no chain is ever needed.",
+    )
+    parser.add_argument(
+        "--chain-group-limit", type=int, default=300, metavar="SECONDS",
+        help="Chain proof: budget of each group's check; a group not proven in it is "
+        "split in half (default: 300).",
+    )
+    parser.add_argument(
+        "--chain-single-limit", type=int, default=900, metavar="SECONDS",
+        help="Chain proof: first budget of a single cut's check, or 3x the time of its "
+        "own check if longer (default: 900).",
+    )
+    parser.add_argument(
+        "--chain-retry-limit", type=int, default=3600, metavar="SECONDS",
+        help="Chain proof: budget of the one retry of a single cut with no verdict, or "
+        "twice its first budget if longer; with no verdict again the cut is dropped "
+        "(default: 3600).",
+    )
+    parser.add_argument(
+        "--chain-group-size", type=int, default=16, metavar="N",
+        help="Chain proof: cuts per group (default: 16).",
+    )
+    parser.add_argument(
+        "--chain-slow-cut", type=float, default=60, metavar="SECONDS",
+        help="Chain proof: cuts whose own check took longer go first, one per group "
+        "(default: 60).",
     )
     parser.add_argument(
         "--cegis-ignore-initial",
@@ -1519,6 +1546,7 @@ async def main():
     semaphore = asyncio.Semaphore(args.max_jobs)
     total = len(all_runs)
     done = 0
+    cut_secs: dict[tuple[str, int], float] = {}
 
     async def run_with_limit(run: Run):
         nonlocal done
@@ -1584,13 +1612,15 @@ async def main():
                         f.write(mod.pc.cut_index_text([run.index], {run.index: best}))
             finally:
                 tracker.finish(id(run), getattr(run, "verdict", None), run.valid)
+                # The chain proof orders cuts by how long their own check took.
+                cut_secs[(mname, run.index)] = round(time.time() - t0, 3)
                 # Durable per-cut record, appended the moment the check finishes.
                 append_result(results_path, {
                     "ts": time.time(), "phase": "cuts", "module": mname,
                     "idx": run.index, "type": ctype, "line": line,
                     "valid": run.valid, "verdict": getattr(run, "verdict", None),
                     "shrink_amount": run.shrink_amount,
-                    "elapsed": round(time.time() - t0, 3),
+                    "elapsed": cut_secs[(mname, run.index)],
                 })
             done += 1
             verdict = "PROVEN" if run.valid else "failed"
@@ -1633,126 +1663,64 @@ async def main():
                 n_working += 1
     status(f"{n_working} working cut source(s) copied to {working_dir}")
 
-    # MARK: Phase 3 -- consolidate each module's valid cuts, then verify the
-    # merged result. Each final run gets its own working dir so the checks can
-    # also run in parallel without colliding on jgproject/run directories.
-    status("Consolidating valid cuts...")
-    final_runs: list[tuple[ModuleCuts, Run]] = []
-    consolidated_texts: list[str] = []
-    for mod in modules:
-        out_path = f"{consolidated_dir}/{mod.name}.sv"
-
-        if mod.excluded:
-            # Emit the untouched module so the consolidated design is complete,
-            # but don't re-verify it -- nothing was cut.
-            text = print_tree(mod.tree)
-            with open(out_path, "w") as f:
-                f.write(text)
-            consolidated_texts.append(text)
+    # MARK: Phase 3 -- combine every proven cut and prove the whole design (8).
+    # The final check compares the combined design with the elaborated one, which
+    # the gate proved equal to the original. A counterexample means cuts conflict,
+    # and the set is repaired (7); no verdict within --fv-time-limit means the set
+    # is proven by a chain of small checks instead. See repair.py.
+    status("Combining the proven cuts...")
+    cuts_on = {(m.name, r.index): r.shrink_amount for m in modules for r in m.runs if r.valid}
+    cutset = CutSet(modules, prune=args.prune_dead and not args.in_situ, fold_constants=args.fold_constants)
+    pairs = {}
+    for m in modules:
+        if m.pc is None:
             continue
-
-        working = [run.index for run in mod.runs if run.valid]
-        # Per-index shrink amounts so a bitshrink cut that was greedily narrowed to
-        # N bits merges at N bits (not 1). cut_index ignores amounts for non-bitshrink
-        # indices, so passing every valid run's amount is safe.
-        amounts = {run.index: run.shrink_amount for run in mod.runs if run.valid}
-        consolidated_text = (
-            print_tree(mod.pc.cut_index(working, amounts)) if working
-            else print_tree(mod.tree)
-        )
-        # Re-prune after cutting: a cut can leave logic that now feeds nothing.
-        # Skipped under --in-situ (pruning re-emits, which would defeat in-situ's
-        # cut-original-source premise). The consolidated FV check below verifies
-        # this pruned source against the golden, so the prune is proven too.
-        if args.prune_dead and not args.in_situ:
-            consolidated_text, _ = prune_dead_source(
-                consolidated_text, mod.name, fold_constants=args.fold_constants
-            )
-        with open(out_path, "w") as f:
-            f.write(consolidated_text)
-        consolidated_texts.append(consolidated_text)
-
-        work_dir = f"{consolidated_dir}/{mod.name}"
-        os.makedirs(work_dir, exist_ok=True)
-        final_runs.append(
-            (
-                mod,
-                Run(
-                    golden=Design(top_name, ctree_dir),
-                    candidate=Design(top_name, ctree_dir).override(mod.name, out_path),
-                    work_dir=work_dir,
-                    index=-1,
-                    rewrite_path=out_path,
-                        ),
-            )
-        )
-
-    # Register consolidated runs as pending, then check them (in parallel).
-    tracker.set_phase("consolidate")
-    for m, fr in final_runs:
-        tracker.register(id(fr), "consolidate", m.name)
-
-    async def check_final(mod: ModuleCuts, final_run: Run):
-        async with semaphore:
-            tracker.start(id(final_run))
-            t0 = time.time()
-            try:
-                return await backend.check(final_run)
-            finally:
-                tracker.finish(
-                    id(final_run),
-                    getattr(final_run, "verdict", None),
-                    final_run.valid,
-                )
-                append_result(results_path, {
-                    "ts": time.time(), "phase": "consolidate", "module": mod.name,
-                    "idx": -1, "type": "consolidated", "line": None,
-                    "valid": final_run.valid,
-                    "verdict": getattr(final_run, "verdict", None),
-                    "applied": sum(1 for r in mod.runs if r.valid),
-                    "elapsed": round(time.time() - t0, 3),
-                })
-
-    status(f"Verifying {len(final_runs)} consolidated module(s)...")
-    await asyncio.gather(*(check_final(m, fr) for m, fr in final_runs))
-
-    for mod, fr in final_runs:
-        status(f"consolidated {mod.name}: {'PROVEN' if fr.valid else 'FAILED'}")
-
-    # Each check above has one consolidated module among golden ones, so none of
-    # them shows that the modules' cuts hold together. This one does. It keeps the
-    # reset the cuts were proven under: unlike a CEGIS set, FV cuts may rely on
-    # reachability from reset.
-    joint = _joint_run(consolidated_texts, consolidated_dir, ctree_dir, top_name)
-    applied = sum(1 for m in modules for r in m.runs if r.valid)
-    status("Verifying the whole consolidated design...")
-    tracker.start(id(joint), "consolidate", "joint")
-    t0 = time.time()
+        for x, y in m.pc.cut_pairs():
+            if (m.name, x) in cuts_on and (m.name, y) in cuts_on:
+                pairs[(m.name, x)], pairs[(m.name, y)] = (m.name, y), (m.name, x)
+    checker = Checker(cutset, cuts_on, backend=backend, semaphore=semaphore,
+                      work_dir=f"{output_dir}/final", golden_dir=ctree_dir, top=top_name,
+                      results_path=results_path, tracker=tracker)
+    limits = ChainLimits(group_s=args.chain_group_limit, single_s=args.chain_single_limit,
+                         retry_s=args.chain_retry_limit, group_size=args.chain_group_size,
+                         slow_s=args.chain_slow_cut)
+    tracker.set_phase("final")
+    status(f"Verifying the whole design with {len(cuts_on)} cuts...")
     try:
-        await backend.check(joint)
-    finally:
-        tracker.finish(id(joint), joint.verdict, joint.valid)
-        append_result(results_path, {
-            "ts": time.time(), "phase": "consolidate", "method": "fv", "module": top_name,
-            "idx": -1, "type": "joint", "line": None, "valid": joint.valid, "verdict": joint.verdict,
-            "applied": applied, "elapsed": round(time.time() - t0, 3),
-        })
+        final = await finalize(checker, list(cuts_on), cut_secs, args.fv_time_limit, limits, pairs=pairs,
+                               log=status)
+    except FinalCheckError as e:
+        await checker.drain()  # leave no formal tool running behind the exit
+        write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate_result, prune_stats=prune_stats)
+        raise SystemExit(f"FATAL: final check: {e}. See {output_dir}/final.")
 
-    # Rewrite the log now that consolidation verdicts are known, so the final
-    # papercuts.log includes both the per-cut table and the consolidated results.
-    write_papercuts_log(
-        log_path, modules, checked=True, final_runs=final_runs, fv_gate=fv_gate_result,
-        prune_stats=prune_stats, joint=joint,
-    )
-    status(f"Consolidated results written to {log_path}")
-    if not joint.valid:
-        failed = [m.name for m, fr in final_runs if not fr.valid]
-        raise SystemExit(
-            f"FATAL: consolidation error: the whole consolidated design {_failed_as(joint.verdict)} "
-            f"the golden one (verdict={joint.verdict}). Cuts were proven one module at a time, so cuts "
-            f"in different modules may conflict. Modules failing their own consolidated check: "
-            f"{', '.join(failed) or 'none'}. See {joint.work_dir}.")
-    status(f"Consolidated design PROVEN ({applied} cuts)")
+    # The final design: the elaborated RTL with every kept cut applied.
+    kept = {k: cuts_on[k] for k in final.kept}
+    texts = cutset.texts(kept)
+    for mname, text in texts.items():
+        with open(f"{consolidated_dir}/{mname}.sv", "w") as f:
+            f.write(text)
+    _joint_run(list(texts.values()), consolidated_dir, ctree_dir, top_name)
+
+    info = {(m.name, i): m.cut_infos[i] for m in modules for i in range(len(m.cut_infos))}
+
+    def desc(k):
+        return {"module": k[0], "idx": k[1], "type": info[k][0], "line": info[k][1], "amount": cuts_on[k]}
+
+    with open(f"{output_dir}/final_check.json", "w") as f:
+        json.dump({
+            "proven": len(cuts_on), "first_verdict": final.first_verdict, "kept_count": len(final.kept),
+            "kept": [[m, i, cuts_on[(m, i)]] for m, i in final.kept],
+            "dropped": [{**desc(k), "reason": why} for k, why in final.dropped],
+            "conflicts": [[desc(k) for k in c] for c in final.conflicts],
+            "added_back": final.added_back, "proof": final.proof, "checks": final.checks,
+        }, f, indent=1)
+    write_papercuts_log(log_path, modules, checked=True, fv_gate=fv_gate_result, prune_stats=prune_stats,
+                        final=final)
+    status(f"Final results written to {log_path} and {output_dir}/final_check.json")
+    how = f"a chain of {len(final.proof['steps'])} checks" if final.proof["kind"] == "chain" else "one check"
+    status(f"Final design PROVEN by {how}: {len(final.kept)} of {len(cuts_on)} proven cuts kept"
+           + (f", dropped {', '.join(f'{m}#{i}' for (m, i), _ in final.dropped)}" if final.dropped else ""))
 
     tracker.set_phase("done")
 
